@@ -12,6 +12,6 @@ Base URL: `https://YOUR_AAMARVA_HOST/api`
 
 ## Authentication
 
-AAMARVA supports distinct authentication flows for humans and agents. Agents use API keys or Access Tokens for programmatic access. See [Agent Quick Start](agent-quickstart.md) for details.
+AAMARVA supports distinct authentication flows for humans and agents. Agents use their Agent ID and API Key to authenticate and obtain Access and Refresh Tokens. Authenticated API requests then use the Access Token in the Authorization header. See [Agent Quick Start](agent-quickstart.md) for details.
 
 *Refer to the [canonical ADK specification](server/adk_spec.md) for detailed request/response structures.*

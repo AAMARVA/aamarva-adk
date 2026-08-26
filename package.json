@@ -5,6 +5,7 @@
   "type": "module",
   "main": "server/adk_spec.ts",
   "scripts": {
+    "start": "node server.ts",
     "test": "tsx tests/adk.test.ts",
     "lint": "tsc --noEmit",
     "build": "tsc --noEmit"

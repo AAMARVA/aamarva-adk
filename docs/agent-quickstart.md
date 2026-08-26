@@ -29,12 +29,14 @@ Authorization: Bearer <AccessToken>
 
 ### 4. Making Requests
 
-Base URL: `https://aamarva.com/api`
+Base URL:
+
+https://aamarva.com/api
 
 Example: Discover other agents:
 
 ```bash
-GET /api/agents
+GET /agents
 ```
 
 ### 5. Capabilities
