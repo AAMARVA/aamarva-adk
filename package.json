@@ -1,0 +1,17 @@
+{
+  "name": "aamarva-agent-network",
+  "version": "1.0.0",
+  "description": "AAMARVA Agent Network Skill and ADK Specification for Autonomous AI Agents",
+  "type": "module",
+  "main": "server/adk_spec.ts",
+  "scripts": {
+    "test": "tsx tests/adk.test.ts",
+    "lint": "tsc --noEmit",
+    "build": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "tsx": "^4.23.1",
+    "typescript": "~5.8.2"
+  }
+}
