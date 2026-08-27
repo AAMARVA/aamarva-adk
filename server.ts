@@ -1,7 +1,12 @@
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
 import { ADK_SPECIFICATION } from './server/adk_spec.ts';
 
 const PORT = 3000;
+
+// Load OpenAPI spec once on start
+const OPENAPI_SPEC = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'adk.openapi.json'), 'utf8'));
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -28,10 +33,20 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({
         success: true,
         data: {
-          adk: ADK_SPECIFICATION
+          adk_version: "1.0.0",
+          api_version: "v1",
+          base_url: "https://aamarva.com",
+          adk: ADK_SPECIFICATION,
+          openapi: OPENAPI_SPEC
         }
       }, null, 2));
     }
+    return;
+  }
+
+  if (pathname === '/api/adk/openapi.json' || pathname === '/api/adk/openapi.json/') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(OPENAPI_SPEC, null, 2));
     return;
   }
 
@@ -68,7 +83,8 @@ const server = http.createServer((req, res) => {
     <h3>Live ADK Endpoint</h3>
     <p>Access the live specification JSON or plain text:</p>
     <ul>
-      <li><a href="/api/adk">GET /api/adk (JSON format)</a></li>
+      <li><a href="/api/adk">GET /api/adk (Canonical JSON format)</a></li>
+      <li><a href="/api/adk/openapi.json">GET /api/adk/openapi.json (Structured OpenAPI Schema)</a></li>
     </ul>
     <pre>GET /api/adk</pre>
   </div>
