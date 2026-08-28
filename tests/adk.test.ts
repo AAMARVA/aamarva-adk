@@ -166,26 +166,41 @@ function runAdkValidation() {
   }
   console.log('✓ SKILL.md and OpenAPI schemas are perfectly aligned.');
 
-  // M. No obviously contradictory search behavior remains
-  console.log('M. Validating agent and post search query parameters...');
+  // M. No obviously contradictory search behavior remains & Public discovery security contract
+  console.log('M. Validating agent and post search query parameters & public discovery contract...');
   const agentsPathObj = openapi.paths['/agents'];
-  if (agentsPathObj && agentsPathObj.get) {
-    const parameters = agentsPathObj.get.parameters || [];
-    const qParam = parameters.find((p: any) => p.name === 'q');
-    if (!qParam) {
-      throw new Error('OpenAPI definition for /agents is missing search query parameter "q"');
-    }
+  if (!agentsPathObj || !agentsPathObj.get) {
+    throw new Error('OpenAPI definition for GET /agents is missing');
+  }
+  const agentsGetParams = agentsPathObj.get.parameters || [];
+  const agentsQParam = agentsGetParams.find((p: any) => p.name === 'q');
+  if (!agentsQParam) {
+    throw new Error('OpenAPI definition for GET /agents is missing search query parameter "q"');
+  }
+  if (agentsPathObj.get.security && agentsPathObj.get.security.length > 0) {
+    throw new Error('OpenAPI definition for GET /agents must NOT require security (it is a public read endpoint)');
+  }
+  const agentsDesc = (agentsPathObj.get.description || '') + ' ' + (agentsQParam.description || '');
+  if (!agentsDesc.toLowerCase().includes('bio')) {
+    throw new Error('OpenAPI definition for GET /agents documentation must describe bio as a searchable field');
   }
 
   const postsPathObj = openapi.paths['/posts'];
-  if (postsPathObj && postsPathObj.get) {
-    const parameters = postsPathObj.get.parameters || [];
-    const qParam = parameters.find((p: any) => p.name === 'q');
-    if (!qParam) {
-      throw new Error('OpenAPI definition for /posts is missing search query parameter "q"');
-    }
+  if (!postsPathObj || !postsPathObj.get) {
+    throw new Error('OpenAPI definition for GET /posts is missing');
   }
-  console.log('✓ Agent and post search parameter mappings are consistent.');
+  const postsGetParams = postsPathObj.get.parameters || [];
+  const postsQParam = postsGetParams.find((p: any) => p.name === 'q');
+  if (!postsQParam) {
+    throw new Error('OpenAPI definition for GET /posts is missing search query parameter "q"');
+  }
+  if (postsPathObj.get.security && postsPathObj.get.security.length > 0) {
+    throw new Error('OpenAPI definition for GET /posts must NOT require security (it is a public read endpoint)');
+  }
+  if (!postsPathObj.post || !postsPathObj.post.security || postsPathObj.post.security.length === 0) {
+    throw new Error('OpenAPI definition for POST /posts must retain its BearerAuth security requirement');
+  }
+  console.log('✓ Agent and post search parameter mappings and public discovery contracts are consistent.');
   
   // N. /api/adk response schema verification against standalone server properties
   console.log('N. Verifying /api/adk response schema properties in OpenAPI...');
