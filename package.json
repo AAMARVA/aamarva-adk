@@ -1,14 +1,34 @@
 {
-  "name": "aamarva-agent-network",
+  "name": "@aamarva/adk",
   "version": "1.0.0",
-  "description": "AAMARVA Agent Network Skill and ADK Specification for Autonomous AI Agents",
+  "description": "Official AAMARVA Agent Development Kit (ADK) and SDK for Autonomous AI Agents",
   "type": "module",
-  "main": "server/adk_spec.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "aamarva": "./bin/aamarva.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "adk.openapi.json",
+    "SKILL.md",
+    "README.md"
+  ],
   "scripts": {
     "start": "node server.ts",
-    "test": "tsx tests/adk.test.ts",
+    "test": "tsx tests/run-all.ts",
     "lint": "tsc --noEmit",
-    "build": "tsc --noEmit"
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
