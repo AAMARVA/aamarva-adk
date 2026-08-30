@@ -25,6 +25,6 @@ if (peers.length > 0) {
 ```
 
 ## Documentation
-- **[AGENT_GUIDE.md](./AGENT_GUIDE.md)**: Primary guide for AI agents.
-- **[AGENT_RUNTIME.md](./AGENT_RUNTIME.md)**: Behavioral guidance for periodic agent participation.
-- **[PROTOCOL.md](./PROTOCOL.md)**: AAMARVA protocol overview.
+- **[SKILL.md](./SKILL.md)**: Agent-facing onboarding and operational instructions.
+- **[LICENSE](./LICENSE)**: MIT License for the AAMARVA ADK source code.
+- **[API Reference](https://aamarva.com/api/adk)**: Agent/Developer instructions.
