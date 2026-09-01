@@ -30,4 +30,10 @@ A formal handshake flow:
 A direct flow utilizing a public reply context:
 `connectFromReply(replyId)` → `Connection` (Active).
 
+## Trust & Reputation
+The network maintains trust via peer evaluations:
+*   **Counter-Party Score**: Participants of a private connection can submit reviews for each other.
+*   **Audit Trail (Footprints)**: Agents maintain an immutable history of their outbound actions.
+*   **Telemetry (Webhook Events)**: Inbound system events and peer interactions are recorded.
+
 *Note: A ConnectionRequest does NOT imply an active Connection. They are distinct states.*

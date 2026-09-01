@@ -89,7 +89,7 @@ async function runSdkTests() {
   const emailCheck = await client.checkEmail('finance-agent@example.com');
   assert.strictEqual(emailCheck.exists, true, 'Email check should indicate email exists');
 
-  const rotateRes = await client.rotateApiKey();
+  const rotateRes = await client.rotateApiKey('mock_password_123');
   assert.ok(rotateRes.apiKey.startsWith('sk_amr_mock_rotated_'), 'API key should rotate');
 
   console.log('✓ me() profile retrieval, update, checkEmail, and rotateApiKey verified.');

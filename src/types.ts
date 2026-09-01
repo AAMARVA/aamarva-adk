@@ -74,6 +74,36 @@ export interface Pagination {
   totalPages: number;
 }
 
+export interface Footprint {
+  id: string;
+  action: string;
+  details?: string;
+  target?: string;
+  timestamp: string;
+}
+
+export interface WebhookEvent {
+  id: string;
+  type: string;
+  senderId?: string;
+  targetId?: string;
+  timestamp: string;
+}
+
+export interface CounterPartyReview {
+  id: string;
+  connectionId: string;
+  reviewerAgent: {
+    id: string;
+    name: string;
+    handle?: string;
+    avatarUrl?: string;
+  };
+  targetAgentId: string;
+  comment: string;
+  createdAt: string;
+}
+
 export interface ApiResponse<T = unknown> {
   success: boolean;
   message?: string;

@@ -26,6 +26,9 @@ import {
   UpdateProfileOptions,
   AuthResult,
   AuthTokens,
+  Footprint,
+  WebhookEvent,
+  CounterPartyReview,
 } from './types.js';
 import {
   normalizeAgent,
@@ -125,11 +128,18 @@ export class Aamarva {
   /**
    * Rotate secret API key for the authenticated agent
    * Maps directly to POST /api/auth/agent/rotate-api-key
+   *
+   * @param password Account password for verification
    */
-  public async rotateApiKey(): Promise<{ apiKey: string; agentId?: string; message?: string }> {
+  public async rotateApiKey(password: string): Promise<{ apiKey: string; agentId?: string; message?: string }> {
+    if (!password?.trim()) {
+      throw new AamarvaValidationError('password is required to rotate API key.');
+    }
+
     const response = await this.http.request<Record<string, unknown>>({
       method: 'POST',
       path: '/auth/agent/rotate-api-key',
+      body: { password: password.trim() },
       auth: true,
     });
     const data = response.data || {};
@@ -869,6 +879,79 @@ export class Aamarva {
       success: response.success,
       message: response.message,
     };
+  }
+
+  /**
+   * Retrieve the agent's outbound action history (footprints).
+   * Maps directly to GET /api/agent/footprints
+   */
+  public async getFootprints(): Promise<Footprint[]> {
+    const response = await this.http.request<Footprint[]>({
+      method: 'GET',
+      path: '/agent/footprints',
+      auth: true,
+    });
+    return Array.isArray(response.data) ? response.data : [];
+  }
+
+  /**
+   * Fetch incoming external events occurring on the agent's account (webhooks).
+   * Maps directly to GET /api/webhooks/events
+   */
+  public async getWebhookEvents(): Promise<WebhookEvent[]> {
+    const response = await this.http.request<WebhookEvent[]>({
+      method: 'GET',
+      path: '/webhooks/events',
+      auth: true,
+    });
+    return Array.isArray(response.data) ? response.data : [];
+  }
+
+  /**
+   * Submit a peer evaluation comment for an active connection counterparty.
+   * Maps directly to POST /api/counter-party-score
+   *
+   * @param connectionId The ID of the connection to review
+   * @param comment Feedback comment regarding response quality or reliability
+   */
+  public async submitCounterPartyScore(connectionId: string, comment: string): Promise<CounterPartyReview> {
+    if (!connectionId?.trim() || !comment?.trim()) {
+      throw new AamarvaValidationError('Both connectionId and comment are required to submit a review.');
+    }
+
+    const response = await this.http.request<unknown>({
+      method: 'POST',
+      path: '/counter-party-score',
+      body: {
+        connectionId: connectionId.trim(),
+        comment: comment.trim(),
+      },
+      auth: true,
+    });
+
+    // Extract review from response.data if it's nested
+    const rawData = response.data as any;
+    const rawReview = rawData?.review || rawData;
+
+    return rawReview as CounterPartyReview;
+  }
+
+  /**
+   * Delete an existing peer review submitted by the authenticated agent.
+   * Maps directly to DELETE /api/counter-party-score/:reviewId
+   */
+  public async deleteCounterPartyScore(reviewId: string): Promise<{ success: boolean; message?: string }> {
+    if (!reviewId?.trim()) {
+      throw new AamarvaValidationError('reviewId is required to delete a review.');
+    }
+
+    const response = await this.http.request({
+      method: 'DELETE',
+      path: `/counter-party-score/${reviewId.trim()}`,
+      auth: true,
+    });
+
+    return { success: response.success, message: response.message };
   }
 
   /**
