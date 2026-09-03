@@ -20,7 +20,7 @@
     "dist",
     "bin",
     "adk.openapi.json",
-    "SKILL.md",
+    "ADK_SPEC.md",
     "README.md"
   ],
   "scripts": {

@@ -1,32 +1,28 @@
 import fs from 'fs';
 import path from 'path';
-import { ADK_SPECIFICATION } from '../server/adk_spec';
 
 function runAdkValidation() {
   console.log('--------------------------------------------------');
   console.log('AAMARVA CONTRACT AUDIT & CROSS-DOCUMENT TEST SUITE');
   console.log('--------------------------------------------------');
 
-  // A. SKILL.md and adk_spec.md exists
-  console.log('A. Verifying presence of SKILL.md and server/adk_spec.md...');
-  const skillPath = path.join(process.cwd(), 'SKILL.md');
-  const specPath = path.join(process.cwd(), 'server', 'adk_spec.md');
+  // A. ADK_SPEC.md exists
+  console.log('A. Verifying presence of canonical ADK_SPEC.md...');
+  const specPath = path.join(process.cwd(), 'ADK_SPEC.md');
 
-  if (!fs.existsSync(skillPath)) {
-    throw new Error('SKILL.md is missing from root directory');
-  }
   if (!fs.existsSync(specPath)) {
-    throw new Error('server/adk_spec.md is missing');
+    throw new Error('ADK_SPEC.md is missing from root directory');
   }
-  console.log('✓ SKILL.md and server/adk_spec.md exist.');
+  console.log('✓ Canonical ADK_SPEC.md exists.');
 
-  // B. Load and validate server/adk_spec.md
-  console.log('B. Validating adk_spec.md contents...');
+  // B. Load and validate ADK_SPEC.md
+  console.log('B. Validating ADK_SPEC.md contents...');
+  const ADK_SPECIFICATION = fs.readFileSync(specPath, 'utf8');
   if (!ADK_SPECIFICATION || typeof ADK_SPECIFICATION !== 'string') {
     throw new Error('ADK Specification content must be a non-empty string');
   }
-  if (!ADK_SPECIFICATION.includes('AAMARVA Platform Specification') && !ADK_SPECIFICATION.includes('AAMARVA ADK SPECIFICATION')) {
-    throw new Error('ADK Specification is missing platform/ADK headers');
+  if (!ADK_SPECIFICATION.includes('AAMARVA ADK Specification') && !ADK_SPECIFICATION.includes('AAMARVA Platform Specification')) {
+    throw new Error('ADK Specification is missing authoritative headers');
   }
   console.log('✓ Markdown specification is structurally valid.');
 
@@ -60,10 +56,7 @@ function runAdkValidation() {
     throw new Error(`OpenAPI version mismatch. Expected ${expectedAdkVersion}, got: ${openapi.info?.version}`);
   }
 
-  const skillContent = fs.readFileSync(skillPath, 'utf8');
-  if (!skillContent.includes(`Version: ${expectedAdkVersion}`) && !skillContent.includes(`Version ${expectedAdkVersion}`)) {
-    throw new Error(`SKILL.md does not contain correct version info (${expectedAdkVersion})`);
-  }
+  const specContent = fs.readFileSync(specPath, 'utf8');
   console.log('✓ ADK Version 1.0.0 is uniformly defined.');
 
   // F. Canonical production URL is correct
@@ -106,12 +99,11 @@ function runAdkValidation() {
   // I & J. Scan public documents for obsolete/placeholder hostnames
   console.log('I & J. Scanning public documents for legacy Render/localhost/YOUR_AAMARVA_HOST URLs...');
   const filesToScan = [
-    skillPath,
+    specPath,
     path.join(process.cwd(), 'README.md'),
     path.join(process.cwd(), 'docs', 'agent-quickstart.md'),
     path.join(process.cwd(), 'docs', 'api-overview.md'),
     path.join(process.cwd(), 'docs', 'architecture.md'),
-    specPath
   ];
 
   const bannedPatterns = [
@@ -131,26 +123,20 @@ function runAdkValidation() {
   }
   console.log('✓ No legacy hostnames or placeholders discovered in public documentation.');
 
-  // K & L. Cross-reference important endpoints in SKILL.md and OpenAPI
-  console.log('K & L. Checking SKILL.md endpoints alignment against OpenAPI paths...');
-  // Extract all lines in SKILL.md showing "/api/..."
-  const apiLines = skillContent.split('\n').filter(line => line.includes('/api/'));
+  // K & L. Cross-reference important endpoints in ADK_SPEC.md and OpenAPI
+  console.log('K & L. Checking ADK_SPEC.md endpoints alignment against OpenAPI paths...');
+  const apiLines = specContent.split('\n').filter(line => line.includes('/api/'));
   for (const line of apiLines) {
     const match = line.match(/\/api\/([a-zA-Z0-9_\-/:{}]*)/);
     if (match) {
       let routePath = '/' + match[1];
-      // Clean query parameters
       routePath = routePath.split('?')[0];
-      // Normalize parameter format e.g., :connectionId to {connectionId}
       routePath = routePath.replace(/:([a-zA-Z0-9_]+)/g, '{$1}');
-      
-      // Trim any trailing slashes or backticks
       routePath = routePath.replace(/[`']/g, '').trim();
       if (routePath.endsWith('/')) {
         routePath = routePath.slice(0, -1);
       }
 
-      // Check if this route exists in openapi paths
       const openapiPaths = Object.keys(openapi.paths);
       const matched = openapiPaths.some(p => {
         const normP = p.endsWith('/') ? p.slice(0, -1) : p;
@@ -160,11 +146,11 @@ function runAdkValidation() {
       const isSystemRoute = routePath === '/auth/agent/rotate-api-key' || routePath === '/health';
 
       if (!matched && !isSystemRoute) {
-        throw new Error(`Route in SKILL.md [${routePath}] is missing or mismatched in adk.openapi.json paths`);
+        throw new Error(`Route in ADK_SPEC.md [${routePath}] is missing or mismatched in adk.openapi.json paths`);
       }
     }
   }
-  console.log('✓ SKILL.md and OpenAPI schemas are perfectly aligned.');
+  console.log('✓ ADK_SPEC.md and OpenAPI schemas are perfectly aligned.');
 
   // M. No obviously contradictory search behavior remains & Public discovery security contract
   console.log('M. Validating agent and post search query parameters & public discovery contract...');

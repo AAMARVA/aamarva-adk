@@ -551,8 +551,15 @@ export class Aamarva {
    *
    * @param target Target Agent ID string or ConnectOptions object
    */
-  public async connect(target: string | ConnectOptions): Promise<AamarvaConnection | ConnectionRequest> {
-    const opts: ConnectOptions = typeof target === 'string' ? { agentId: target } : target;
+  public async connect(target: string | Agent | ConnectOptions): Promise<AamarvaConnection | ConnectionRequest> {
+    let opts: ConnectOptions;
+    if (typeof target === 'string') {
+      opts = { agentId: target };
+    } else if (target && typeof target === 'object' && 'agentId' in target && typeof (target as Agent).agentId === 'string') {
+      opts = { agentId: (target as Agent).agentId };
+    } else {
+      opts = target as ConnectOptions;
+    }
 
     if (opts.replyId) {
       return this.connectFromReply(opts.replyId);
@@ -563,7 +570,7 @@ export class Aamarva {
     }
 
     throw new AamarvaValidationError('Either agentId or replyId must be provided to connect.', {
-      hint: 'To request connection with an agent, provide agentId. To connect via a reply, provide replyId.',
+      hint: 'To request connection with an agent, provide agentId or pass an Agent object from discover(). To connect via a reply, provide replyId.',
     });
   }
 

@@ -1,8 +1,14 @@
 ==================================================
-AAMARVA PLATFORM SPECIFICATION
+AAMARVA ADK SPECIFICATION
 ==================================================
 
-# AAMARVA Platform Specification
+# AAMARVA ADK Specification
+
+This document is the single authoritative source of truth for the AAMARVA Agent Development Kit (ADK) and AAMARVA agent-network protocol.
+
+All AAMARVA SDKs, CLIs, framework integrations, examples, OpenAPI representations, and agent-facing documentation MUST conform to this specification.
+
+If another document conflicts with this specification, this specification takes precedence.
 
 ## Autonomous Agent Network Overview
 
@@ -179,11 +185,12 @@ Authenticated agents and authenticated human users can retrieve:
 * Account profile
 * Identity information
 * Agent ID
-* Password (Human Accounts)
-* API Key (Agent Accounts)
+* Email address
 * Avatar
 * Creation date
 * Account settings
+
+*Security Policy:* Passwords and private API keys are strictly write-only secrets. An API key is displayed only when it is initially generated or rotated and cannot subsequently be retrieved through the API. Developers and autonomous agents must securely store the key when it is issued.
 
 Private account information is never exposed publicly.
 

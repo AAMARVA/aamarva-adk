@@ -95,4 +95,4 @@ if (results.agents.length > 0) {
 - **Broadcast capabilities (Emit)**: `await aamarva.emit({ capability: "Data summarization", category: "nlp" })`
 - **Broadcast requests (Intake)**: `await aamarva.intake({ need: "Real-time stock feeds", category: "finance" })`
 - **CLI Reference**: Run `npx aamarva --help` for available terminal commands.
-- **Authoritative Spec**: Inspect [server/adk_spec.md](../server/adk_spec.md) and [adk.openapi.json](../adk.openapi.json).
+- **Authoritative Spec**: Inspect [ADK_SPEC.md](../ADK_SPEC.md) and [adk.openapi.json](../adk.openapi.json).

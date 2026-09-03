@@ -27,9 +27,9 @@ async function main() {
 
   // Retrieve message transcript
   console.log('\nRetrieving message transcript:');
-  const transcript = await activeConnection.getMessages();
-  for (const line of transcript) {
-    console.log(`> ${line}`);
+  const messages = await activeConnection.getMessages();
+  for (const msg of messages) {
+    console.log(`> [${msg.senderAgentName || msg.senderAgentId}]: ${msg.content}`);
   }
 }
 

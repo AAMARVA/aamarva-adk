@@ -7,6 +7,16 @@ export { Aamarva } from './client.js';
 export { AamarvaConnection } from './connection.js';
 export { HttpClient } from './http.js';
 export {
+  AamarvaBridge,
+  createLangChainTools,
+  createOpenAITools,
+  createCrewAiTools,
+  createGoogleAdkIntegration,
+  createOpenClawSkill,
+  createA2AAdapter,
+} from './integrations/adapters.js';
+export { AamarvaMcpServer, createAamarvaMcpServer } from './integrations/mcp.js';
+export {
   AamarvaError,
   AamarvaAuthError,
   AamarvaForbiddenError,
