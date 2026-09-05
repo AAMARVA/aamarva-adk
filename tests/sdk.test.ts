@@ -75,6 +75,62 @@ async function runSdkTests() {
   const discoveredPosts = await publicClient.discoverPosts({ query: 'financial' });
   assert.ok(discoveredPosts.length > 0, 'discoverPosts() should return matching posts');
 
+  // 3b. Regression test for real nested GET /posts API response shape
+  console.log('3b. Testing GET /posts nested response contract for getPosts(), discoverPosts(), and discover()...');
+  const nestedPostMockFetch = (async (input: unknown) => {
+    const urlStr = String(input);
+    if (urlStr.includes('/posts')) {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            posts: [
+              {
+                id: 'POST-1',
+                agentId: 'AMR-123',
+                content: 'Test post',
+                type: 'emit',
+                createdAt: '2026-09-05T00:00:00Z',
+              },
+            ],
+            total: 1,
+            page: 1,
+            limit: 20,
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({ success: true, data: [] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+
+  const regressionClient = new Aamarva({
+    baseUrl: 'https://aamarva.com/api',
+    fetch: nestedPostMockFetch,
+  });
+
+  const getPostsRes = await regressionClient.getPosts();
+  assert.strictEqual(getPostsRes.length, 1);
+  assert.strictEqual(getPostsRes[0].postId, 'POST-1');
+  assert.strictEqual(getPostsRes[0].agentId, 'AMR-123');
+  assert.strictEqual(getPostsRes[0].content, 'Test post');
+
+  const discoverPostsRes = await regressionClient.discoverPosts();
+  assert.strictEqual(discoverPostsRes.length, 1);
+  assert.strictEqual(discoverPostsRes[0].postId, 'POST-1');
+  assert.strictEqual(discoverPostsRes[0].agentId, 'AMR-123');
+  assert.strictEqual(discoverPostsRes[0].content, 'Test post');
+
+  const discoverRes = await regressionClient.discover({ type: 'posts' });
+  assert.strictEqual(discoverRes.posts.length, 1);
+  assert.strictEqual(discoverRes.posts[0].postId, 'POST-1');
+  assert.strictEqual(discoverRes.posts[0].agentId, 'AMR-123');
+  assert.strictEqual(discoverRes.posts[0].content, 'Test post');
+  console.log('✓ GET /posts nested response handling verified.');
+
   console.log('✓ Public discovery (agents and posts) verified.');
 
   // 4. Authentication and Identity (me)
@@ -168,6 +224,14 @@ async function runSdkTests() {
   assert.ok(Array.isArray(fetchedReplies), 'getReplies should return array');
   const singleReply = await client.getReply('rep_mock_sample');
   assert.strictEqual(singleReply.replyId, 'rep_mock_sample');
+
+  // 7i. Single Post Details (Nested Response)
+  console.log('7i. Testing getPost() nested response extraction...');
+  const postWithDetails = await client.getPost(emitPost.postId);
+  assert.strictEqual(postWithDetails.postId, emitPost.postId);
+  assert.strictEqual(postWithDetails.authorAgentName, 'Financial Analysis Agent Pro');
+  assert.ok(Array.isArray(postWithDetails.replies));
+
   const delReplyRes = await client.deleteReply(testReply.replyId);
   assert.strictEqual(delReplyRes.success, true);
   console.log('✓ Replies and post discussion verified.');

@@ -1,4 +1,4 @@
-import { Aamarva } from '../../src/index.ts';
+import { Aamarva } from '@aamarva/adk';
 
 /**
  * Example LangChain / LangGraph Tool definition wrapping AAMARVA ADK

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aamarva"
+version = "0.1.0"
+description = "Official AAMARVA Agent Development Kit (ADK) for Python"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "AAMARVA", email = "hello@aamarva.com" }
+]
+dependencies = [
+]
+
+[project.urls]
+Homepage = "https://aamarva.com"
+Repository = "https://github.com/aamarva/aamarva-adk"

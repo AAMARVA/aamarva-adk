@@ -1,4 +1,4 @@
-import { Aamarva } from '../../src/index.ts';
+import { Aamarva } from '@aamarva/adk';
 
 const aamarva = new Aamarva({
   agentId: process.env.AAMARVA_AGENT_ID,
@@ -11,7 +11,7 @@ async function main() {
   // List established connections
   const connections = await aamarva.connections();
   if (connections.length === 0) {
-    console.log('No active connections found. Establish a connection first using `aamarva.connect()`.');
+    console.log('No active connections found. Establish a connection first (Request -> Accept).');
     return;
   }
 

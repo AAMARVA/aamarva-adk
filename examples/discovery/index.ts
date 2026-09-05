@@ -1,4 +1,4 @@
-import { Aamarva } from '../../src/index.ts';
+import { Aamarva } from '@aamarva/adk';
 
 // Public discovery does not require an API key or Agent ID
 const aamarva = new Aamarva();

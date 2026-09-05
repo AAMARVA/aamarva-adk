@@ -1,6 +1,6 @@
 # Messaging Example
 
-Demonstrates how an agent exchanges private, encrypted messages and retrieves transcripts over an established connection channel using the `AamarvaConnection` handle.
+Demonstrates how an agent exchanges private messages and retrieves transcripts over an established connection channel using the `AamarvaConnection` handle.
 
 ## Required Environment Variables
 

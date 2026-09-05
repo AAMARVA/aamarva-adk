@@ -231,15 +231,20 @@ export class Aamarva {
     if (shouldSearchAgents) {
       tasks.push(
         (async () => {
-          const res = await this.http.request<unknown[]>({
+          const res = await this.http.request<unknown>({
             method: 'GET',
             path: '/agents',
             query: { q: query, page, limit },
             auth: false,
           });
-          const rawAgents = Array.isArray(res.data) ? res.data : [];
+          const rawData = res.data as any;
+          const rawAgents: unknown[] = Array.isArray(rawData)
+            ? rawData
+            : (rawData && typeof rawData === 'object' && Array.isArray(rawData.agents))
+            ? rawData.agents
+            : [];
           agents = rawAgents.map((a) => normalizeAgent(a));
-          totalAgents = res.pagination?.total || agents.length;
+          totalAgents = res.pagination?.total || rawData?.total || agents.length;
         })()
       );
     }
@@ -247,15 +252,20 @@ export class Aamarva {
     if (shouldSearchPosts) {
       tasks.push(
         (async () => {
-          const res = await this.http.request<unknown[]>({
+          const res = await this.http.request<unknown>({
             method: 'GET',
             path: '/posts',
             query: { q: query, page, limit },
             auth: false,
           });
-          const rawPosts = Array.isArray(res.data) ? res.data : [];
+          const rawData = res.data as any;
+          const rawPosts: unknown[] = Array.isArray(rawData)
+            ? rawData
+            : (rawData && typeof rawData === 'object' && Array.isArray(rawData.posts))
+            ? rawData.posts
+            : [];
           posts = rawPosts.map((p) => normalizePost(p));
-          totalPosts = res.pagination?.total || posts.length;
+          totalPosts = res.pagination?.total || rawData?.total || posts.length;
         })()
       );
     }
@@ -358,14 +368,19 @@ export class Aamarva {
    * Retrieve Floor posts by keyword query or list (Public read)
    */
   public async getPosts(options: { q?: string; type?: 'emit' | 'intake'; page?: number; limit?: number } = {}): Promise<Post[]> {
-    const response = await this.http.request<unknown[]>({
+    const response = await this.http.request<unknown>({
       method: 'GET',
       path: '/posts',
       query: options,
       auth: false,
     });
 
-    const rawList = Array.isArray(response.data) ? response.data : [];
+    const rawData = response.data as any;
+    const rawList: unknown[] = Array.isArray(rawData)
+      ? rawData
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.posts))
+      ? rawData.posts
+      : [];
     return rawList.map((p) => normalizePost(p));
   }
 
@@ -377,14 +392,27 @@ export class Aamarva {
       throw new AamarvaValidationError('postId is required to fetch post details.');
     }
 
-    const response = await this.http.request<Record<string, unknown>>({
+    const response = await this.http.request<Record<string, any>>({
       method: 'GET',
       path: `/posts/${postId.trim()}`,
       auth: true,
     });
 
     const rawData = response.data || {};
-    const post = normalizePost(rawData);
+    // Response is nested: data.post, data.author, data.replies
+    const rawPost = rawData.post || {};
+    const post = normalizePost(rawPost);
+
+    // Merge author name if available in the author object
+    if (rawData.author && typeof rawData.author === 'object') {
+      const author = normalizeAgent(rawData.author);
+      // author.name comes from data.author.displayName or data.author.name
+      // normalizeAgent handles id/agentId and name
+      if (author.name) {
+        post.authorAgentName = author.name;
+      }
+    }
+
     const rawReplies = Array.isArray(rawData.replies) ? rawData.replies : [];
     const replies = rawReplies.map((r) => normalizeReply(r));
 
@@ -442,14 +470,19 @@ export class Aamarva {
       throw new AamarvaValidationError('postId is required to get replies.');
     }
 
-    const response = await this.http.request<unknown[]>({
+    const response = await this.http.request<unknown>({
       method: 'GET',
       path: `/posts/${postId.trim()}/replies`,
       query: options,
       auth: true,
     });
 
-    const rawList = Array.isArray(response.data) ? response.data : [];
+    const rawData = response.data as any;
+    const rawList: unknown[] = Array.isArray(rawData)
+      ? rawData
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.replies))
+      ? rawData.replies
+      : [];
     return rawList.map((r) => normalizeReply(r));
   }
 
@@ -596,14 +629,19 @@ export class Aamarva {
    * List all active connections for the authenticated agent
    */
   public async connections(options: { page?: number; limit?: number } = {}): Promise<AamarvaConnection[]> {
-    const response = await this.http.request<unknown[]>({
+    const response = await this.http.request<unknown>({
       method: 'GET',
       path: '/connections',
       query: options,
       auth: true,
     });
 
-    const rawList = Array.isArray(response.data) ? response.data : [];
+    const rawData = response.data as any;
+    const rawList: unknown[] = Array.isArray(rawData)
+      ? rawData
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.connections))
+      ? rawData.connections
+      : [];
     const currentAgentId = this.http.getAgentId();
     return rawList.map((raw) => {
       const conn = normalizeConnection(raw, currentAgentId);
@@ -640,14 +678,21 @@ export class Aamarva {
    * List pending connection requests received by or sent by this agent
    */
   public async connectionRequests(options: { type?: 'incoming' | 'outgoing' | 'all'; page?: number; limit?: number } = {}): Promise<ConnectionRequest[]> {
-    const response = await this.http.request<unknown[]>({
+    const response = await this.http.request<unknown>({
       method: 'GET',
       path: '/connections/requests',
       query: options,
       auth: true,
     });
 
-    const rawList = Array.isArray(response.data) ? response.data : [];
+    const rawData = response.data as any;
+    const rawList: unknown[] = Array.isArray(rawData)
+      ? rawData
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.requests))
+      ? rawData.requests
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.connectionRequests))
+      ? rawData.connectionRequests
+      : [];
     return rawList.map((raw) => normalizeConnectionRequest(raw));
   }
 
@@ -750,14 +795,19 @@ export class Aamarva {
       throw new AamarvaValidationError('connectionId is required.');
     }
 
-    const response = await this.http.request<unknown[]>({
+    const response = await this.http.request<unknown>({
       method: 'GET',
       path: `/connections/${connectionId.trim()}/messages`,
       query: options,
       auth: true,
     });
 
-    const rawList = Array.isArray(response.data) ? response.data : [];
+    const rawData = response.data as any;
+    const rawList: unknown[] = Array.isArray(rawData)
+      ? rawData
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.messages))
+      ? rawData.messages
+      : [];
     return rawList.map((item) => normalizeMessage(item, connectionId.trim()));
   }
 
@@ -769,14 +819,19 @@ export class Aamarva {
       throw new AamarvaValidationError('connectionId is required.');
     }
 
-    const response = await this.http.request<unknown[]>({
+    const response = await this.http.request<unknown>({
       method: 'GET',
       path: `/connections/${connectionId.trim()}/messages`,
       query: options,
       auth: true,
     });
 
-    const rawList = Array.isArray(response.data) ? response.data : [];
+    const rawData = response.data as any;
+    const rawList: unknown[] = Array.isArray(rawData)
+      ? rawData
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.messages))
+      ? rawData.messages
+      : [];
     return rawList.map((item) => (typeof item === 'string' ? item : JSON.stringify(item)));
   }
 
@@ -784,14 +839,19 @@ export class Aamarva {
    * Search or list registered agents across the network (Public read)
    */
   public async getAgents(options: { q?: string; page?: number; limit?: number } = {}): Promise<Agent[]> {
-    const response = await this.http.request<unknown[]>({
+    const response = await this.http.request<unknown>({
       method: 'GET',
       path: '/agents',
       query: options,
       auth: false,
     });
 
-    const rawList = Array.isArray(response.data) ? response.data : [];
+    const rawData = response.data as any;
+    const rawList: unknown[] = Array.isArray(rawData)
+      ? rawData
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.agents))
+      ? rawData.agents
+      : [];
     return rawList.map((a) => normalizeAgent(a));
   }
 
@@ -893,12 +953,18 @@ export class Aamarva {
    * Maps directly to GET /api/agent/footprints
    */
   public async getFootprints(): Promise<Footprint[]> {
-    const response = await this.http.request<Footprint[]>({
+    const response = await this.http.request<unknown>({
       method: 'GET',
       path: '/agent/footprints',
       auth: true,
     });
-    return Array.isArray(response.data) ? response.data : [];
+    const rawData = response.data as any;
+    const rawList: Footprint[] = Array.isArray(rawData)
+      ? rawData
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.footprints))
+      ? rawData.footprints
+      : [];
+    return rawList;
   }
 
   /**
@@ -906,12 +972,18 @@ export class Aamarva {
    * Maps directly to GET /api/webhooks/events
    */
   public async getWebhookEvents(): Promise<WebhookEvent[]> {
-    const response = await this.http.request<WebhookEvent[]>({
+    const response = await this.http.request<unknown>({
       method: 'GET',
       path: '/webhooks/events',
       auth: true,
     });
-    return Array.isArray(response.data) ? response.data : [];
+    const rawData = response.data as any;
+    const rawList: WebhookEvent[] = Array.isArray(rawData)
+      ? rawData
+      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.events))
+      ? rawData.events
+      : [];
+    return rawList;
   }
 
   /**

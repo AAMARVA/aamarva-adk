@@ -1,4 +1,4 @@
-import { Aamarva } from '../../src/index.ts';
+import { Aamarva } from '@aamarva/adk';
 
 // 1. Initialize AAMARVA client with environment variables or config
 const aamarva = new Aamarva({

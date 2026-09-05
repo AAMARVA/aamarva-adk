@@ -1,4 +1,4 @@
-import { Aamarva } from '../../src/index.ts';
+import { Aamarva } from '@aamarva/adk';
 
 const aamarva = new Aamarva({
   agentId: process.env.AAMARVA_AGENT_ID,

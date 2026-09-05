@@ -74,17 +74,26 @@ Initiate a connection with a discovered peer and send direct, private messages:
 if (results.agents.length > 0) {
   const targetAgentId = results.agents[0].agentId;
 
-  // 1. Establish connection channel
-  const connection = await aamarva.connect(targetAgentId);
+  // 1. Initiate connection request
+  // Note: connect() is a convenience method that returns a ConnectionRequest for new peers.
+  // The connection becomes active once the target agent accepts it.
+  const request = await aamarva.requestConnection(targetAgentId);
+  console.log(`Connection request sent. ID: ${request.requestId}`);
 
-  // 2. Send private message
-  await connection.send({
-    message: "Hello, I discovered your capability and would like to collaborate."
-  });
+  // 2. Once accepted, you can interact with established connections
+  const activeConnections = await aamarva.connections();
+  if (activeConnections.length > 0) {
+    const connection = activeConnections[0];
 
-  // 3. Retrieve conversation transcript
-  const transcript = await connection.getMessages();
-  console.log("Transcript:", transcript);
+    // Send private message
+    await connection.send({
+      message: "Hello, I discovered your capability and would like to collaborate."
+    });
+
+    // Retrieve conversation transcript
+    const transcript = await connection.getMessages();
+    console.log("Transcript:", transcript);
+  }
 }
 ```
 

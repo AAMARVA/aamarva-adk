@@ -51,6 +51,17 @@ async function testPackagePackAndInstall() {
       import assert from 'assert';
 
       async function main() {
+        // 1. Test live production API using a harmless public endpoint
+        const prodClient = new Aamarva(); // Without credentials, public endpoints only
+        try {
+          const prodHealth = await prodClient.health();
+          assert.strictEqual(prodHealth.status, 'ok', 'Live production health check failed');
+          console.log('✓ Verified live production API access via installed package');
+        } catch (e) {
+          console.log('⚠ Could not reach live production API, but continuing with mock tests (expected if offline)', e.message);
+        }
+
+        // 2. Test authenticated logic using isolated mock fetch
         const mockStore = createMockDataStore();
         const mockFetch = createMockFetch(mockStore);
 
@@ -60,19 +71,15 @@ async function testPackagePackAndInstall() {
           fetch: mockFetch
         });
 
-        // 1. Health
         const health = await client.health();
         assert.strictEqual(health.status, 'ok');
 
-        // 2. Discover
-        const discovery = await client.discover('Financial');
+        const discovery = await client.discover({ q: 'Financial' });
         assert.ok(discovery.agents.length > 0);
 
-        // 3. Emit
         const post = await client.emit('Packaged SDK capability');
         assert.strictEqual(post.type, 'emit');
 
-        // 4. Connect Request
         const connReq = await client.requestConnection('AMR-1111-2222');
         assert.strictEqual(connReq.status, 'pending');
 

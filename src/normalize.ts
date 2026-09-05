@@ -23,7 +23,7 @@ export function normalizeAgent(raw: unknown): Agent {
   const obj = raw as Record<string, unknown>;
   return {
     agentId: String(obj.agentId || obj.id || ''),
-    name: String(obj.name || ''),
+    name: String(obj.name || obj.displayName || obj.display_name || ''),
     bio: typeof obj.bio === 'string' ? obj.bio : undefined,
     email: typeof obj.email === 'string' ? obj.email : undefined,
     status: typeof obj.status === 'string' ? obj.status : 'active',
@@ -47,14 +47,21 @@ export function normalizePost(raw: unknown): Post {
   const typeStr = String(obj.type || 'emit').toLowerCase();
   const validTyp: 'emit' | 'intake' = typeStr === 'intake' ? 'intake' : 'emit';
 
+  const authorObj = obj.author && typeof obj.author === 'object' ? (obj.author as Record<string, unknown>) : null;
+  const authorName = typeof obj.authorAgentName === 'string' ? obj.authorAgentName
+    : typeof obj.agentName === 'string' ? obj.agentName
+    : typeof obj.author_agent_name === 'string' ? obj.author_agent_name
+    : authorObj ? (typeof authorObj.displayName === 'string' ? authorObj.displayName : typeof authorObj.name === 'string' ? authorObj.name : undefined)
+    : undefined;
+
   return {
     postId: String(obj.postId || obj.id || ''),
     agentId: String(obj.agentId || ''),
-    authorAgentName: typeof obj.authorAgentName === 'string' ? obj.authorAgentName : typeof obj.author_agent_name === 'string' ? obj.author_agent_name : undefined,
+    authorAgentName: authorName,
     type: validTyp,
     content: String(obj.content || ''),
     category: typeof obj.category === 'string' ? obj.category : undefined,
-    replyCount: typeof obj.replyCount === 'number' ? obj.replyCount : typeof obj.reply_count === 'number' ? obj.reply_count : 0,
+    replyCount: typeof obj.replyCount === 'number' ? obj.replyCount : typeof obj.reply_count === 'number' ? obj.reply_count : typeof obj.repliesCount === 'number' ? obj.repliesCount : 0,
     createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : new Date().toISOString(),
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   };
@@ -71,12 +78,16 @@ export function normalizeReply(raw: unknown): Reply {
     };
   }
 
-  const obj = raw as Record<string, unknown>;
+  const obj = raw as Record<string, any>;
+  const authorObj = obj.author && typeof obj.author === 'object' ? obj.author : {};
+
+  const authorName = obj.authorAgentName || obj.author_agent_name || authorObj.name || authorObj.displayName || authorObj.display_name;
+
   return {
     replyId: String(obj.replyId || obj.id || ''),
     postId: String(obj.postId || obj.post_id || ''),
-    authorAgentId: String(obj.authorAgentId || obj.author_agent_id || obj.agentId || ''),
-    authorAgentName: typeof obj.authorAgentName === 'string' ? obj.authorAgentName : typeof obj.author_agent_name === 'string' ? obj.author_agent_name : undefined,
+    authorAgentId: String(obj.authorAgentId || obj.author_agent_id || obj.agentId || authorObj.agentId || authorObj.id || ''),
+    authorAgentName: typeof authorName === 'string' ? authorName : undefined,
     content: String(obj.content || ''),
     createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : new Date().toISOString(),
   };

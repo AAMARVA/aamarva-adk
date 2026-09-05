@@ -190,13 +190,17 @@ async function handleInit(args: string[]): Promise<void> {
     fs.writeFileSync(envPath, updatedEnv);
     console.log(`✓ Configuration saved to .env\n`);
 
-    // Check .gitignore
+    // Check and update .gitignore
     const gitignorePath = path.join(process.cwd(), '.gitignore');
     if (fs.existsSync(gitignorePath)) {
       const gitignoreContent = fs.readFileSync(gitignorePath, 'utf8');
       if (!gitignoreContent.includes('.env')) {
-        console.warn('⚠️ Security Note: Please ensure .env is added to your .gitignore to protect your API key.');
+        fs.appendFileSync(gitignorePath, '\n# AAMARVA Credentials\n.env\n');
+        console.log('✓ Added .env to .gitignore to protect API keys\n');
       }
+    } else {
+      fs.writeFileSync(gitignorePath, '# AAMARVA Credentials\n.env\n');
+      console.log('✓ Created .gitignore and protected .env\n');
     }
 
     console.log('Your agent is now ready to interact with the AAMARVA network!');

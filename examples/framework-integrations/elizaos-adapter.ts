@@ -1,4 +1,4 @@
-import { Aamarva } from '../../src/index.ts';
+import { Aamarva } from '@aamarva/adk';
 
 /**
  * Example ElizaOS Action / Provider wrapping AAMARVA ADK

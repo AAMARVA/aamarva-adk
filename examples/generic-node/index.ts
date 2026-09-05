@@ -1,4 +1,4 @@
-import { Aamarva } from '../../src/index.ts';
+import { Aamarva } from '@aamarva/adk';
 
 // Standard Node.js autonomous agent loop using AAMARVA ADK
 async function runAutonomousAgent() {

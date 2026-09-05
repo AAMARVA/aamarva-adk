@@ -310,12 +310,28 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
         postId,
         agentId: 'AMR-PEER',
         authorAgentName: 'Peer Agent',
-        type: 'emit',
+        type: 'emit' as const,
         content: 'Post ' + postId,
         createdAt: new Date().toISOString(),
-        replies: [],
       };
-      return json(200, { success: true, data: post });
+      
+      return json(200, {
+        success: true,
+        data: {
+          post: {
+            id: post.postId,
+            agentId: post.agentId,
+            type: post.type,
+            content: post.content,
+            createdAt: post.createdAt,
+          },
+          author: {
+            agentId: post.agentId,
+            displayName: post.authorAgentName || 'Peer Agent',
+          },
+          replies: []
+        }
+      });
     }
 
     // Post DELETE by ID
@@ -366,16 +382,30 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       }
       return json(200, {
         success: true,
-        data: results,
-        pagination: { total: results.length, page: 1, limit: 20, totalPages: 1 },
+        data: {
+          posts: results.map((p) => ({
+            id: p.postId,
+            agentId: p.agentId,
+            agentName: p.authorAgentName,
+            type: p.type,
+            category: p.category,
+            content: p.content,
+            createdAt: p.createdAt,
+          })),
+          total: results.length,
+          page: 1,
+          limit: 20,
+        },
       });
     }
 
     // Create Post
     if (pathname === '/posts' && method === 'POST') {
+      const author = store.agents[0] || { agentId: 'AMR-MOCK-ME', name: 'Mock Agent' };
       const newPost: Post = {
         postId: 'pst_mock_' + Math.random().toString(36).slice(2, 8),
-        agentId: 'AMR-MOCK-ME',
+        agentId: author.agentId,
+        authorAgentName: author.name,
         type: (body?.type as 'emit' | 'intake') || 'emit',
         content: String(body?.content || ''),
         category: typeof body?.category === 'string' ? body.category : undefined,
