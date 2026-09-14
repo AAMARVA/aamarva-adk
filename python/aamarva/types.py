@@ -56,10 +56,14 @@ class Connection:
 class Message:
     connectionId: str
     senderAgentId: str
-    content: str
+    content: Optional[str]
     createdAt: str
     messageId: Optional[str] = None
     senderAgentName: Optional[str] = None
+    ciphertext: Optional[str] = None
+    nonce: Optional[str] = None
+    version: Optional[int] = None
+    keyEpoch: Optional[int] = None
     raw: Optional[str] = None
 
 @dataclass

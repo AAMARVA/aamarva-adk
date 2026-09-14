@@ -246,10 +246,11 @@ async function runSdkTests() {
   assert.ok(Array.isArray(messages), 'getMessages() should return Message array');
   assert.ok(messages.some((m) => m.content.includes('smart contract')), 'Sent message should be in transcript');
 
-  const rawTranscript = await activeConn.getRawTranscript();
-  assert.ok(Array.isArray(rawTranscript), 'getRawTranscript() should return string array');
-  assert.ok(typeof rawTranscript[0] === 'string', 'Transcript items should be strings');
-  console.log('✓ Direct messaging & transcript verified.');
+  const encryptedEnvelopes = await activeConn.getEncryptedMessages();
+  assert.ok(Array.isArray(encryptedEnvelopes), 'getEncryptedMessages() should return encrypted envelope array');
+  assert.ok(encryptedEnvelopes[0].ciphertext, 'Encrypted envelope should contain ciphertext');
+  assert.ok(encryptedEnvelopes[0].nonce, 'Encrypted envelope should contain nonce');
+  console.log('✓ Direct messaging & E2EE verified.');
 
   // 9. Single-Flight Auth & Concurrent Request Deduplication
   console.log('9. Testing single-flight authentication...');
@@ -406,10 +407,33 @@ async function runSdkTests() {
   assert.strictEqual(normConn.connectionId, 'conn_1');
   assert.strictEqual(normConn.agentId, 'AMR-THEM');
 
-  const normMsg = normalizeMessage('AMR-PEER-1: Structured data update', 'conn_1');
+  // Verify valid encrypted envelope normalizes correctly
+  const validEnvelope = {
+    messageId: 'msg_test_1',
+    connectionId: 'conn_1',
+    senderAgentId: 'AMR-PEER-1',
+    ciphertext: 'dGVzdGNpcGhlcnRleHQ=',
+    nonce: 'dGVzdG5vbmNlMTI=',
+    version: 1,
+    keyEpoch: 1,
+  };
+  const normMsg = normalizeMessage(validEnvelope, 'conn_1');
   assert.strictEqual(normMsg.senderAgentId, 'AMR-PEER-1');
-  assert.strictEqual(normMsg.content, 'Structured data update');
-  console.log('✓ Normalization layer functions verified.');
+  assert.strictEqual(normMsg.ciphertext, 'dGVzdGNpcGhlcnRleHQ=');
+  assert.strictEqual(normMsg.content, null);
+
+  // Strict check: plaintext string must throw PLAINTEXT_MESSAGE_RECEIVED
+  assert.throws(
+    () => normalizeMessage('AMR-PEER-1: Structured data update', 'conn_1'),
+    (err: any) => err?.code === 'PLAINTEXT_MESSAGE_RECEIVED'
+  );
+
+  // Strict check: plaintext content without ciphertext must throw PLAINTEXT_MESSAGE_RECEIVED
+  assert.throws(
+    () => normalizeMessage({ connectionId: 'conn_1', content: 'hello world' }, 'conn_1'),
+    (err: any) => err?.code === 'PLAINTEXT_MESSAGE_RECEIVED'
+  );
+  console.log('✓ Normalization layer functions verified (strict E2EE transport enforced).');
 
   console.log('--------------------------------------------------');
   console.log('✓ ALL SDK UNIT & INTEGRATION TESTS PASSED!');

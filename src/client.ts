@@ -39,6 +39,7 @@ import {
   normalizeMessage,
 } from './normalize.js';
 import { AamarvaValidationError } from './errors.js';
+import { EncryptedEnvelope } from './crypto.js';
 
 export class Aamarva {
   public readonly http: HttpClient;
@@ -395,7 +396,7 @@ export class Aamarva {
     const response = await this.http.request<Record<string, any>>({
       method: 'GET',
       path: `/posts/${postId.trim()}`,
-      auth: true,
+      auth: false,
     });
 
     const rawData = response.data || {};
@@ -474,7 +475,7 @@ export class Aamarva {
       method: 'GET',
       path: `/posts/${postId.trim()}/replies`,
       query: options,
-      auth: true,
+      auth: false,
     });
 
     const rawData = response.data as any;
@@ -771,48 +772,45 @@ export class Aamarva {
     if (!connectionId?.trim()) {
       throw new AamarvaValidationError('connectionId is required to send a message.');
     }
-
-    const content = (typeof options === 'string' ? options : options?.message || options?.content || '').trim();
-    if (!content) {
-      throw new AamarvaValidationError('Message content cannot be empty.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: `/connections/${connectionId.trim()}/messages`,
-      body: { content },
-      auth: true,
-    });
-
-    return normalizeMessage(response.data, connectionId.trim());
+    const conn = this.getConnection(connectionId);
+    return conn.send(options);
   }
 
   /**
-   * Retrieve normalized message list from a connection
+   * Convenience alias for sending private messages
+   */
+  public async sendMessage(
+    connectionId: string,
+    content: string,
+    peerAgentId?: string
+  ): Promise<Message> {
+    return this.message(connectionId, { content, peerAgentId });
+  }
+
+  /**
+   * Retrieve normalized and decrypted message list from a connection
    */
   public async getMessages(connectionId: string, options: { page?: number; limit?: number } = {}): Promise<Message[]> {
     if (!connectionId?.trim()) {
       throw new AamarvaValidationError('connectionId is required.');
     }
-
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: `/connections/${connectionId.trim()}/messages`,
-      query: options,
-      auth: true,
-    });
-
-    const rawData = response.data as any;
-    const rawList: unknown[] = Array.isArray(rawData)
-      ? rawData
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.messages))
-      ? rawData.messages
-      : [];
-    return rawList.map((item) => normalizeMessage(item, connectionId.trim()));
+    const conn = this.getConnection(connectionId.trim());
+    return conn.getMessages(options);
   }
 
   /**
-   * Retrieve the raw string transcript array from a connection
+   * Retrieve raw encrypted transport message envelopes directly from the backend
+   */
+  public async getEncryptedMessages(connectionId: string, options: { page?: number; limit?: number } = {}): Promise<EncryptedEnvelope[]> {
+    if (!connectionId?.trim()) {
+      throw new AamarvaValidationError('connectionId is required.');
+    }
+    const conn = this.getConnection(connectionId.trim());
+    return conn.getEncryptedMessages(options);
+  }
+
+  /**
+   * @deprecated Use getEncryptedMessages() instead. The AAMARVA backend only stores and transports encrypted E2EE envelopes for private connections, never plaintext transcripts.
    */
   public async getRawTranscript(connectionId: string, options: { page?: number; limit?: number } = {}): Promise<string[]> {
     if (!connectionId?.trim()) {
@@ -866,7 +864,7 @@ export class Aamarva {
     const response = await this.http.request<unknown>({
       method: 'GET',
       path: `/agents/${agentId.trim()}`,
-      auth: true,
+      auth: false,
     });
 
     return normalizeAgent(response.data);

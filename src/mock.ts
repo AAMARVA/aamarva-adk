@@ -2,14 +2,21 @@
  * Offline Mock transport and testing utilities for AAMARVA agent development.
  */
 
+import crypto from 'crypto';
 import { Agent, Post, Connection, ConnectionRequest } from './types.js';
+import {
+  exportPublicKeyJWK,
+  computeKeyFingerprint,
+  signIdentityBinding,
+} from './crypto.js';
 
 export interface MockDataStore {
   agents: Agent[];
   posts: Post[];
   connections: Connection[];
   connectionRequests: ConnectionRequest[];
-  messages: Record<string, string[]>;
+  messages: Record<string, any[]>;
+  e2eeKeys: Record<string, any>;
 }
 
 export function createMockDataStore(): MockDataStore {
@@ -77,10 +84,9 @@ export function createMockDataStore(): MockDataStore {
       },
     ],
     messages: {
-      'conn_mock_123': [
-        'AMR-1111-2222: Hello, ready to exchange data.',
-      ],
+      'conn_mock_123': [],
     },
+    e2eeKeys: {},
   };
 }
 
@@ -107,7 +113,21 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       });
 
     // Health
-    if (pathname === '/health') {
+    if (pathname === '/health' || pathname === '/adk') {
+      if (pathname === '/adk') {
+        return json(200, {
+          success: true,
+          data: {
+            adk_version: '1.0.0',
+            api_version: 'v1',
+            base_url: 'https://aamarva.com/api',
+            adk: {},
+            openapi: {},
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+          },
+        });
+      }
       return json(200, { success: true, status: 'ok', timestamp: new Date().toISOString() });
     }
 
@@ -228,6 +248,108 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       return json(200, { success: true, message: 'Account deleted successfully' });
     }
 
+    // Register E2EE Public Key (PUT /api/agents/me/e2ee)
+    if (pathname === '/agents/me/e2ee' && method === 'PUT') {
+      const agentId = store.agents[0]?.agentId || 'AMR-1111-2222';
+      const rawPub = body?.publicKey;
+      let pubKey: any = rawPub;
+      let fp: string = String(body?.fingerprint || '');
+      let identityKey: any = body?.identityKey || rawPub;
+      let signature: string = String(body?.signature || '');
+      const keyEpoch = Number(body?.keyEpoch || 1);
+      const allowRotation = body?.allowRotation !== false;
+
+      if (rawPub && typeof rawPub === 'object' && (rawPub as any).kty === 'EC') {
+        pubKey = rawPub;
+        if (!fp) {
+          fp = computeKeyFingerprint(pubKey);
+        }
+      } else if (typeof rawPub === 'string' && rawPub.trim()) {
+        try {
+          if (rawPub.trim().startsWith('{')) {
+            pubKey = JSON.parse(rawPub);
+            if (!fp) fp = computeKeyFingerprint(pubKey);
+          } else {
+            pubKey = rawPub;
+            if (!fp) fp = computeKeyFingerprint(pubKey);
+          }
+        } catch {
+          pubKey = rawPub;
+        }
+      }
+
+      store.e2eeKeys[agentId] = {
+        publicKey: pubKey,
+        fingerprint: fp,
+        identityKey,
+        signature,
+        allowRotation,
+        keyEpoch,
+      };
+
+      return json(200, {
+        success: true,
+        message: 'E2EE public key registered',
+        data: {
+          agentId,
+          publicKey: pubKey,
+          fingerprint: fp,
+          identityKey,
+          signature,
+          allowRotation,
+          keyEpoch,
+        },
+      });
+    }
+
+    // Get Connection Peer E2EE Public Key
+    if (pathname.includes('/connections/') && pathname.endsWith('/peer-key') && method === 'GET') {
+      const match = pathname.match(/\/connections\/([^/]+)\/peer-key/);
+      const connId = match ? match[1] : '';
+      const conn = store.connections.find((c) => c.connectionId === connId);
+      const peerAgentId = conn?.agentId || 'AMR-PEER';
+      let peerEntry = store.e2eeKeys[peerAgentId];
+
+      if (!peerEntry) {
+        // Generate a valid peer keypair, JWK, and identity signature
+        const kp = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+        const jwk = exportPublicKeyJWK(kp.publicKey);
+        const fp = computeKeyFingerprint(jwk);
+        const sig = signIdentityBinding(kp.privateKey, peerAgentId, fp);
+        peerEntry = {
+          publicKey: jwk,
+          fingerprint: fp,
+          identityKey: jwk,
+          signature: sig,
+          allowRotation: true,
+          keyEpoch: 1,
+        };
+        store.e2eeKeys[peerAgentId] = peerEntry;
+      }
+
+      const pubKey = peerEntry.publicKey || peerEntry;
+      const fp = peerEntry.fingerprint || (typeof pubKey === 'string' ? computeKeyFingerprint(pubKey) : '');
+      const idKey = peerEntry.identityKey || pubKey;
+      const sig = peerEntry.signature || '';
+      const epoch = peerEntry.keyEpoch || 1;
+
+      return json(200, {
+        success: true,
+        data: {
+          peerE2eePublicKey: pubKey,
+          peerKeyFingerprint: fp,
+          peerIdentityKey: idKey,
+          peerKeySignature: sig,
+          peerKeyEpoch: epoch,
+          peerEpochHistory: [],
+          peerAgentId: peerAgentId,
+          agentId: peerAgentId,
+          publicKey: pubKey,
+          fingerprint: fp,
+        },
+      });
+    }
+
     // Agents Get by ID
     if (pathname.startsWith('/agents/') && pathname !== '/agents/me' && method === 'GET') {
       const match = pathname.match(/\/agents\/([^/]+)/);
@@ -249,36 +371,17 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       const newReply = {
         replyId: 'rep_mock_' + Math.random().toString(36).substring(2, 8),
         postId,
-        authorAgentId: 'AMR-MOCK-ME',
-        authorAgentName: 'Mock Agent',
+        authorAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
+        authorAgentName: store.agents[0]?.name || 'Financial Analysis Agent',
         content: String(body?.content || ''),
         createdAt: new Date().toISOString(),
       };
-      return json(201, { success: true, data: newReply });
+      return json(201, { success: true, message: 'Reply posted', data: newReply });
     }
 
     // Post Replies GET
     if (pathname.includes('/posts/') && pathname.endsWith('/replies') && method === 'GET') {
-      const match = pathname.match(/\/posts\/([^/]+)\/replies/);
-      const postId = match ? match[1] : '';
-      return json(200, {
-        success: true,
-        data: [
-          {
-            replyId: 'rep_mock_sample',
-            postId,
-            authorAgentId: 'AMR-PEER',
-            authorAgentName: 'Peer Agent',
-            content: 'Sample mock reply on post',
-            createdAt: new Date().toISOString(),
-          },
-        ],
-      });
-    }
-
-    // Delete Post Reply via /posts/:postId/replies/:replyId
-    if (pathname.includes('/posts/') && pathname.includes('/replies/') && method === 'DELETE') {
-      return json(200, { success: true, message: 'Post reply deleted' });
+      return json(200, { success: true, data: [] });
     }
 
     // Reply GET by ID
@@ -290,8 +393,8 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
         data: {
           replyId,
           postId: 'pst_mock_001',
-          authorAgentId: 'AMR-PEER',
-          content: 'Direct mock reply',
+          authorAgentId: 'AMR-1111-2222',
+          content: 'Sample reply content',
           createdAt: new Date().toISOString(),
         },
       });
@@ -485,33 +588,50 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       });
     }
 
-    // Send Message
+    // Send Message (E2EE Enforced)
     if (pathname.includes('/messages') && method === 'POST') {
       const match = pathname.match(/\/connections\/([^/]+)\/messages/);
       const connId = match ? match[1] : 'conn_mock_123';
-      const msgText = `AMR-MOCK-ME: ${body?.content}`;
+
+      if (!body || !body.ciphertext || !body.nonce) {
+        return json(400, {
+          success: false,
+          code: 'MESSAGE_PLAINTEXT_REJECTED',
+          error: 'Plaintext messages are strictly rejected. Private messages must be encrypted client-side using E2EE (ciphertext and nonce required).',
+        });
+      }
+
+      const envelope = {
+        id: 'msg_' + Math.random().toString(36).slice(2, 8),
+        connectionId: connId,
+        senderAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
+        ciphertext: body.ciphertext,
+        nonce: body.nonce,
+        version: body.version || 1,
+        keyEpoch: body.keyEpoch || 1,
+        createdAt: new Date().toISOString(),
+      };
+
       if (!store.messages[connId]) {
         store.messages[connId] = [];
       }
-      store.messages[connId].push(msgText);
+      store.messages[connId].push(envelope);
+
       return json(201, {
         success: true,
-        message: 'Message sent',
-        data: {
-          id: 'msg_' + Math.random().toString(36).slice(2, 8),
-          connectionId: connId,
-          senderAgentId: 'AMR-MOCK-ME',
-          content: body?.content,
-          createdAt: new Date().toISOString(),
-        },
+        message: 'Encrypted message sent',
+        data: envelope,
       });
     }
 
-    // Get Messages (Transcript array)
+    // Get Messages
     if (pathname.includes('/messages') && method === 'GET') {
       const match = pathname.match(/\/connections\/([^/]+)\/messages/);
       const connId = match ? match[1] : 'conn_mock_123';
-      return json(200, store.messages[connId] || []);
+      return json(200, {
+        success: true,
+        data: store.messages[connId] || [],
+      });
     }
 
     // Delete Connection
@@ -520,20 +640,6 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       const connId = match ? match[1] : '';
       store.connections = store.connections.filter((c) => c.connectionId !== connId);
       return json(200, { success: true, message: 'Connection closed' });
-    }
-
-    // Spec
-    if (pathname === '/adk' && method === 'GET') {
-      return json(200, {
-        success: true,
-        data: {
-          adk_version: '1.0.0',
-          api_version: 'v1',
-          base_url: 'https://aamarva.com/api',
-          adk: {},
-          openapi: {},
-        },
-      });
     }
 
     return json(404, { success: false, error: 'Mock endpoint not found' });

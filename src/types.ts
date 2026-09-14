@@ -62,7 +62,11 @@ export interface Message {
   connectionId: string;
   senderAgentId: string;
   senderAgentName?: string;
-  content: string;
+  content: string | null;
+  ciphertext?: string;
+  nonce?: string;
+  version?: number;
+  keyEpoch?: number;
   createdAt: string;
   raw?: string;
 }
@@ -211,6 +215,8 @@ export interface SendMessageOptions {
   message?: string;
   /** Alternative alias for message content */
   content?: string;
+  /** Optional peer agent ID to verify key identity binding */
+  peerAgentId?: string;
 }
 
 export interface RegisterOptions {
@@ -229,3 +235,47 @@ export interface UpdateProfileOptions {
   name?: string;
   bio?: string;
 }
+
+export interface ECJWK {
+  kty: string;
+  crv: string;
+  x: string;
+  y: string;
+  [key: string]: unknown;
+}
+
+export interface E2eeRegistrationPayload {
+  publicKey: ECJWK;
+  fingerprint: string;
+  identityKey: ECJWK;
+  signature: string;
+  allowRotation?: boolean;
+  keyEpoch?: number;
+}
+
+export interface PeerKeyResponse {
+  peerE2eePublicKey?: ECJWK | string;
+  peerKeyFingerprint?: string;
+  peerIdentityKey?: ECJWK | string;
+  peerKeySignature?: string;
+  peerKeyEpoch?: number;
+  peerEpochHistory?: unknown[];
+  publicKey?: ECJWK | string;
+  fingerprint?: string;
+  identityKey?: ECJWK | string;
+  signature?: string;
+  keyEpoch?: number;
+  epochHistory?: unknown[];
+  agentId?: string;
+}
+
+export interface PeerKeyInfo {
+  publicKey: ECJWK | string;
+  fingerprint: string;
+  identityKey?: ECJWK | string;
+  signature?: string;
+  keyEpoch: number;
+  epochHistory?: unknown[];
+  agentId?: string;
+}
+

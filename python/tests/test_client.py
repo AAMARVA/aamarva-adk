@@ -15,11 +15,33 @@ from aamarva.errors import (
     AamarvaConnectionError,
     AamarvaValidationError
 )
+from aamarva.crypto import (
+    get_local_identity_key,
+    get_local_public_key_pem,
+    compute_key_fingerprint,
+    encrypt_message_with_keys,
+    decrypt_message_with_keys,
+    export_public_key_jwk,
+    sign_identity_binding
+)
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
 
 class TestAamarvaClientAPIs(unittest.TestCase):
     def setUp(self):
         self.client = Aamarva(agent_id="test-agent", api_key="test-key")
         self.client.http.request = MagicMock()
+        self.peer_priv = ec.generate_private_key(ec.SECP256R1())
+        self.peer_pub_pem = self.peer_priv.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode('utf-8')
+        self.peer_pub_jwk = export_public_key_jwk(self.peer_priv.public_key())
+        self.peer_fp = compute_key_fingerprint(self.peer_priv.public_key())
+        
+        self.peer_identity_priv = ec.generate_private_key(ec.SECP256R1())
+        self.peer_identity_pub_jwk = export_public_key_jwk(self.peer_identity_priv.public_key())
+        self.peer_sig = sign_identity_binding(self.peer_identity_priv, "AMR-B", self.peer_fp)
 
     def test_discover_all(self):
         def mock_request(method, path, auth, params=None, json_data=None):
@@ -58,13 +80,13 @@ class TestAamarvaClientAPIs(unittest.TestCase):
         self.client.http.request.return_value = {"success": True, "data": {"agentId": "AMR-1", "name": "Agent 1"}}
         agent = self.client.get_agent("AMR-1")
         self.assertEqual(agent.agentId, "AMR-1")
-        self.client.http.request.assert_called_with("GET", "/agents/AMR-1", auth=True)
+        self.client.http.request.assert_called_with("GET", "/agents/AMR-1", auth=False)
 
     def test_get_post(self):
         self.client.http.request.return_value = {"success": True, "data": {"postId": "p-1", "agentId": "AMR-1", "type": "emit", "content": "test", "createdAt": "2023"}}
         post = self.client.get_post("p-1")
         self.assertEqual(post.postId, "p-1")
-        self.client.http.request.assert_called_with("GET", "/posts/p-1", auth=True)
+        self.client.http.request.assert_called_with("GET", "/posts/p-1", auth=False)
 
     def test_emit(self):
         self.client.http.request.return_value = {"success": True, "data": {"postId": "p-1", "agentId": "AMR-1", "type": "emit", "content": "cap", "createdAt": "2023", "category": "tech"}}
@@ -86,16 +108,19 @@ class TestAamarvaClientAPIs(unittest.TestCase):
         self.client.http.request.assert_called_with("POST", "/connections/requests", auth=True, json_data={"receiverAgentId": "AMR-B"})
 
     def test_get_messages_raw_strings(self):
-        self.client.http.request.return_value = [
-            "AMR-X7F2-K9B4: Initiating dataset transfer.",
-            "AMR-9999-0000: Acknowledged. Ready for receipt."
-        ]
-        msgs = self.client.get_messages("conn-1")
-        self.assertEqual(len(msgs), 2)
-        self.assertEqual(msgs[0].senderAgentId, "AMR-X7F2-K9B4")
-        self.assertEqual(msgs[0].content, "Initiating dataset transfer.")
-        self.assertEqual(msgs[1].senderAgentId, "AMR-9999-0000")
-        self.assertEqual(msgs[1].content, "Acknowledged. Ready for receipt.")
+        def mock_req(method, path, auth=False, params=None, json_data=None):
+            if path == "/connections/conn-1/peer-key":
+                return {"success": True, "data": {"peerAgentId": "AMR-B", "peerE2eePublicKey": self.peer_pub_jwk, "peerKeyFingerprint": self.peer_fp, "peerIdentityKey": self.peer_identity_pub_jwk, "peerKeySignature": self.peer_sig, "peerKeyEpoch": 1}}
+            if path == "/connections/conn-1/messages":
+                return [
+                    "AMR-X7F2-K9B4: Initiating dataset transfer.",
+                    "AMR-9999-0000: Acknowledged. Ready for receipt."
+                ]
+            return {}
+        self.client.http.request.side_effect = mock_req
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.get_messages("conn-1")
+        self.assertEqual(ctx.exception.code, "PLAINTEXT_MESSAGE_RECEIVED")
 
     def test_get_post_nested_contract(self):
         self.client.http.request.return_value = {
@@ -177,31 +202,74 @@ class TestAamarvaClientAPIs(unittest.TestCase):
         self.client.http.request.assert_called_with("GET", "/connections", auth=True)
 
     def test_send_message(self):
-        self.client.http.request.return_value = {"success": True, "data": {"connectionId": "conn-1", "senderAgentId": "AMR-A", "content": "msg", "createdAt": "2023", "messageId": "msg-1"}}
+        captured_body = {}
+        def mock_req(method, path, auth=False, params=None, json_data=None):
+            if path == "/agents/me/e2ee":
+                return {"success": True}
+            if path == "/connections/conn-1/peer-key":
+                return {"success": True, "data": {"peerAgentId": "AMR-B", "peerE2eePublicKey": self.peer_pub_jwk, "peerKeyFingerprint": self.peer_fp, "peerIdentityKey": self.peer_identity_pub_jwk, "peerKeySignature": self.peer_sig, "peerKeyEpoch": 1}}
+            if path == "/connections/conn-1/messages" and method == "POST":
+                nonlocal captured_body
+                captured_body = json_data
+                return {"success": True, "data": {
+                    "connectionId": "conn-1",
+                    "senderAgentId": "test-agent",
+                    "ciphertext": json_data["ciphertext"],
+                    "nonce": json_data["nonce"],
+                    "version": json_data.get("version", 1),
+                    "keyEpoch": json_data.get("keyEpoch", 1),
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "messageId": "msg-1"
+                }}
+            return {}
+        self.client.http.request.side_effect = mock_req
         msg = self.client.send_message("conn-1", "msg")
         self.assertEqual(msg.messageId, "msg-1")
-        self.client.http.request.assert_called_with("POST", "/connections/conn-1/messages", auth=True, json_data={"content": "msg"})
+        self.assertEqual(msg.content, "msg")
+        self.assertNotIn("msg", json.dumps(captured_body))
+        self.assertIn("ciphertext", captured_body)
+        self.assertIn("nonce", captured_body)
 
     def test_get_messages(self):
-        self.client.http.request.return_value = {"success": True, "data": [{"connectionId": "conn-1", "senderAgentId": "AMR-A", "content": "msg", "createdAt": "2023"}]}
+        local_pub_pem = get_local_public_key_pem()
+        local_fp = compute_key_fingerprint(local_pub_pem)
+        encrypted_env = encrypt_message_with_keys("msg", "conn-1", self.peer_priv, local_pub_pem, local_fp, "test-agent", sign_identity_binding(self.peer_identity_priv, "test-agent", local_fp), self.peer_identity_pub_jwk, key_epoch=1)
+
+        def mock_req(method, path, auth=False, params=None, json_data=None):
+            if path == "/connections/conn-1/peer-key":
+                return {"success": True, "data": {"peerAgentId": "AMR-B", "peerE2eePublicKey": self.peer_pub_jwk, "peerKeyFingerprint": self.peer_fp, "peerIdentityKey": self.peer_identity_pub_jwk, "peerKeySignature": self.peer_sig, "peerKeyEpoch": 1}}
+            if path == "/connections/conn-1/messages":
+                return {"success": True, "data": [{
+                    "connectionId": "conn-1",
+                    "senderAgentId": "AMR-B",
+                    "ciphertext": encrypted_env["ciphertext"],
+                    "nonce": encrypted_env["nonce"],
+                    "version": encrypted_env["version"],
+                    "keyEpoch": encrypted_env["keyEpoch"],
+                    "createdAt": "2026-01-01T00:00:00Z"
+                }]}
+            return {}
+        self.client.http.request.side_effect = mock_req
         msgs = self.client.get_messages("conn-1")
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0].content, "msg")
-        self.client.http.request.assert_called_with("GET", "/connections/conn-1/messages", auth=True)
 
     def test_reply(self):
+        self.client.http.request.side_effect = None
         self.client.http.request.return_value = {"success": True, "data": {"replyId": "r-1", "postId": "p-1", "authorAgentId": "AMR-A", "content": "reply content", "createdAt": "2023"}}
         reply = self.client.reply("p-1", "reply content")
         self.assertEqual(reply.replyId, "r-1")
         self.client.http.request.assert_called_with("POST", "/posts/p-1/replies", auth=True, json_data={"content": "reply content"})
 
     def test_connect_from_reply(self):
+        self.client.http.request.side_effect = None
         self.client.http.request.return_value = {"success": True, "data": {"connectionId": "conn-1", "agentId": "AMR-B", "status": "active", "createdAt": "2023"}}
         conn = self.client.connect_from_reply("reply-1")
         self.assertEqual(conn.connectionId, "conn-1")
         self.client.http.request.assert_called_with("POST", "/connections", auth=True, json_data={"replyId": "reply-1"})
 
     def test_health(self):
+        self.client.http.request.side_effect = None
         self.client.http.request.return_value = {"status": "ok"}
         h = self.client.health()
         self.assertEqual(h["status"], "ok")
@@ -215,15 +283,51 @@ class TestAamarvaClientAPIs(unittest.TestCase):
             "createdAt": "2023"
         }
         conn = AamarvaConnection(client=self.client, **conn_kwargs)
-        
-        self.client.http.request.return_value = {"success": True, "data": {"connectionId": "conn-1", "senderAgentId": "AMR-A", "content": "hello", "createdAt": "2023"}}
+
+        captured_body = {}
+        local_pub_pem = get_local_public_key_pem()
+        local_fp = compute_key_fingerprint(local_pub_pem)
+        encrypted_env = encrypt_message_with_keys("hello from peer", "conn-1", self.peer_priv, local_pub_pem, local_fp, "test-agent", sign_identity_binding(self.peer_identity_priv, "test-agent", local_fp), self.peer_identity_pub_jwk, key_epoch=1)
+
+        def mock_req(method, path, auth=False, params=None, json_data=None):
+            if path == "/agents/me/e2ee":
+                return {"success": True}
+            if path == "/connections/conn-1/peer-key":
+                return {"success": True, "data": {"peerAgentId": "AMR-B", "peerE2eePublicKey": self.peer_pub_jwk, "peerKeyFingerprint": self.peer_fp, "peerIdentityKey": self.peer_identity_pub_jwk, "peerKeySignature": self.peer_sig, "peerKeyEpoch": 1}}
+            if path == "/connections/conn-1/messages" and method == "POST":
+                nonlocal captured_body
+                captured_body = json_data
+                return {"success": True, "data": {
+                    "connectionId": "conn-1",
+                    "senderAgentId": "test-agent",
+                    "ciphertext": json_data["ciphertext"],
+                    "nonce": json_data["nonce"],
+                    "version": json_data.get("version", 1),
+                    "keyEpoch": json_data.get("keyEpoch", 1),
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "messageId": "msg-1"
+                }}
+            if path == "/connections/conn-1/messages" and method == "GET":
+                return {"success": True, "data": [{
+                    "connectionId": "conn-1",
+                    "senderAgentId": "AMR-B",
+                    "ciphertext": encrypted_env["ciphertext"],
+                    "nonce": encrypted_env["nonce"],
+                    "version": encrypted_env["version"],
+                    "keyEpoch": encrypted_env["keyEpoch"],
+                    "createdAt": "2026-01-01T00:00:00Z"
+                }]}
+            return {}
+        self.client.http.request.side_effect = mock_req
+
         msg = conn.send("hello")
         self.assertEqual(msg.content, "hello")
-        self.client.http.request.assert_called_with("POST", "/connections/conn-1/messages", auth=True, json_data={"content": "hello"})
-        
-        self.client.http.request.return_value = {"success": True, "data": [{"connectionId": "conn-1", "senderAgentId": "AMR-A", "content": "hello", "createdAt": "2023"}]}
+        self.assertNotIn("hello", json.dumps(captured_body))
+        self.assertIn("ciphertext", captured_body)
+
         msgs = conn.get_messages()
         self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].content, "hello from peer")
 
 class TestAamarvaHTTP(unittest.TestCase):
     @patch("urllib.request.urlopen")

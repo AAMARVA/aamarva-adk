@@ -11,6 +11,7 @@ import {
   ConnectionRequest,
   Message,
 } from './types.js';
+import { AamarvaError } from './errors.js';
 
 export function normalizeAgent(raw: unknown): Agent {
   if (!raw || typeof raw !== 'object') {
@@ -157,44 +158,79 @@ export function normalizeConnectionRequest(raw: unknown): ConnectionRequest {
 
 export function normalizeMessage(raw: unknown, connectionId?: string): Message {
   if (typeof raw === 'string') {
-    // Parse raw transcript formatted string e.g. "AMR-1111-2222: Hello World"
-    const colonIdx = raw.indexOf(':');
-    if (colonIdx > 0) {
-      const sender = raw.slice(0, colonIdx).trim();
-      const text = raw.slice(colonIdx + 1).trim();
-      return {
-        connectionId: connectionId || '',
-        senderAgentId: sender,
-        content: text,
-        createdAt: new Date().toISOString(),
-        raw,
-      };
-    }
-    return {
-      connectionId: connectionId || '',
-      senderAgentId: '',
-      content: raw,
-      createdAt: new Date().toISOString(),
-      raw,
-    };
+    throw new AamarvaError('Plaintext transcript string received on private E2EE channel; transport must be encrypted.', {
+      code: 'PLAINTEXT_MESSAGE_RECEIVED',
+    });
   }
 
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>;
+
+    // Reject unencrypted content / message strings on private message transport
+    const hasPlaintextContent =
+      (typeof obj.content === 'string' && obj.content.trim() !== '') ||
+      (typeof obj.message === 'string' && obj.message.trim() !== '');
+
+    const ciphertext = typeof obj.ciphertext === 'string' && obj.ciphertext.trim() ? obj.ciphertext : undefined;
+    const nonce = typeof obj.nonce === 'string' && obj.nonce.trim() ? obj.nonce : undefined;
+    const rawVersion = obj.version;
+    const version =
+      typeof rawVersion === 'number'
+        ? rawVersion
+        : typeof rawVersion === 'string' && !isNaN(Number(rawVersion))
+        ? Number(rawVersion)
+        : undefined;
+    const rawEpoch = obj.keyEpoch !== undefined ? obj.keyEpoch : obj.key_epoch;
+    const keyEpoch =
+      typeof rawEpoch === 'number'
+        ? rawEpoch
+        : typeof rawEpoch === 'string' && !isNaN(Number(rawEpoch))
+        ? Number(rawEpoch)
+        : undefined;
+
+    if (hasPlaintextContent && !ciphertext) {
+      throw new AamarvaError('Plaintext message received from private-message endpoint; transport must be encrypted.', {
+        code: 'PLAINTEXT_MESSAGE_RECEIVED',
+      });
+    }
+
+    if (!ciphertext || !nonce || version === undefined || keyEpoch === undefined) {
+      if (hasPlaintextContent) {
+        throw new AamarvaError('Plaintext message received from private-message endpoint; transport must be encrypted.', {
+          code: 'PLAINTEXT_MESSAGE_RECEIVED',
+        });
+      }
+      throw new AamarvaError(
+        'Invalid encrypted message: transport message must contain ciphertext, nonce, version, and keyEpoch.',
+        {
+          code: 'MESSAGE_INVALID_ENVELOPE',
+        }
+      );
+    }
+
     return {
       messageId: typeof obj.messageId === 'string' ? obj.messageId : typeof obj.id === 'string' ? obj.id : undefined,
       connectionId: String(obj.connectionId || obj.connection_id || connectionId || ''),
       senderAgentId: String(obj.senderAgentId || obj.sender_agent_id || obj.agentId || ''),
-      senderAgentName: typeof obj.senderAgentName === 'string' ? obj.senderAgentName : typeof obj.sender_agent_name === 'string' ? obj.sender_agent_name : undefined,
-      content: String(obj.content || obj.message || ''),
+      senderAgentName:
+        typeof obj.senderAgentName === 'string'
+          ? obj.senderAgentName
+          : typeof obj.sender_agent_name === 'string'
+          ? obj.sender_agent_name
+          : undefined,
+      content: null,
+      ciphertext,
+      nonce,
+      version,
+      keyEpoch,
       createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : new Date().toISOString(),
     };
   }
 
-  return {
-    connectionId: connectionId || '',
-    senderAgentId: '',
-    content: '',
-    createdAt: new Date().toISOString(),
-  };
+  throw new AamarvaError(
+    'Invalid encrypted message: transport message must contain ciphertext, nonce, version, and keyEpoch.',
+    {
+      code: 'MESSAGE_INVALID_ENVELOPE',
+    }
+  );
 }

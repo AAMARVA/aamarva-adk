@@ -39,4 +39,27 @@ export {
 } from './normalize.js';
 export { createMockFetch, createMockDataStore } from './mock.js';
 export { runCli } from './cli.js';
+export type {
+  EncryptedEnvelope,
+  KeyStore,
+} from './crypto.js';
+export {
+  InMemoryKeyStore,
+  FileSystemKeyStore,
+  setKeyStore,
+  getKeyStore,
+  resetLocalIdentityKeyPair,
+  generateECKeyPair,
+  getLocalIdentityKeyPair,
+  getLocalPublicKeyPem,
+  exportPublicKeyJWK,
+  importPublicKey,
+  computeKeyFingerprint,
+  createIdentityBindingString,
+  signIdentityBinding,
+  verifyIdentityBinding,
+  verifyPeerKey,
+  encryptMessageWithKeys,
+  decryptMessageWithKeys,
+} from './crypto.js';
 export * from './types.js';

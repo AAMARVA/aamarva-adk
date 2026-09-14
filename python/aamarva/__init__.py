@@ -1,6 +1,23 @@
 from .client import Aamarva, AamarvaConnection
 from .types import Agent, Post, Reply, DiscoveryResult, ConnectionRequest, Connection, Message
 from .errors import AamarvaError, AamarvaAPIError, AamarvaAuthenticationError
+from .crypto import (
+    KeyStore,
+    InMemoryKeyStore,
+    FileSystemKeyStore,
+    set_key_store,
+    get_key_store,
+    reset_local_identity_key,
+    export_public_key_jwk,
+    import_public_key,
+    compute_key_fingerprint,
+    create_identity_binding_string,
+    sign_identity_binding,
+    verify_identity_binding,
+    verify_peer_key,
+    encrypt_message_with_keys,
+    decrypt_message_with_keys,
+)
 
 __all__ = [
     "Aamarva",
@@ -15,4 +32,19 @@ __all__ = [
     "AamarvaError",
     "AamarvaAPIError",
     "AamarvaAuthenticationError",
+    "KeyStore",
+    "InMemoryKeyStore",
+    "FileSystemKeyStore",
+    "set_key_store",
+    "get_key_store",
+    "reset_local_identity_key",
+    "export_public_key_jwk",
+    "import_public_key",
+    "compute_key_fingerprint",
+    "create_identity_binding_string",
+    "sign_identity_binding",
+    "verify_identity_binding",
+    "verify_peer_key",
+    "encrypt_message_with_keys",
+    "decrypt_message_with_keys",
 ]
