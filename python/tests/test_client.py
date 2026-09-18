@@ -329,6 +329,129 @@ class TestAamarvaClientAPIs(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0].content, "hello from peer")
 
+    def test_cluster_methods(self):
+        # 1. create_cluster
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {
+                "clusterId": "cluster_123",
+                "name": "Market Cluster",
+                "description": "L2 Arbitrage",
+                "ownerAgentId": "test-agent",
+                "createdAt": "2026-09-16T07:22:00Z"
+            }
+        }
+        cluster = self.client.create_cluster("Market Cluster", "L2 Arbitrage")
+        self.assertEqual(cluster.clusterId, "cluster_123")
+        self.assertEqual(cluster.name, "Market Cluster")
+        self.client.http.request.assert_called_with("POST", "/clusters", auth=True, json_data={"name": "Market Cluster", "description": "L2 Arbitrage"})
+
+        # 2. get_clusters
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": [{
+                "id": "cluster_123",
+                "name": "Market Cluster",
+                "description": "L2 Arbitrage",
+                "ownerUserId": "usr_123",
+                "ownerAgentId": "test-agent",
+                "createdAt": "2026-09-16T07:22:00Z",
+                "updatedAt": "2026-09-16T07:22:00Z"
+            }]
+        }
+        clusters = self.client.get_clusters()
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0].clusterId, "cluster_123")
+        self.client.http.request.assert_called_with("GET", "/clusters", auth=True)
+
+        # 3. get_cluster
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {
+                "clusterId": "cluster_123",
+                "name": "Market Cluster",
+                "description": "L2 Arbitrage",
+                "ownerAgentId": "test-agent",
+                "membersCount": 3,
+                "createdAt": "2026-09-16T07:22:00Z"
+            }
+        }
+        c_details = self.client.get_cluster("cluster_123")
+        self.assertEqual(c_details.clusterId, "cluster_123")
+        self.assertEqual(c_details.membersCount, 3)
+
+        # 4. update_cluster
+        self.client.http.request.return_value = {"success": True, "message": "Cluster successfully updated."}
+        up_res = self.client.update_cluster("cluster_123", name="Phase II")
+        self.assertTrue(up_res.get("success"))
+
+        # 5. invite_to_cluster
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {
+                "inviteId": "inv_999",
+                "status": "pending"
+            }
+        }
+        inv = self.client.invite_to_cluster("cluster_123", "agent_beta")
+        self.assertEqual(inv.inviteId, "inv_999")
+        self.assertEqual(inv.status, "pending")
+
+        # 6. get_cluster_invites
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": [{
+                "id": "inv_999",
+                "clusterId": "cluster_123",
+                "inviterUserId": "usr_123",
+                "inviteeAgentId": "agent_beta",
+                "status": "pending",
+                "createdAt": "2026-09-16T07:25:00Z"
+            }]
+        }
+        invites = self.client.get_cluster_invites("cluster_123")
+        self.assertEqual(len(invites), 1)
+        self.assertEqual(invites[0].inviteId, "inv_999")
+
+        # 7. join_cluster
+        self.client.http.request.return_value = {"success": True, "message": "You have joined the cluster successfully."}
+        join_res = self.client.join_cluster("cluster_123", "inv_999")
+        self.assertTrue(join_res.get("success"))
+
+        # 8. remove_cluster_member
+        self.client.http.request.return_value = {"success": True, "message": "Member was successfully removed from the cluster."}
+        rm_res = self.client.remove_cluster_member("cluster_123", "agent_beta")
+        self.assertTrue(rm_res.get("success"))
+
+        # 9. send_cluster_message
+        self.client.http.request.return_value = {
+            "success": True,
+            "messageId": "msg_abc",
+            "createdAt": "2026-09-16T07:30:00Z"
+        }
+        send_res = self.client.send_cluster_message("cluster_123", "c-text", "iv-nonce")
+        self.assertTrue(send_res.get("success"))
+
+        # 10. get_cluster_messages
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": [{
+                "messageId": "msg_abc",
+                "senderAgentId": "test-agent",
+                "ciphertext": "c-text",
+                "nonce": "iv-nonce",
+                "createdAt": "2026-09-16T07:30:00Z"
+            }]
+        }
+        msgs = self.client.get_cluster_messages("cluster_123")
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].messageId, "msg_abc")
+
+        # 11. disband_cluster
+        self.client.http.request.return_value = {"success": True, "message": "Cluster successfully disbanded."}
+        dis_res = self.client.disband_cluster("cluster_123")
+        self.assertTrue(dis_res.get("success"))
+
 class TestAamarvaHTTP(unittest.TestCase):
     @patch("urllib.request.urlopen")
     def test_http_success_200(self, mock_urlopen):

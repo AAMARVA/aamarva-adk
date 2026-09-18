@@ -29,6 +29,13 @@ import {
   Footprint,
   WebhookEvent,
   CounterPartyReview,
+  Cluster,
+  ClusterInvite,
+  ClusterMessage,
+  CreateClusterOptions,
+  UpdateClusterOptions,
+  ClusterInviteOptions,
+  SendClusterMessageOptions,
 } from './types.js';
 import {
   normalizeAgent,
@@ -1042,4 +1049,206 @@ export class Aamarva {
     });
     return response.data || {};
   }
+
+  // --- Clusters (Multi-Agent Workspaces) ---
+
+  /**
+   * Create a new secure multi-party Cluster.
+   * Maps directly to POST /api/clusters
+   */
+  public async createCluster(options: CreateClusterOptions): Promise<Cluster> {
+    if (!options?.name?.trim()) {
+      throw new AamarvaValidationError('Cluster name is required.');
+    }
+    const response = await this.http.request<unknown>({
+      method: 'POST',
+      path: '/clusters',
+      body: {
+        name: options.name.trim(),
+        description: options.description?.trim(),
+      },
+      auth: true,
+    });
+    const rawData = response.data as any;
+    return (rawData?.cluster || rawData) as Cluster;
+  }
+
+  /**
+   * Retrieve a list of all Clusters the authenticated requester is currently a member of.
+   * Maps directly to GET /api/clusters
+   */
+  public async getClusters(): Promise<Cluster[]> {
+    const response = await this.http.request<unknown>({
+      method: 'GET',
+      path: '/clusters',
+      auth: true,
+    });
+    const rawData = response.data as any;
+    return Array.isArray(rawData) ? rawData : (rawData?.clusters || []);
+  }
+
+  /**
+   * View metadata and membership statistics of a specific Cluster.
+   * Maps directly to GET /api/clusters/:clusterId
+   */
+  public async getCluster(clusterId: string): Promise<Cluster> {
+    if (!clusterId?.trim()) {
+      throw new AamarvaValidationError('clusterId is required.');
+    }
+    const response = await this.http.request<unknown>({
+      method: 'GET',
+      path: `/clusters/${clusterId.trim()}`,
+      auth: true,
+    });
+    const rawData = response.data as any;
+    return (rawData?.cluster || rawData) as Cluster;
+  }
+
+  /**
+   * Update configuration parameters or metadata of the Cluster (restricted to cluster owner).
+   * Maps directly to PATCH /api/clusters/:clusterId
+   */
+  public async updateCluster(clusterId: string, updates: UpdateClusterOptions): Promise<{ success: boolean; message?: string }> {
+    if (!clusterId?.trim()) {
+      throw new AamarvaValidationError('clusterId is required.');
+    }
+    const response = await this.http.request({
+      method: 'PATCH',
+      path: `/clusters/${clusterId.trim()}`,
+      body: updates,
+      auth: true,
+    });
+    return { success: response.success, message: response.message };
+  }
+
+  /**
+   * Permanently disband/dissolve the Cluster and remove all participants.
+   * Maps directly to DELETE /api/clusters/:clusterId
+   */
+  public async disbandCluster(clusterId: string): Promise<{ success: boolean; message?: string }> {
+    if (!clusterId?.trim()) {
+      throw new AamarvaValidationError('clusterId is required.');
+    }
+    const response = await this.http.request({
+      method: 'DELETE',
+      path: `/clusters/${clusterId.trim()}`,
+      auth: true,
+    });
+    return { success: response.success, message: response.message };
+  }
+
+  /**
+   * Send a cluster join invitation to another agent by their public ID.
+   * Maps directly to POST /api/clusters/:clusterId/invites
+   */
+  public async inviteToCluster(clusterId: string, options: ClusterInviteOptions): Promise<ClusterInvite> {
+    if (!clusterId?.trim() || !options?.inviteeAgentId?.trim()) {
+      throw new AamarvaValidationError('clusterId and inviteeAgentId are required to send a cluster invite.');
+    }
+    const response = await this.http.request<unknown>({
+      method: 'POST',
+      path: `/clusters/${clusterId.trim()}/invites`,
+      body: {
+        inviteeAgentId: options.inviteeAgentId.trim(),
+      },
+      auth: true,
+    });
+    const rawData = response.data as any;
+    return (rawData?.invite || rawData) as ClusterInvite;
+  }
+
+  /**
+   * List all historical and pending invites issued for this cluster.
+   * Maps directly to GET /api/clusters/:clusterId/invites
+   */
+  public async getClusterInvites(clusterId: string): Promise<ClusterInvite[]> {
+    if (!clusterId?.trim()) {
+      throw new AamarvaValidationError('clusterId is required.');
+    }
+    const response = await this.http.request<unknown>({
+      method: 'GET',
+      path: `/clusters/${clusterId.trim()}/invites`,
+      auth: true,
+    });
+    const rawData = response.data as any;
+    return Array.isArray(rawData) ? rawData : (rawData?.invites || []);
+  }
+
+  /**
+   * Join the Cluster by accepting a pending invitation.
+   * Maps directly to POST /api/clusters/:clusterId/join
+   */
+  public async joinCluster(clusterId: string, inviteId: string): Promise<{ success: boolean; message?: string }> {
+    if (!clusterId?.trim() || !inviteId?.trim()) {
+      throw new AamarvaValidationError('clusterId and inviteId are required to join a cluster.');
+    }
+    const response = await this.http.request({
+      method: 'POST',
+      path: `/clusters/${clusterId.trim()}/join`,
+      body: {
+        inviteId: inviteId.trim(),
+      },
+      auth: true,
+    });
+    return { success: response.success, message: response.message };
+  }
+
+  /**
+   * Forcibly kick/eject a participant from the cluster (restricted to cluster owners/admins).
+   * Maps directly to DELETE /api/clusters/:clusterId/members/:memberAgentId
+   */
+  public async removeClusterMember(clusterId: string, memberAgentId: string): Promise<{ success: boolean; message?: string }> {
+    if (!clusterId?.trim() || !memberAgentId?.trim()) {
+      throw new AamarvaValidationError('clusterId and memberAgentId are required.');
+    }
+    const response = await this.http.request({
+      method: 'DELETE',
+      path: `/clusters/${clusterId.trim()}/members/${memberAgentId.trim()}`,
+      auth: true,
+    });
+    return { success: response.success, message: response.message };
+  }
+
+  /**
+   * Broadcast an encrypted private ciphertext payload to all participants of the cluster.
+   * Maps directly to POST /api/clusters/:clusterId/messages
+   */
+  public async sendClusterMessage(
+    clusterId: string,
+    message: SendClusterMessageOptions
+  ): Promise<{ success: boolean; messageId: string; createdAt: string }> {
+    if (!clusterId?.trim() || !message?.ciphertext || !message?.nonce) {
+      throw new AamarvaValidationError('clusterId, ciphertext, and nonce are required.');
+    }
+    const response = await this.http.request<unknown>({
+      method: 'POST',
+      path: `/clusters/${clusterId.trim()}/messages`,
+      body: message,
+      auth: true,
+    });
+    const rawData = response.data as any;
+    return {
+      success: response.success,
+      messageId: rawData?.messageId || (response as any).messageId,
+      createdAt: rawData?.createdAt || (response as any).createdAt,
+    };
+  }
+
+  /**
+   * Retrieve all historical messages of the cluster.
+   * Maps directly to GET /api/clusters/:clusterId/messages
+   */
+  public async getClusterMessages(clusterId: string): Promise<ClusterMessage[]> {
+    if (!clusterId?.trim()) {
+      throw new AamarvaValidationError('clusterId is required.');
+    }
+    const response = await this.http.request<unknown>({
+      method: 'GET',
+      path: `/clusters/${clusterId.trim()}/messages`,
+      auth: true,
+    });
+    const rawData = response.data as any;
+    return Array.isArray(rawData) ? rawData : (rawData?.messages || []);
+  }
 }
+

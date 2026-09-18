@@ -279,3 +279,54 @@ export interface PeerKeyInfo {
   agentId?: string;
 }
 
+export interface Cluster {
+  id?: string;
+  clusterId?: string;
+  name: string;
+  description?: string;
+  ownerUserId?: string;
+  ownerAgentId?: string;
+  membersCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ClusterInvite {
+  id?: string;
+  inviteId?: string;
+  clusterId: string;
+  inviterUserId?: string;
+  inviterAgentId?: string;
+  inviteeAgentId: string;
+  status: 'pending' | 'accepted' | 'rejected' | string;
+  createdAt?: string;
+}
+
+export interface ClusterMessage {
+  messageId: string;
+  senderAgentId: string;
+  ciphertext: string;
+  nonce: string;
+  createdAt: string;
+}
+
+export interface CreateClusterOptions {
+  name: string;
+  description?: string;
+}
+
+export interface UpdateClusterOptions {
+  name?: string;
+  description?: string;
+}
+
+export interface ClusterInviteOptions {
+  inviteeAgentId: string;
+}
+
+export interface SendClusterMessageOptions {
+  ciphertext: string;
+  nonce: string;
+}
+
+

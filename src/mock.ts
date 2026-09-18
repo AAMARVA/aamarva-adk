@@ -17,6 +17,10 @@ export interface MockDataStore {
   connectionRequests: ConnectionRequest[];
   messages: Record<string, any[]>;
   e2eeKeys: Record<string, any>;
+  clusters: any[];
+  clusterInvites: any[];
+  clusterMembers: Record<string, string[]>;
+  clusterMessages: Record<string, any[]>;
 }
 
 export function createMockDataStore(): MockDataStore {
@@ -87,6 +91,37 @@ export function createMockDataStore(): MockDataStore {
       'conn_mock_123': [],
     },
     e2eeKeys: {},
+    clusters: [
+      {
+        id: 'cluster_987654',
+        clusterId: 'cluster_987654',
+        name: 'Market Arbitrage Cluster',
+        description: 'Consensus on L2 liquidity arbitrage opportunities.',
+        ownerUserId: 'usr_abc123',
+        ownerAgentId: 'AMR-1111-2222',
+        membersCount: 3,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ],
+    clusterInvites: [
+      {
+        id: 'invite_111222',
+        inviteId: 'invite_111222',
+        clusterId: 'cluster_987654',
+        inviterUserId: 'usr_abc123',
+        inviterAgentId: 'AMR-1111-2222',
+        inviteeAgentId: 'AMR-3333-4444',
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      },
+    ],
+    clusterMembers: {
+      'cluster_987654': ['AMR-1111-2222', 'AMR-5555-6666'],
+    },
+    clusterMessages: {
+      'cluster_987654': [],
+    },
   };
 }
 
@@ -589,7 +624,7 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
     }
 
     // Send Message (E2EE Enforced)
-    if (pathname.includes('/messages') && method === 'POST') {
+    if (pathname.startsWith('/connections') && pathname.includes('/messages') && method === 'POST') {
       const match = pathname.match(/\/connections\/([^/]+)\/messages/);
       const connId = match ? match[1] : 'conn_mock_123';
 
@@ -625,7 +660,7 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
     }
 
     // Get Messages
-    if (pathname.includes('/messages') && method === 'GET') {
+    if (pathname.startsWith('/connections') && pathname.includes('/messages') && method === 'GET') {
       const match = pathname.match(/\/connections\/([^/]+)\/messages/);
       const connId = match ? match[1] : 'conn_mock_123';
       return json(200, {
@@ -640,6 +675,197 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       const connId = match ? match[1] : '';
       store.connections = store.connections.filter((c) => c.connectionId !== connId);
       return json(200, { success: true, message: 'Connection closed' });
+    }
+
+    // Clusters API Handlers
+    // POST /clusters - Create cluster
+    if (pathname === '/clusters' && method === 'POST') {
+      const clusterId = 'cluster_' + Math.random().toString(36).slice(2, 8);
+      const newCluster = {
+        id: clusterId,
+        clusterId: clusterId,
+        name: (body?.name as string) || 'New Cluster',
+        description: (body?.description as string) || '',
+        ownerUserId: 'usr_mock',
+        ownerAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
+        membersCount: 1,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      store.clusters.push(newCluster);
+      store.clusterMembers[clusterId] = [newCluster.ownerAgentId];
+      store.clusterMessages[clusterId] = [];
+
+      return json(201, {
+        success: true,
+        data: {
+          clusterId: newCluster.clusterId,
+          name: newCluster.name,
+          description: newCluster.description,
+          ownerAgentId: newCluster.ownerAgentId,
+          createdAt: newCluster.createdAt,
+        },
+      });
+    }
+
+    // GET /clusters - List clusters
+    if (pathname === '/clusters' && method === 'GET') {
+      return json(200, {
+        success: true,
+        data: store.clusters,
+      });
+    }
+
+    // GET /clusters/:clusterId/invites - List invites
+    if (pathname.match(/\/clusters\/([^/]+)\/invites$/) && method === 'GET') {
+      const clusterId = pathname.split('/')[2];
+      const invites = store.clusterInvites.filter((i) => i.clusterId === clusterId);
+      return json(200, {
+        success: true,
+        data: invites,
+      });
+    }
+
+    // POST /clusters/:clusterId/invites - Invite to cluster
+    if (pathname.match(/\/clusters\/([^/]+)\/invites$/) && method === 'POST') {
+      const clusterId = pathname.split('/')[2];
+      const inviteId = 'invite_' + Math.random().toString(36).slice(2, 8);
+      const newInvite = {
+        id: inviteId,
+        inviteId: inviteId,
+        clusterId,
+        inviterUserId: 'usr_mock',
+        inviterAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
+        inviteeAgentId: (body?.inviteeAgentId as string) || '',
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      };
+      store.clusterInvites.push(newInvite);
+      return json(200, {
+        success: true,
+        data: {
+          inviteId: newInvite.inviteId,
+          status: newInvite.status,
+        },
+      });
+    }
+
+    // POST /clusters/:clusterId/join - Join cluster
+    if (pathname.match(/\/clusters\/([^/]+)\/join$/) && method === 'POST') {
+      const clusterId = pathname.split('/')[2];
+      const inviteId = body?.inviteId as string;
+      const invite = store.clusterInvites.find((i) => i.clusterId === clusterId && (i.inviteId === inviteId || i.id === inviteId));
+      if (invite) {
+        invite.status = 'accepted';
+        if (!store.clusterMembers[clusterId]) store.clusterMembers[clusterId] = [];
+        if (!store.clusterMembers[clusterId].includes(invite.inviteeAgentId)) {
+          store.clusterMembers[clusterId].push(invite.inviteeAgentId);
+        }
+      }
+      return json(200, {
+        success: true,
+        message: 'You have joined the cluster successfully.',
+      });
+    }
+
+    // DELETE /clusters/:clusterId/members/:memberAgentId - Kick member
+    if (pathname.match(/\/clusters\/([^/]+)\/members\/([^/]+)$/) && method === 'DELETE') {
+      const parts = pathname.split('/');
+      const clusterId = parts[2];
+      const memberAgentId = parts[4];
+      if (store.clusterMembers[clusterId]) {
+        store.clusterMembers[clusterId] = store.clusterMembers[clusterId].filter((m) => m !== memberAgentId);
+      }
+      return json(200, {
+        success: true,
+        message: 'Member was successfully removed from the cluster.',
+      });
+    }
+
+    // POST /clusters/:clusterId/messages - Send cluster message
+    if (pathname.match(/\/clusters\/([^/]+)\/messages$/) && method === 'POST') {
+      const clusterId = pathname.split('/')[2];
+      const messageId = 'msg_' + Math.random().toString(36).slice(2, 8);
+      const newMsg = {
+        messageId,
+        senderAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
+        ciphertext: (body?.ciphertext as string) || '',
+        nonce: (body?.nonce as string) || '',
+        createdAt: new Date().toISOString(),
+      };
+      if (!store.clusterMessages[clusterId]) store.clusterMessages[clusterId] = [];
+      store.clusterMessages[clusterId].push(newMsg);
+
+      return json(201, {
+        success: true,
+        data: {
+          messageId,
+          createdAt: newMsg.createdAt,
+        },
+        messageId,
+        createdAt: newMsg.createdAt,
+      });
+    }
+
+    // GET /clusters/:clusterId/messages - Get cluster messages
+    if (pathname.match(/\/clusters\/([^/]+)\/messages$/) && method === 'GET') {
+      const clusterId = pathname.split('/')[2];
+      return json(200, {
+        success: true,
+        data: store.clusterMessages[clusterId] || [],
+      });
+    }
+
+    // GET /clusters/:clusterId - Get cluster details
+    if (pathname.match(/\/clusters\/([^/]+)$/) && method === 'GET') {
+      const clusterId = pathname.split('/')[2];
+      const cluster = store.clusters.find((c) => c.clusterId === clusterId || c.id === clusterId) || {
+        id: clusterId,
+        clusterId,
+        name: 'Mock Cluster',
+        description: 'Mock Description',
+        ownerAgentId: 'AMR-1111-2222',
+        membersCount: (store.clusterMembers[clusterId] || []).length || 1,
+        createdAt: new Date().toISOString(),
+      };
+      return json(200, {
+        success: true,
+        data: {
+          clusterId: cluster.clusterId || cluster.id,
+          name: cluster.name,
+          description: cluster.description,
+          ownerAgentId: cluster.ownerAgentId,
+          membersCount: cluster.membersCount || (store.clusterMembers[clusterId] || []).length || 1,
+          createdAt: cluster.createdAt,
+        },
+      });
+    }
+
+    // PATCH /clusters/:clusterId - Update cluster
+    if (pathname.match(/\/clusters\/([^/]+)$/) && method === 'PATCH') {
+      const clusterId = pathname.split('/')[2];
+      const cluster = store.clusters.find((c) => c.clusterId === clusterId || c.id === clusterId);
+      if (cluster) {
+        if (body?.name) cluster.name = body.name as string;
+        if (body?.description !== undefined) cluster.description = body.description as string;
+        cluster.updatedAt = new Date().toISOString();
+      }
+      return json(200, {
+        success: true,
+        message: 'Cluster successfully updated.',
+      });
+    }
+
+    // DELETE /clusters/:clusterId - Disband cluster
+    if (pathname.match(/\/clusters\/([^/]+)$/) && method === 'DELETE') {
+      const clusterId = pathname.split('/')[2];
+      store.clusters = store.clusters.filter((c) => c.clusterId !== clusterId && c.id !== clusterId);
+      delete store.clusterMembers[clusterId];
+      delete store.clusterMessages[clusterId];
+      return json(200, {
+        success: true,
+        message: 'Cluster successfully disbanded.',
+      });
     }
 
     return json(404, { success: false, error: 'Mock endpoint not found' });

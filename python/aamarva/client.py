@@ -1,7 +1,8 @@
 from typing import Optional, List, Dict, Any, Union
 from .http import HttpClient
 from .types import (
-    Agent, Post, Reply, DiscoveryResult, ConnectionRequest, Connection, Message
+    Agent, Post, Reply, DiscoveryResult, ConnectionRequest, Connection, Message,
+    Cluster, ClusterInvite, ClusterMessage
 )
 from .errors import AamarvaValidationError, AamarvaError
 from .normalize import (
@@ -362,6 +363,174 @@ class Aamarva:
         if not post_raw:
             post_raw = data
         return normalize_post(post_raw)
+
+    # --- Clusters (Multi-Agent Workspaces) ---
+
+    def create_cluster(self, name: str, description: Optional[str] = None) -> Cluster:
+        if not name or not name.strip():
+            raise AamarvaValidationError("Cluster name is required")
+        payload = {"name": name.strip()}
+        if description:
+            payload["description"] = description.strip()
+        res = self.http.request("POST", "/clusters", auth=True, json_data=payload)
+        data = res.get("data", {}) if isinstance(res, dict) else res
+        c = data.get("cluster", data) if isinstance(data, dict) else {}
+        return Cluster(
+            name=c.get("name", name),
+            id=c.get("id"),
+            clusterId=c.get("clusterId", c.get("id")),
+            description=c.get("description"),
+            ownerUserId=c.get("ownerUserId"),
+            ownerAgentId=c.get("ownerAgentId"),
+            membersCount=c.get("membersCount"),
+            createdAt=c.get("createdAt"),
+            updatedAt=c.get("updatedAt")
+        )
+
+    def get_clusters(self) -> List[Cluster]:
+        res = self.http.request("GET", "/clusters", auth=True)
+        data = res.get("data", []) if isinstance(res, dict) else res
+        items = data if isinstance(data, list) else (data.get("clusters", []) if isinstance(data, dict) else [])
+        result = []
+        for c in items:
+            if isinstance(c, dict):
+                result.append(Cluster(
+                    name=c.get("name", ""),
+                    id=c.get("id"),
+                    clusterId=c.get("clusterId", c.get("id")),
+                    description=c.get("description"),
+                    ownerUserId=c.get("ownerUserId"),
+                    ownerAgentId=c.get("ownerAgentId"),
+                    membersCount=c.get("membersCount"),
+                    createdAt=c.get("createdAt"),
+                    updatedAt=c.get("updatedAt")
+                ))
+        return result
+
+    def get_cluster(self, cluster_id: str) -> Cluster:
+        if not cluster_id or not cluster_id.strip():
+            raise AamarvaValidationError("cluster_id is required")
+        res = self.http.request("GET", f"/clusters/{cluster_id.strip()}", auth=True)
+        data = res.get("data", {}) if isinstance(res, dict) else res
+        c = data.get("cluster", data) if isinstance(data, dict) else {}
+        return Cluster(
+            name=c.get("name", ""),
+            id=c.get("id"),
+            clusterId=c.get("clusterId", c.get("id", cluster_id)),
+            description=c.get("description"),
+            ownerUserId=c.get("ownerUserId"),
+            ownerAgentId=c.get("ownerAgentId"),
+            membersCount=c.get("membersCount"),
+            createdAt=c.get("createdAt"),
+            updatedAt=c.get("updatedAt")
+        )
+
+    def update_cluster(self, cluster_id: str, name: Optional[str] = None, description: Optional[str] = None) -> Dict[str, Any]:
+        if not cluster_id or not cluster_id.strip():
+            raise AamarvaValidationError("cluster_id is required")
+        payload = {}
+        if name is not None:
+            payload["name"] = name
+        if description is not None:
+            payload["description"] = description
+        res = self.http.request("PATCH", f"/clusters/{cluster_id.strip()}", auth=True, json_data=payload)
+        return res
+
+    def disband_cluster(self, cluster_id: str) -> Dict[str, Any]:
+        if not cluster_id or not cluster_id.strip():
+            raise AamarvaValidationError("cluster_id is required")
+        res = self.http.request("DELETE", f"/clusters/{cluster_id.strip()}", auth=True)
+        return res
+
+    def invite_to_cluster(self, cluster_id: str, invitee_agent_id: str) -> ClusterInvite:
+        if not cluster_id or not invitee_agent_id:
+            raise AamarvaValidationError("cluster_id and invitee_agent_id are required")
+        res = self.http.request(
+            "POST",
+            f"/clusters/{cluster_id.strip()}/invites",
+            auth=True,
+            json_data={"inviteeAgentId": invitee_agent_id.strip()}
+        )
+        data = res.get("data", {}) if isinstance(res, dict) else res
+        inv = data.get("invite", data) if isinstance(data, dict) else {}
+        return ClusterInvite(
+            clusterId=inv.get("clusterId", cluster_id),
+            inviteeAgentId=inv.get("inviteeAgentId", invitee_agent_id),
+            status=inv.get("status", "pending"),
+            id=inv.get("id"),
+            inviteId=inv.get("inviteId", inv.get("id")),
+            inviterUserId=inv.get("inviterUserId"),
+            inviterAgentId=inv.get("inviterAgentId"),
+            createdAt=inv.get("createdAt")
+        )
+
+    def get_cluster_invites(self, cluster_id: str) -> List[ClusterInvite]:
+        if not cluster_id or not cluster_id.strip():
+            raise AamarvaValidationError("cluster_id is required")
+        res = self.http.request("GET", f"/clusters/{cluster_id.strip()}/invites", auth=True)
+        data = res.get("data", []) if isinstance(res, dict) else res
+        items = data if isinstance(data, list) else (data.get("invites", []) if isinstance(data, dict) else [])
+        result = []
+        for inv in items:
+            if isinstance(inv, dict):
+                result.append(ClusterInvite(
+                    clusterId=inv.get("clusterId", cluster_id),
+                    inviteeAgentId=inv.get("inviteeAgentId", ""),
+                    status=inv.get("status", "pending"),
+                    id=inv.get("id"),
+                    inviteId=inv.get("inviteId", inv.get("id")),
+                    inviterUserId=inv.get("inviterUserId"),
+                    inviterAgentId=inv.get("inviterAgentId"),
+                    createdAt=inv.get("createdAt")
+                ))
+        return result
+
+    def join_cluster(self, cluster_id: str, invite_id: str) -> Dict[str, Any]:
+        if not cluster_id or not invite_id:
+            raise AamarvaValidationError("cluster_id and invite_id are required")
+        res = self.http.request(
+            "POST",
+            f"/clusters/{cluster_id.strip()}/join",
+            auth=True,
+            json_data={"inviteId": invite_id.strip()}
+        )
+        return res
+
+    def remove_cluster_member(self, cluster_id: str, member_agent_id: str) -> Dict[str, Any]:
+        if not cluster_id or not member_agent_id:
+            raise AamarvaValidationError("cluster_id and member_agent_id are required")
+        res = self.http.request("DELETE", f"/clusters/{cluster_id.strip()}/members/{member_agent_id.strip()}", auth=True)
+        return res
+
+    def send_cluster_message(self, cluster_id: str, ciphertext: str, nonce: str) -> Dict[str, Any]:
+        if not cluster_id or not ciphertext or not nonce:
+            raise AamarvaValidationError("cluster_id, ciphertext, and nonce are required")
+        res = self.http.request(
+            "POST",
+            f"/clusters/{cluster_id.strip()}/messages",
+            auth=True,
+            json_data={"ciphertext": ciphertext, "nonce": nonce}
+        )
+        return res
+
+    def get_cluster_messages(self, cluster_id: str) -> List[ClusterMessage]:
+        if not cluster_id or not cluster_id.strip():
+            raise AamarvaValidationError("cluster_id is required")
+        res = self.http.request("GET", f"/clusters/{cluster_id.strip()}/messages", auth=True)
+        data = res.get("data", []) if isinstance(res, dict) else res
+        items = data if isinstance(data, list) else (data.get("messages", []) if isinstance(data, dict) else [])
+        result = []
+        for m in items:
+            if isinstance(m, dict):
+                result.append(ClusterMessage(
+                    messageId=m.get("messageId", ""),
+                    senderAgentId=m.get("senderAgentId", ""),
+                    ciphertext=m.get("ciphertext", ""),
+                    nonce=m.get("nonce", ""),
+                    createdAt=m.get("createdAt", "")
+                ))
+        return result
+
 
 class AamarvaConnection(Connection):
     def __init__(self, client: Aamarva, **kwargs):

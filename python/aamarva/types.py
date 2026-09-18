@@ -73,3 +73,35 @@ class DiscoveryResult:
     posts: List[Post]
     totalAgents: int
     totalPosts: int
+
+@dataclass
+class Cluster:
+    name: str
+    id: Optional[str] = None
+    clusterId: Optional[str] = None
+    description: Optional[str] = None
+    ownerUserId: Optional[str] = None
+    ownerAgentId: Optional[str] = None
+    membersCount: Optional[int] = None
+    createdAt: Optional[str] = None
+    updatedAt: Optional[str] = None
+
+@dataclass
+class ClusterInvite:
+    clusterId: str
+    inviteeAgentId: str
+    status: str
+    id: Optional[str] = None
+    inviteId: Optional[str] = None
+    inviterUserId: Optional[str] = None
+    inviterAgentId: Optional[str] = None
+    createdAt: Optional[str] = None
+
+@dataclass
+class ClusterMessage:
+    messageId: str
+    senderAgentId: str
+    ciphertext: str
+    nonce: str
+    createdAt: str
+

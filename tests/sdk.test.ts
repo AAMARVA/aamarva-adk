@@ -435,6 +435,60 @@ async function runSdkTests() {
   );
   console.log('✓ Normalization layer functions verified (strict E2EE transport enforced).');
 
+  // 13. Clusters (Multi-Agent Workspaces)
+  console.log('13. Testing Clusters (Multi-Agent Workspaces)...');
+  const cluster = await client.createCluster({
+    name: 'Market Arbitrage Cluster',
+    description: 'Consensus on L2 liquidity arbitrage opportunities.',
+  });
+  assert.ok(cluster.clusterId, 'Cluster should have clusterId');
+  assert.strictEqual(cluster.name, 'Market Arbitrage Cluster');
+
+  const clustersList = await client.getClusters();
+  assert.ok(Array.isArray(clustersList), 'getClusters should return an array');
+  assert.ok(clustersList.some((c) => c.clusterId === cluster.clusterId || c.id === cluster.clusterId));
+
+  const clusterDetails = await client.getCluster(cluster.clusterId!);
+  assert.ok(clusterDetails.clusterId);
+  assert.strictEqual(clusterDetails.name, 'Market Arbitrage Cluster');
+
+  const updateRes = await client.updateCluster(cluster.clusterId!, {
+    name: 'Consensus Phase II',
+    description: 'Updated focus parameters.',
+  });
+  assert.strictEqual(updateRes.success, true);
+
+  const invite = await client.inviteToCluster(cluster.clusterId!, {
+    inviteeAgentId: 'AMR-3333-4444',
+  });
+  assert.ok(invite.inviteId);
+  assert.strictEqual(invite.status, 'pending');
+
+  const invitesList = await client.getClusterInvites(cluster.clusterId!);
+  assert.ok(Array.isArray(invitesList));
+  assert.ok(invitesList.some((i) => i.inviteId === invite.inviteId || i.id === invite.inviteId));
+
+  const joinRes = await client.joinCluster(cluster.clusterId!, invite.inviteId!);
+  assert.strictEqual(joinRes.success, true);
+
+  const sendMsgRes = await client.sendClusterMessage(cluster.clusterId!, {
+    ciphertext: 'dGVzdC1jbHVzdGVyLWNpcGhlcnRleHQ=',
+    nonce: 'dGVzdC1ub25jZQ==',
+  });
+  assert.strictEqual(sendMsgRes.success, true);
+  assert.ok(sendMsgRes.messageId);
+
+  const clusterMsgs = await client.getClusterMessages(cluster.clusterId!);
+  assert.ok(Array.isArray(clusterMsgs));
+  assert.ok(clusterMsgs.some((m) => m.messageId === sendMsgRes.messageId));
+
+  const removeMemberRes = await client.removeClusterMember(cluster.clusterId!, 'AMR-3333-4444');
+  assert.strictEqual(removeMemberRes.success, true);
+
+  const disbandRes = await client.disbandCluster(cluster.clusterId!);
+  assert.strictEqual(disbandRes.success, true);
+  console.log('✓ Clusters (Multi-Agent Workspaces) lifecycle verified.');
+
   console.log('--------------------------------------------------');
   console.log('✓ ALL SDK UNIT & INTEGRATION TESTS PASSED!');
   console.log('--------------------------------------------------');
