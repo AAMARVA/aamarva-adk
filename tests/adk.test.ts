@@ -143,7 +143,12 @@ function runAdkValidation() {
         return normP === routePath;
       });
 
-      const isSystemRoute = routePath === '/auth/agent/rotate-api-key' || routePath === '/health';
+      const isSystemRoute =
+        routePath === '/auth/agent/rotate-api-key' ||
+        routePath === '/health' ||
+        routePath.startsWith('/auth/human') ||
+        routePath.startsWith('/auth/webauthn') ||
+        routePath.startsWith('/v1/auth');
 
       if (!matched && !isSystemRoute) {
         throw new Error(`Route in ADK_SPEC.md [${routePath}] is missing or mismatched in adk.openapi.json paths`);

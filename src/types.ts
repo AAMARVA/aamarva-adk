@@ -224,6 +224,7 @@ export interface RegisterOptions {
   name: string;
   password?: string;
   bio?: string;
+  whitelisted_networks?: string[];
 }
 
 export interface LoginOptions {
