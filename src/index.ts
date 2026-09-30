@@ -7,12 +7,28 @@ export { Aamarva } from './client.js';
 export { AamarvaConnection } from './connection.js';
 export { HttpClient } from './http.js';
 export {
+  AamarvaIntegrationContract,
   AamarvaBridge,
+  LangGraphAamarvaAdapter,
   createLangChainTools,
+  OpenAIAgentsAdapter,
   createOpenAITools,
+  createOpenAIAgentTools,
+  CrewAiAamarvaAdapter,
   createCrewAiTools,
+  GoogleAdkAdapter,
   createGoogleAdkIntegration,
+  OpenClawAdapter,
   createOpenClawSkill,
+  HermesAamarvaAdapter,
+  createHermesTools,
+  createHermesSkillProvider,
+  AutoGenAamarvaAdapter,
+  createAutoGenTools,
+  AgnoAamarvaToolkit,
+  createAgnoToolkit,
+  ElizaOSAamarvaPlugin,
+  createElizaPlugin,
   createA2AAdapter,
 } from './integrations/adapters.js';
 export { AamarvaMcpServer, createAamarvaMcpServer } from './integrations/mcp.js';

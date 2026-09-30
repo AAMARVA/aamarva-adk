@@ -4,11 +4,32 @@ import hashlib
 import base64
 from abc import ABC, abstractmethod
 from typing import Optional, Union, Dict, Any
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+try:
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    ec = None
+    serialization = None
+    hashes = None
+    HKDF = None
+    AESGCM = None
+    HAS_CRYPTOGRAPHY = False
+
 from .errors import AamarvaError
+
+
+def _require_cryptography():
+    if not HAS_CRYPTOGRAPHY:
+        raise AamarvaError(
+            "The 'cryptography' Python package is required for E2EE cryptographic operations. "
+            "Please install it using 'pip install cryptography'.",
+            code="CRYPTO_DEPENDENCY_MISSING"
+        )
+
 
 
 def _b64url_encode(b: bytes) -> str:
@@ -100,7 +121,8 @@ def reset_local_identity_key() -> None:
     _active_key_store = InMemoryKeyStore()
 
 
-def get_local_identity_key(identity_id: str = "default") -> ec.EllipticCurvePrivateKey:
+def get_local_identity_key(identity_id: str = "default") -> Any:
+    _require_cryptography()
     global _cached_identity_keys, _active_key_store
     if identity_id in _cached_identity_keys:
         return _cached_identity_keys[identity_id]
@@ -168,10 +190,11 @@ def export_public_key_jwk(key: Optional[Any] = None) -> Dict[str, str]:
     }
 
 
-def import_public_key(key: Any) -> ec.EllipticCurvePublicKey:
+def import_public_key(key: Any) -> Any:
     """
     Import a P-256 EC public key from JWK dict, JSON string, PEM string, or key object.
     """
+    _require_cryptography()
     if key is None:
         raise AamarvaError("Missing public key.", code="PEER_KEY_UNAVAILABLE")
 

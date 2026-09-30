@@ -24,24 +24,39 @@ from aamarva.crypto import (
     export_public_key_jwk,
     sign_identity_binding
 )
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization
+try:
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    ec = None
+    serialization = None
+    HAS_CRYPTOGRAPHY = False
 
 class TestAamarvaClientAPIs(unittest.TestCase):
     def setUp(self):
         self.client = Aamarva(agent_id="test-agent", api_key="test-key")
         self.client.http.request = MagicMock()
-        self.peer_priv = ec.generate_private_key(ec.SECP256R1())
-        self.peer_pub_pem = self.peer_priv.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode('utf-8')
-        self.peer_pub_jwk = export_public_key_jwk(self.peer_priv.public_key())
-        self.peer_fp = compute_key_fingerprint(self.peer_priv.public_key())
-        
-        self.peer_identity_priv = ec.generate_private_key(ec.SECP256R1())
-        self.peer_identity_pub_jwk = export_public_key_jwk(self.peer_identity_priv.public_key())
-        self.peer_sig = sign_identity_binding(self.peer_identity_priv, "AMR-B", self.peer_fp)
+        if HAS_CRYPTOGRAPHY:
+            self.peer_priv = ec.generate_private_key(ec.SECP256R1())
+            self.peer_pub_pem = self.peer_priv.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ).decode('utf-8')
+            self.peer_pub_jwk = export_public_key_jwk(self.peer_priv.public_key())
+            self.peer_fp = compute_key_fingerprint(self.peer_priv.public_key())
+            
+            self.peer_identity_priv = ec.generate_private_key(ec.SECP256R1())
+            self.peer_identity_pub_jwk = export_public_key_jwk(self.peer_identity_priv.public_key())
+            self.peer_sig = sign_identity_binding(self.peer_identity_priv, "AMR-B", self.peer_fp)
+        else:
+            self.peer_priv = None
+            self.peer_pub_pem = None
+            self.peer_pub_jwk = None
+            self.peer_fp = None
+            self.peer_identity_priv = None
+            self.peer_identity_pub_jwk = None
+            self.peer_sig = None
 
     def test_discover_all(self):
         def mock_request(method, path, auth, params=None, json_data=None):
@@ -107,6 +122,7 @@ class TestAamarvaClientAPIs(unittest.TestCase):
         self.assertEqual(req.requestId, "req-1")
         self.client.http.request.assert_called_with("POST", "/connections/requests", auth=True, json_data={"receiverAgentId": "AMR-B"})
 
+    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
     def test_get_messages_raw_strings(self):
         def mock_req(method, path, auth=False, params=None, json_data=None):
             if path == "/connections/conn-1/peer-key":
@@ -201,6 +217,7 @@ class TestAamarvaClientAPIs(unittest.TestCase):
         self.assertEqual(conns[0].connectionId, "conn-1")
         self.client.http.request.assert_called_with("GET", "/connections", auth=True)
 
+    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
     def test_send_message(self):
         captured_body = {}
         def mock_req(method, path, auth=False, params=None, json_data=None):
@@ -230,6 +247,7 @@ class TestAamarvaClientAPIs(unittest.TestCase):
         self.assertIn("ciphertext", captured_body)
         self.assertIn("nonce", captured_body)
 
+    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
     def test_get_messages(self):
         local_pub_pem = get_local_public_key_pem()
         local_fp = compute_key_fingerprint(local_pub_pem)
@@ -275,6 +293,7 @@ class TestAamarvaClientAPIs(unittest.TestCase):
         self.assertEqual(h["status"], "ok")
         self.client.http.request.assert_called_with("GET", "/adk", auth=False)
 
+    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
     def test_connection_object_methods(self):
         conn_kwargs = {
             "connectionId": "conn-1",

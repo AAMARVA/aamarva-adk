@@ -4,8 +4,16 @@ import base64
 import tempfile
 import unittest
 from unittest.mock import MagicMock
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519
-from cryptography.hazmat.primitives import serialization
+
+try:
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+    from cryptography.hazmat.primitives import serialization
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    ec = None
+    ed25519 = None
+    serialization = None
+    HAS_CRYPTOGRAPHY = False
 
 from aamarva import Aamarva, AamarvaConnection
 from aamarva.crypto import (
@@ -23,8 +31,6 @@ from aamarva.crypto import (
     verify_peer_key,
     encrypt_message_with_keys,
     decrypt_message_with_keys,
-    export_public_key_jwk,
-    sign_identity_binding,
     create_identity_binding_string,
     verify_identity_binding,
 )
@@ -32,6 +38,7 @@ from aamarva.normalize import normalize_message
 from aamarva.errors import AamarvaError
 
 
+@unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
 class TestCryptoSecurityHardening(unittest.TestCase):
     def setUp(self):
         reset_local_identity_key()

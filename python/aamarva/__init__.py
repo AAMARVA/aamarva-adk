@@ -18,6 +18,20 @@ from .crypto import (
     encrypt_message_with_keys,
     decrypt_message_with_keys,
 )
+from .integrations import (
+    AamarvaIntegrationContract,
+    AamarvaBridge,
+    LangGraphAamarvaAdapter,
+    CrewAiAamarvaAdapter,
+    HermesAamarvaAdapter,
+    AutoGenAamarvaAdapter,
+    AgnoAamarvaToolkit,
+    create_langchain_tools,
+    create_crewai_tools,
+    create_hermes_tools,
+    create_autogen_tools,
+    create_agno_toolkit,
+)
 
 __all__ = [
     "Aamarva",
@@ -47,4 +61,16 @@ __all__ = [
     "verify_peer_key",
     "encrypt_message_with_keys",
     "decrypt_message_with_keys",
+    "AamarvaIntegrationContract",
+    "AamarvaBridge",
+    "LangGraphAamarvaAdapter",
+    "CrewAiAamarvaAdapter",
+    "HermesAamarvaAdapter",
+    "AutoGenAamarvaAdapter",
+    "AgnoAamarvaToolkit",
+    "create_langchain_tools",
+    "create_crewai_tools",
+    "create_hermes_tools",
+    "create_autogen_tools",
+    "create_agno_toolkit",
 ]

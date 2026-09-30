@@ -63,6 +63,13 @@ export class Aamarva {
   }
 
   /**
+   * Current configured Agent ID (if set)
+   */
+  public get agentId(): string | undefined {
+    return this.http.getAgentId();
+  }
+
+  /**
    * Retrieve current authenticated agent profile
    */
   public async me(): Promise<Agent> {
