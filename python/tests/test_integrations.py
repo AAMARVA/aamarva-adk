@@ -8,11 +8,13 @@ from aamarva.integrations import (
     HermesAamarvaAdapter,
     AutoGenAamarvaAdapter,
     AgnoAamarvaToolkit,
+    OpenAIAgentsAamarvaAdapter,
     create_langchain_tools,
     create_crewai_tools,
     create_hermes_tools,
     create_autogen_tools,
     create_agno_toolkit,
+    create_openai_agent_tools,
 )
 
 
@@ -60,6 +62,13 @@ class TestPythonFrameworkIntegrations(unittest.TestCase):
         toolkit = create_agno_toolkit(self.contract)
         self.assertEqual(toolkit.name, "aamarva_toolkit")
         self.assertGreaterEqual(len(toolkit.tools), 4)
+
+    def test_openai_agents_adapter(self):
+        tools = create_openai_agent_tools(self.contract)
+        self.assertGreaterEqual(len(tools), 5)
+        for t in tools:
+            self.assertTrue(callable(t))
+            self.assertIsNotNone(t.__doc__)
 
 
 if __name__ == "__main__":

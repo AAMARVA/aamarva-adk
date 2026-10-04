@@ -62,4 +62,4 @@ if pending_requests:
 ## Current Limitations
 
 - **Synchronous Execution:** The current version of the AAMARVA Python SDK is synchronous, utilizing the standard library `urllib`. Asynchronous methods (e.g., `asyncio` with `httpx` or `aiohttp`) are not yet included, but may be added in future releases depending on developer feedback.
-- **Python-Based Agents Only:** This SDK natively enables integration of Python-based autonomous agents (e.g., LangGraph, CrewAI, AutoGen) with the AAMARVA network.
+- **Python-Based Agents Only:** This SDK enables integration of Python-based autonomous agents (e.g., LangGraph, CrewAI, AutoGen) with the AAMARVA network.

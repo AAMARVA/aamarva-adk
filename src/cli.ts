@@ -36,7 +36,7 @@ export function detectProjectAndFramework(cwd: string = process.cwd()): Detected
       const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
       const depKeys = Object.keys(deps).map((d) => d.toLowerCase());
 
-      if (depKeys.some((d) => d === 'langgraph' || d === '@langchain/langgraph' || d === 'langchain' || d.startsWith('@langchain/'))) {
+      if (depKeys.some((d) => d === 'langgraph' || d === '@langchain/langgraph' || d === 'langchain')) {
         frameworks.add('LangGraph');
       }
       if (depKeys.some((d) => d === '@openai/agents' || d === '@openai/swarm' || d === 'swarm-js' || d === 'openai-agents')) {
@@ -51,7 +51,7 @@ export function detectProjectAndFramework(cwd: string = process.cwd()): Detected
       if (depKeys.some((d) => d === 'openclaw' || d.startsWith('@openclaw/'))) {
         frameworks.add('OpenClaw');
       }
-      if (depKeys.some((d) => d === 'hermes-agent' || d === '@hermes/agent' || d === '@hermes-ai/core' || d === 'hermes')) {
+      if (depKeys.some((d) => d === 'hermes-agent' || d === '@hermes/agent' || d === '@hermes-ai/core')) {
         frameworks.add('Hermes');
       }
       if (depKeys.some((d) => d === '@microsoft/autogen' || d === 'autogen-core' || d === 'autogen-agentchat')) {
@@ -89,12 +89,12 @@ export function detectProjectAndFramework(cwd: string = process.cwd()): Detected
             return regex.test(line) || line.includes(`"${name}"`) || line.includes(`'${name}'`);
           };
 
-          if (hasDep('langgraph') || hasDep('langchain') || hasDep('langchain-core')) frameworks.add('LangGraph');
+          if (hasDep('langgraph') || hasDep('langchain')) frameworks.add('LangGraph');
           if (hasDep('crewai') || hasDep('crewai-tools')) frameworks.add('CrewAI');
           if (hasDep('openai-agents') || hasDep('swarm') || hasDep('openai-swarm')) frameworks.add('OpenAI Agents SDK');
           if (hasDep('google-adk') || hasDep('google-agent-development-kit')) frameworks.add('Google ADK');
           if (hasDep('openclaw') || hasDep('openclaw-sdk')) frameworks.add('OpenClaw');
-          if (hasDep('hermes-agent') || hasDep('hermes')) frameworks.add('Hermes');
+          if (hasDep('hermes-agent')) frameworks.add('Hermes');
           if (hasDep('pyautogen') || hasDep('autogen') || hasDep('autogen-agentchat') || hasDep('autogen-core')) frameworks.add('AutoGen');
           if (hasDep('agno') || hasDep('phidata')) frameworks.add('Agno');
           if (hasDep('elizaos') || hasDep('eliza')) frameworks.add('ElizaOS');
@@ -238,7 +238,7 @@ export async function runCli(args: string[] = process.argv.slice(2)): Promise<vo
 }
 
 /**
- * One-Click Integration Command (`aamarva integrate`)
+ * Guided Integration Command (`aamarva integrate`)
  */
 export async function handleIntegrate(args: string[] = []): Promise<void> {
   console.log('\n========================================');
@@ -272,7 +272,7 @@ export async function handleIntegrate(args: string[] = []): Promise<void> {
       }
       console.log(`✓ Selected framework: ${selectedFramework}\n`);
     } else {
-      console.log('ℹ No specialized framework detected. Defaulting to Universal Native Adapter.\n');
+      console.log('ℹ No specialized framework detected. Defaulting to Universal Adapter.\n');
       selectedFramework = 'Universal';
     }
   }
@@ -373,77 +373,251 @@ export async function handleIntegrate(args: string[] = []): Promise<void> {
 function generateIntegrationSnippet(framework: string, language: string): void {
   const isPython = language === 'Python';
 
-  console.log('\n--- Quickstart Integration Code ---\n');
+  console.log('\n========================================');
+  console.log('      INTEGRATION INSTRUCTIONS          ');
+  console.log('========================================');
+  console.log(`To integrate AAMARVA into your ${framework} agent, add this snippet to your code:\n`);
 
   switch (framework) {
     case 'LangGraph':
       if (isPython) {
-        console.log(`from aamarva.integrations import create_langchain_tools\n\n# Add AAMARVA tools to your LangGraph agent:\ntools = create_langchain_tools()`);
+        console.log(`# --- Python LangGraph / LangChain Integration ---
+from aamarva.integrations import create_langchain_tools
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+
+# 1. Instantiate the AAMARVA LangChain-compatible tools
+aamarva_tools = create_langchain_tools()
+
+# 2. Attach tools to your LangGraph agent
+llm = ChatOpenAI(model="gpt-4o")
+agent_executor = create_react_agent(llm, tools=aamarva_tools)
+
+print("✓ AAMARVA tools successfully registered with LangGraph agent.")`);
       } else {
-        console.log(`import { createLangChainTools } from '@aamarva/adk';\n\n// Add AAMARVA tools to your LangGraph / LangChain tool array:\nconst tools = createLangChainTools();`);
+        console.log(`// --- TypeScript/JavaScript LangGraph / LangChain Integration ---
+import { createLangChainTools } from '@aamarva/adk';
+import { ChatOpenAI } from '@langchain/openai';
+import { createReactAgent } from '@langchain/langgraph/prebuilt';
+
+// 1. Instantiate the AAMARVA LangChain-compatible tools
+const aamarvaTools = createLangChainTools();
+
+// 2. Attach tools to your LangGraph agent
+const model = new ChatOpenAI({ modelName: "gpt-4o" });
+const agent = createReactAgent({
+  llm: model,
+  tools: [...aamarvaTools],
+});
+
+console.log("✓ AAMARVA tools successfully registered with LangGraph agent.");`);
       }
       break;
 
     case 'OpenAI Agents SDK':
       if (isPython) {
-        console.log(`from aamarva.integrations import create_langchain_tools\ntools = create_langchain_tools()`);
+        console.log(`# --- Python OpenAI Agents SDK Integration ---
+from agents import Agent
+from aamarva.integrations import create_openai_agent_tools
+
+# 1. Instantiate AAMARVA function-tool compatible tools
+aamarva_tools = create_openai_agent_tools()
+
+agent = Agent(
+    name="AAMARVA Collaborator",
+    instructions="You are an autonomous agent capable of peer discovery and encrypted message exchange.",
+    tools=aamarva_tools
+)`);
       } else {
-        console.log(`import { createOpenAIAgentTools } from '@aamarva/adk';\n\n// Add tools to OpenAI Agent:\nconst tools = createOpenAIAgentTools();`);
+        console.log(`// --- TypeScript OpenAI Function-Tool Compatible Integration ---
+import { OpenAI } from 'openai';
+import { createOpenAITools } from '@aamarva/adk';
+
+// 1. Build AAMARVA function-tool definitions for OpenAI-compatible dispatch
+const aamarvaFunctionMap = createOpenAITools();
+
+const client = new OpenAI();
+console.log("✓ OpenAI function-tool compatible dispatch map ready:", Object.keys(aamarvaFunctionMap));`);
       }
       break;
 
     case 'CrewAI':
       if (isPython) {
-        console.log(`from aamarva.integrations import create_crewai_tools\n\n# Bind tools to your CrewAI Agent:\ncrew_tools = create_crewai_tools()`);
+        console.log(`# --- Python CrewAI Tool Integration ---
+from crewai import Agent, Crew, Process, Task
+from aamarva.integrations import create_crewai_tools
+
+# 1. Create CrewAI BaseTool instances (dynamically subclasses BaseTool if crewai is installed)
+aamarva_tools = create_crewai_tools()
+
+# 2. Assign the tools to your CrewAI Agent
+collaborator = Agent(
+    role="Strategic Partnership Liaison",
+    goal="Discover and connect with autonomous partner agents on the AAMARVA Floor.",
+    backstory="You are an expert at searching the AAMARVA public floor and negotiating secure connections.",
+    tools=aamarva_tools,
+    verbose=True
+)`);
       } else {
-        console.log(`import { createCrewAiTools } from '@aamarva/adk';\n\nconst tools = createCrewAiTools();`);
+        console.log(`// --- TypeScript CrewAI Integration ---
+import { createCrewAiTools } from '@aamarva/adk';
+
+// 1. Initialize compatible AAMARVA tools for CrewAI
+const tools = createCrewAiTools();
+console.log("✓ Registered CrewAI tools:", tools.map(t => t.name));`);
       }
       break;
 
     case 'Google ADK':
-      console.log(`import { createGoogleAdkIntegration } from '@aamarva/adk';\n\nconst googleAdk = createGoogleAdkIntegration();\n// Pass googleAdk.functionDeclarations to your Gemini model tools config.`);
+      console.log(`// --- TypeScript Google ADK Tool Integration ---
+import { GoogleGenAI } from '@google/genai';
+import { createGoogleAdkIntegration } from '@aamarva/adk';
+
+const ai = new GoogleGenAI();
+
+// 1. Create the AAMARVA Google ADK Adapter
+const googleAdk = createGoogleAdkIntegration();
+
+// 2. Supply the FunctionDeclaration objects directly to the model configuration
+const response = await ai.models.generateContent({
+  model: 'gemini-2.5-flash',
+  contents: 'Search for active logistics or routing agents on the AAMARVA network.',
+  config: {
+    tools: [{ functionDeclarations: googleAdk.functionDeclarations }]
+  }
+});
+
+// 3. Handle function execution dispatch cleanly inside your tool-call handler loop:
+// const result = await googleAdk.execute(call.name, call.args);`);
       break;
 
     case 'OpenClaw':
-      console.log(`import { createOpenClawSkill } from '@aamarva/adk';\n\nconst aamarvaSkill = createOpenClawSkill();\n// Register skill with OpenClaw runtime.`);
+      console.log(`// --- TypeScript OpenClaw Skill & Schema Integration ---
+import { createOpenClawSkill } from '@aamarva/adk';
+
+// 1. Generate OpenClaw-compatible modular skill and schema definitions
+const aamarvaSkill = createOpenClawSkill();
+
+console.log("Registered OpenClaw skill ID:", aamarvaSkill.id);
+console.log("Skill schema:", JSON.stringify(aamarvaSkill.schema, null, 2));`);
       break;
 
     case 'Hermes':
       if (isPython) {
-        console.log(`from aamarva.integrations import create_hermes_tools\n\nhermes_tools = create_hermes_tools()\n# Register tools with your Hermes agent instance.`);
+        console.log(`# --- Python Hermes Tool Integration ---
+from aamarva.integrations import create_hermes_tools
+
+# 1. Generate standard Hermes executable tool schemas
+hermes_tools = create_hermes_tools()
+
+# 2. Register tools within your Hermes Agent instance
+# agent.register_tools(hermes_tools)`);
       } else {
-        console.log(`import { createHermesTools, createHermesSkillProvider } from '@aamarva/adk';\n\n// 1. Standalone Hermes toolset\nconst hermesTools = createHermesTools();\n\n// 2. Full Hermes Skill Provider\nconst hermesProvider = createHermesSkillProvider();`);
+        console.log(`// --- TypeScript Hermes Agent Integration ---
+import { createHermesTools, createHermesSkillProvider } from '@aamarva/adk';
+
+// 1. Get Hermes execution schemas
+const hermesTools = createHermesTools();
+
+// 2. Or initialize the full Skill Provider to plug into the agent's context
+const hermesProvider = createHermesSkillProvider();`);
       }
       break;
 
     case 'AutoGen':
       if (isPython) {
-        console.log(`from aamarva.integrations import create_autogen_tools\n\nautogen_tools = create_autogen_tools()\n# Register functions with AutoGen AssistantAgent.`);
+        console.log(`# --- Python AutoGen (PyAutoGen) Integration ---
+from autogen import AssistantAgent, UserProxyAgent
+from aamarva.integrations import create_autogen_tools
+
+# 1. Create Python AutoGen-compatible function map
+autogen_functions = create_autogen_tools()
+
+# 2. Register these functions with your AutoGen Agent
+assistant = AssistantAgent("aamarva_assistant", llm_config={"config_list": [{"model": "gpt-4o"}]})
+user_proxy = UserProxyAgent("user_proxy", code_execution_config=False)
+
+for name, func in autogen_functions.items():
+    assistant.register_for_llm(name=name, description="AAMARVA helper action")(func)
+    user_proxy.register_for_execution(name=name)(func)`);
       } else {
-        console.log(`import { AutoGenAamarvaAdapter } from '@aamarva/adk';\n\nconst adapter = new AutoGenAamarvaAdapter();\nadapter.registerWithAgent(myAgent);`);
+        console.log(`// --- TypeScript AutoGen Integration ---
+import { AutoGenAamarvaAdapter } from '@aamarva/adk';
+
+// 1. Initialize AutoGen tool adapter
+const adapter = new AutoGenAamarvaAdapter();
+
+// 2. Register tools with your Agent
+adapter.registerWithAgent(myAgent);`);
       }
       break;
 
     case 'Agno':
       if (isPython) {
-        console.log(`from aamarva.integrations import create_agno_toolkit\n\ntoolkit = create_agno_toolkit()\n# Add to Agno Agent: Agent(tools=[toolkit.tools])`);
+        console.log(`# --- Python Agno Toolkit Integration ---
+from agno.agent import Agent
+from aamarva.integrations import create_agno_toolkit
+
+# 1. Instantiate the Agno Toolkit (inherits from agno.tools.Toolkit if installed)
+aamarva_toolkit = create_agno_toolkit()
+
+# 2. Attach toolkit to your Agno Agent
+agent = Agent(
+    name="AAMARVA Connector",
+    tools=[aamarva_toolkit],
+    show_tool_calls=True,
+    markdown=True
+)`);
       } else {
-        console.log(`import { createAgnoToolkit } from '@aamarva/adk';\n\nconst toolkit = createAgnoToolkit();`);
+        console.log(`// --- TypeScript Agno Integration ---
+import { createAgnoToolkit } from '@aamarva/adk';
+
+// 1. Instantiate Agno-compatible toolkit
+const toolkit = createAgnoToolkit();
+console.log("✓ Agno tools available:", toolkit.tools.map(t => t.name));`);
       }
       break;
 
     case 'ElizaOS':
-      console.log(`import { createElizaPlugin } from '@aamarva/adk';\n\n// Add to your ElizaOS plugins array:\nplugins: [createElizaPlugin()]`);
+      console.log(`// --- TypeScript ElizaOS Plugin Integration ---
+import { createElizaPlugin } from '@aamarva/adk';
+
+// 1. Add Aamarva Plugin to your ElizaOS Character Configuration
+const characterConfig = {
+  name: "AamarvaBroker",
+  plugins: [
+    createElizaPlugin() // Registers actions and providers for autonomous AAMARVA discovery
+  ]
+};`);
       break;
 
     case 'MCP':
-      console.log(`import { createAamarvaMcpServer } from '@aamarva/adk';\n\nconst mcpServer = createAamarvaMcpServer();\nconst tools = mcpServer.getTools();`);
+      console.log(`// --- TypeScript Model Context Protocol Integration ---
+import { createAamarvaMcpServer } from '@aamarva/adk';
+
+// 1. Create standard MCP server instance
+const mcpServer = createAamarvaMcpServer();
+
+// 2. Register tools with your MCP host/runtime
+const tools = mcpServer.getTools();
+console.log("✓ Exposing MCP tools:", tools.map(t => t.name));`);
       break;
 
     default:
-      console.log(`import { AamarvaIntegrationContract } from '@aamarva/adk';\n\nconst contract = new AamarvaIntegrationContract();\n// Discover, connect, and collaborate autonomously.`);
+      console.log(`// --- TypeScript Universal AAMARVA Integration ---
+import { AamarvaIntegrationContract } from '@aamarva/adk';
+
+const contract = new AamarvaIntegrationContract();
+// Invoke AAMARVA network operations dynamically:
+// const peers = await contract.discover("weather analytics");`);
       break;
   }
+
+  console.log('\n========================================');
+  console.log('           NEXT STEPS                   ');
+  console.log('========================================');
+  console.log('1. Add the code snippet above to your agent implementation.');
+  console.log('2. Run "aamarva doctor" to verify cryptographic keys and status.');
 }
 
 /**
@@ -459,7 +633,7 @@ export async function handleDoctor(): Promise<void> {
 
   // 1. Framework detection
   const detection = detectProjectAndFramework();
-  const fwName = detection.frameworks.length > 0 ? detection.frameworks.join(', ') : 'Universal Native Adapter';
+  const fwName = detection.frameworks.length > 0 ? detection.frameworks.join(', ') : 'Universal Adapter';
   console.log(`✓ Framework detected:     ${fwName} (${detection.language})`);
 
   // 2. Adapter check
@@ -874,7 +1048,7 @@ Usage:
   npx aamarva <command> [arguments]
 
 Integration & Diagnostics:
-  integrate [framework]    One-click integration to connect existing agents (LangGraph, Hermes, CrewAI, AutoGen, etc.)
+  integrate [framework]    Detect framework, configure environment, and show exact integration snippet
   doctor                   Run full system diagnostics (framework, auth, E2EE keys, network connectivity, security)
   init                     Interactive onboarding and credential configuration
 

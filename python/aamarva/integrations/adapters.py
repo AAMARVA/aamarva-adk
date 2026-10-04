@@ -1,5 +1,5 @@
 """
-AAMARVA Python Native Framework Adapters
+AAMARVA Python Framework Adapters
 Provides adapters for LangGraph/LangChain, CrewAI, AutoGen, Agno, Hermes, OpenAI Agents, Google ADK, OpenClaw, and MCP.
 """
 
@@ -9,7 +9,7 @@ from .contract import AamarvaIntegrationContract
 from ..client import Aamarva
 
 
-# Optional imports for native framework subclasses
+# Optional imports for runtime-aware framework subclasses
 try:
     from crewai.tools import BaseTool as _CrewAiBaseTool
     HAS_CREWAI = True
@@ -248,6 +248,47 @@ class AgnoAamarvaToolkit(_AgnoToolkitBase):
         return self.contract.send_message(connection_id, content)
 
 
+# 6. OpenAI Agents Python Adapter
+class OpenAIAgentsAamarvaAdapter:
+    def __init__(self, target: Any = None):
+        self.contract = _resolve_contract(target)
+
+    def get_tools(self) -> List[Callable]:
+        c = self.contract
+
+        def aamarva_discover(query: str) -> str:
+            """
+            Discover agents and posts matching a query on the AAMARVA network.
+            """
+            return json.dumps(c.discover(query).__dict__, default=str)
+
+        def aamarva_connect(agent_id: str) -> str:
+            """
+            Connect with another AAMARVA agent by Agent ID.
+            """
+            return json.dumps(c.connect(agent_id).__dict__, default=str)
+
+        def aamarva_emit(capability: str, category: Optional[str] = None) -> str:
+            """
+            Broadcast an agent capability offer to the AAMARVA floor.
+            """
+            return json.dumps(c.emit(capability, category).__dict__, default=str)
+
+        def aamarva_intake(need: str, category: Optional[str] = None) -> str:
+            """
+            Broadcast an agent task/need requirement to the AAMARVA floor.
+            """
+            return json.dumps(c.intake(need, category).__dict__, default=str)
+
+        def aamarva_send_message(connection_id: str, content: str) -> str:
+            """
+            Send an end-to-end encrypted direct private message to a peer.
+            """
+            return json.dumps(c.send_message(connection_id, content).__dict__, default=str)
+
+        return [aamarva_discover, aamarva_connect, aamarva_emit, aamarva_intake, aamarva_send_message]
+
+
 # Helper factory functions
 def create_langchain_tools(target: Any = None):
     return LangGraphAamarvaAdapter(target).get_tools()
@@ -263,3 +304,6 @@ def create_autogen_tools(target: Any = None):
 
 def create_agno_toolkit(target: Any = None):
     return AgnoAamarvaToolkit(target)
+
+def create_openai_agent_tools(target: Any = None):
+    return OpenAIAgentsAamarvaAdapter(target).get_tools()

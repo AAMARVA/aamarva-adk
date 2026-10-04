@@ -9,7 +9,7 @@ import {
 } from '../src/cli.js';
 
 async function runCliIntegrationTests() {
-  console.log('--- Starting CLI & One-Click Integration Test Suite ---');
+  console.log('--- Starting CLI & Guided Integration Test Suite ---');
 
   const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aamarva-cli-full-test-'));
 
@@ -188,6 +188,76 @@ async function runCliIntegrationTests() {
     const detGeneric = detectProjectAndFramework(dirGeneric);
     assert.strictEqual(detGeneric.frameworks.length, 0);
     console.log('✓ Negative: generic web server dependencies trigger 0 frameworks.');
+
+    // 2f. LangChain core only (not LangGraph)
+    const dirNegLangChainCore = path.join(tmpBase, 'neg-langchain-core');
+    fs.mkdirSync(dirNegLangChainCore);
+    fs.writeFileSync(
+      path.join(dirNegLangChainCore, 'package.json'),
+      JSON.stringify({
+        name: 'generic-lc-core',
+        dependencies: {
+          '@langchain/core': '^0.2.0',
+          '@langchain/openai': '^0.1.0',
+        },
+      })
+    );
+    const detNegLangChainCore = detectProjectAndFramework(dirNegLangChainCore);
+    assert.strictEqual(
+      detNegLangChainCore.frameworks.includes('LangGraph'),
+      false,
+      'LangChain core or openai dependencies must not trigger LangGraph agent framework'
+    );
+    console.log('✓ Negative Node: "@langchain/core" does NOT trigger LangGraph.');
+
+    // 2g. Python langchain-core only (not LangGraph)
+    const dirNegPyLangChainCore = path.join(tmpBase, 'neg-py-langchain-core');
+    fs.mkdirSync(dirNegPyLangChainCore);
+    fs.writeFileSync(
+      path.join(dirNegPyLangChainCore, 'requirements.txt'),
+      'langchain-core>=0.2.0\nlangchain-openai>=0.1.0\n'
+    );
+    const detNegPyLangChainCore = detectProjectAndFramework(dirNegPyLangChainCore);
+    assert.strictEqual(
+      detNegPyLangChainCore.frameworks.includes('LangGraph'),
+      false,
+      'Python langchain-core or langchain-openai must not trigger LangGraph agent framework'
+    );
+    console.log('✓ Negative Python: "langchain-core" does NOT trigger LangGraph.');
+
+    // 2h. JS/Python generic hermes only (not Hermes Agent)
+    const dirNegHermes = path.join(tmpBase, 'neg-hermes-only');
+    fs.mkdirSync(dirNegHermes);
+    fs.writeFileSync(
+      path.join(dirNegHermes, 'package.json'),
+      JSON.stringify({
+        name: 'generic-hermes-app',
+        dependencies: {
+          hermes: '^0.1.0',
+        },
+      })
+    );
+    const detNegHermes = detectProjectAndFramework(dirNegHermes);
+    assert.strictEqual(
+      detNegHermes.frameworks.includes('Hermes'),
+      false,
+      'Generic hermes dependency must not trigger Hermes agent framework'
+    );
+    console.log('✓ Negative Node: generic "hermes" package does NOT trigger Hermes.');
+
+    const dirNegPyHermes = path.join(tmpBase, 'neg-py-hermes-only');
+    fs.mkdirSync(dirNegPyHermes);
+    fs.writeFileSync(
+      path.join(dirNegPyHermes, 'requirements.txt'),
+      'hermes>=0.1.0\n'
+    );
+    const detNegPyHermes = detectProjectAndFramework(dirNegPyHermes);
+    assert.strictEqual(
+      detNegPyHermes.frameworks.includes('Hermes'),
+      false,
+      'Generic python hermes dependency must not trigger Hermes agent framework'
+    );
+    console.log('✓ Negative Python: generic "hermes" package does NOT trigger Hermes.');
   } finally {
     fs.rmSync(tmpBase, { recursive: true, force: true });
   }

@@ -1,7 +1,8 @@
 /**
- * Real Framework Integration & Runtime Validation Suite
+ * Framework Adapter Contract & Simulation Validation Suite
  *
- * Tests every framework integration against realistic runtime patterns:
+ * Validates the schema, format, and structure of every framework adapter
+ * against the expected tool/plugin/function contract and runtime dispatch patterns.
  * 1. OpenAI Agents SDK / Swarm
  * 2. LangGraph / LangChain
  * 3. CrewAI
@@ -54,16 +55,15 @@ import { detectProjectAndFramework } from '../src/cli.js';
 interface FrameworkTestResult {
   framework: string;
   runtimePattern: string;
-  nativeVerified: boolean;
   registrationWorks: boolean;
   invocationWorks: boolean;
   status: 'PASS' | 'PARTIAL' | 'FAIL' | 'UNVERIFIED';
   notes: string;
 }
 
-async function runRealFrameworkValidation() {
+async function runFrameworkAdapterContractValidation() {
   console.log('===============================================================');
-  console.log('   AAMARVA REAL FRAMEWORK INTEGRATION VALIDATION SUITE        ');
+  console.log('   AAMARVA FRAMEWORK ADAPTER CONTRACT & SIMULATION SUITE     ');
   console.log('===============================================================\n');
 
   const results: FrameworkTestResult[] = [];
@@ -115,7 +115,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'OpenAI Agents SDK',
       runtimePattern: 'Function Tool Schema + Dispatch Map ({ type: "function", function: { name, parameters }, handler })',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -126,7 +125,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'OpenAI Agents SDK',
       runtimePattern: 'Function Tool Schema',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -138,7 +136,7 @@ async function runRealFrameworkValidation() {
   // ---------------------------------------------------------------------------
   // 2. LangGraph / LangChain
   // ---------------------------------------------------------------------------
-  console.log('\n▶ [2/11] Testing LangGraph / LangChain Native Adapter...');
+  console.log('\n▶ [2/11] Testing LangGraph / LangChain Framework Adapter...');
   try {
     const tools = createLangChainTools(contract);
     assert.ok(tools.length >= 4);
@@ -164,7 +162,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'LangGraph / LangChain',
       runtimePattern: 'LangChain StructuredTool standard (.invoke(), .func(), .schema, .toJSON())',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -175,7 +172,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'LangGraph / LangChain',
       runtimePattern: 'StructuredTool',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -187,7 +183,7 @@ async function runRealFrameworkValidation() {
   // ---------------------------------------------------------------------------
   // 3. CrewAI
   // ---------------------------------------------------------------------------
-  console.log('\n▶ [3/11] Testing CrewAI Native Adapter...');
+  console.log('\n▶ [3/11] Testing CrewAI Framework Adapter...');
   try {
     const crewTools = createCrewAiTools(contract);
     assert.ok(crewTools.length >= 4);
@@ -206,7 +202,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'CrewAI',
       runtimePattern: 'CrewAI BaseTool contract (name, description, args_schema, run, _run)',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -217,7 +212,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'CrewAI',
       runtimePattern: 'BaseTool',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -247,7 +241,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'Google ADK',
       runtimePattern: 'Google Gen AI FunctionDeclaration objects + Tool Handler Dispatch Registry',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -258,7 +251,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'Google ADK',
       runtimePattern: 'FunctionDeclaration',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -286,7 +278,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'OpenClaw',
       runtimePattern: 'OpenClaw Skill Module ({ id, name, description, actions, actionDefinitions })',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -297,7 +288,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'OpenClaw',
       runtimePattern: 'OpenClaw Skill Module',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -333,7 +323,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'Hermes',
       runtimePattern: 'Hermes ToolDefinition & HermesSkillProvider ({ name, tools, getTool, executeTool })',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -344,7 +333,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'Hermes',
       runtimePattern: 'HermesSkillProvider',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -380,7 +368,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'AutoGen',
       runtimePattern: 'AutoGen Function Configs + ConversableAgent.register_function hook',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -391,7 +378,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'AutoGen',
       runtimePattern: 'register_function hook',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -419,7 +405,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'Agno',
       runtimePattern: 'Agno Toolkit ({ name, description, tools: [{ name, entrypoint }] })',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -430,7 +415,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'Agno',
       runtimePattern: 'Agno Toolkit',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -442,7 +426,7 @@ async function runRealFrameworkValidation() {
   // ---------------------------------------------------------------------------
   // 9. ElizaOS
   // ---------------------------------------------------------------------------
-  console.log('\n▶ [9/11] Testing ElizaOS Native Plugin Adapter...');
+  console.log('\n▶ [9/11] Testing ElizaOS Plugin Adapter...');
   try {
     const plugin = createElizaPlugin(contract);
     assert.strictEqual(plugin.name, '@aamarva/plugin-elizaos');
@@ -474,7 +458,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'ElizaOS',
       runtimePattern: 'ElizaOS Plugin Schema ({ name, actions: [Action], providers: [Provider], evaluators })',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -485,7 +468,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'ElizaOS',
       runtimePattern: 'ElizaOS Plugin Schema',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -517,7 +499,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'MCP',
       runtimePattern: 'Model Context Protocol Server (ListToolsSchema + CallToolSchema)',
-      nativeVerified: true,
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -528,7 +509,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'MCP',
       runtimePattern: 'MCP Server',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -549,7 +529,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'A2A',
       runtimePattern: 'Protocol Relay Adapter (handleIncomingPeerMessage)',
-      nativeVerified: false, // Protocol bridge, not a framework
       registrationWorks: true,
       invocationWorks: true,
       status: 'PASS',
@@ -560,7 +539,6 @@ async function runRealFrameworkValidation() {
     results.push({
       framework: 'A2A',
       runtimePattern: 'Protocol Relay',
-      nativeVerified: false,
       registrationWorks: false,
       invocationWorks: false,
       status: 'FAIL',
@@ -654,15 +632,14 @@ async function runRealFrameworkValidation() {
   console.table(
     results.map((r) => ({
       Integration: r.framework,
-      'Real Native API?': r.nativeVerified ? 'Yes' : 'No (Bridge)',
-      'Registration Works?': r.registrationWorks ? 'Yes' : 'No',
+      'Contract Match?': r.registrationWorks ? 'Yes' : 'No',
       'Invocation Works?': r.invocationWorks ? 'Yes' : 'No',
       Status: r.status,
     }))
   );
 }
 
-runRealFrameworkValidation().catch((err) => {
-  console.error('Real framework validation error:', err);
+runFrameworkAdapterContractValidation().catch((err) => {
+  console.error('Framework adapter contract validation error:', err);
   process.exit(1);
 });

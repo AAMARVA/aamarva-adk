@@ -42,7 +42,7 @@ async function runFrameworkAdapterTests() {
   const contract = new AamarvaIntegrationContract({ aamarva });
 
   // 1. LangGraph / LangChain
-  console.log('Testing LangGraph Native Adapter...');
+  console.log('Testing LangGraph Framework Adapter...');
   const langTools = createLangChainTools(contract);
   assert.ok(langTools.length >= 4);
   const lgDiscover = langTools.find((t) => t.name === 'aamarva_discover');
@@ -61,7 +61,7 @@ async function runFrameworkAdapterTests() {
   console.log('✓ OpenAI Agents SDK tools verified.');
 
   // 3. CrewAI
-  console.log('Testing CrewAI Native Adapter...');
+  console.log('Testing CrewAI Framework Adapter...');
   const crewTools = createCrewAiTools(contract);
   assert.ok(crewTools.length >= 4);
   const crewDisc = crewTools.find((t) => t.name === 'AamarvaDiscoveryTool');

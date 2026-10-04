@@ -14,13 +14,13 @@ try {
   console.log('\n▶ [3/8] Running Common Integration Contract Suite...');
   execSync('npx tsx tests/integration-contract.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [4/9] Running Framework Native Adapters Suite (LangGraph, Hermes, CrewAI, etc.)...');
+  console.log('\n▶ [4/9] Running Framework Adapters Suite (LangGraph, Hermes, CrewAI, etc.)...');
   execSync('npx tsx tests/framework-adapters.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [5/9] Running Real Framework Validation & Runtime Simulation Suite...');
-  execSync('npx tsx tests/real-framework-validation.test.ts', { stdio: 'inherit' });
+  console.log('\n▶ [5/9] Running Framework Adapter Contract & Simulation Suite...');
+  execSync('npx tsx tests/framework-adapter-contract.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [6/9] Running CLI One-Click Integration & Doctor Suite...');
+  console.log('\n▶ [6/9] Running CLI Guided Integration & Doctor Suite...');
   execSync('npx tsx tests/cli-integration.test.ts', { stdio: 'inherit' });
 
   console.log('\n▶ [7/9] Running E2EE Cryptographic Hardening Suite...');

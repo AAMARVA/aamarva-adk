@@ -1,7 +1,7 @@
 /**
- * Native Framework Adapters for AAMARVA ADK
+ * Framework Adapters for AAMARVA ADK
  *
- * Provides genuine, framework-native adapters and toolsets for:
+ * Provides genuine, framework adapters and toolsets for:
  * 1. OpenAI Agents SDK / Swarm
  * 2. LangGraph / LangChain
  * 3. CrewAI
@@ -77,7 +77,7 @@ function resolveContract(target?: AamarvaBridge | AamarvaIntegrationContract | A
 }
 
 // =============================================================================
-// 1. LangGraph / LangChain Native Adapter
+// 1. LangGraph / LangChain Framework Adapter
 // =============================================================================
 
 export interface LangChainToolLike {
@@ -208,7 +208,7 @@ export function createLangChainTools(target?: AamarvaBridge | AamarvaIntegration
 }
 
 // =============================================================================
-// 2. OpenAI Agents SDK / Swarm Native Adapter
+// 2. OpenAI Agents SDK / Swarm Framework Adapter
 // =============================================================================
 
 export interface OpenAIFunctionTool {
@@ -219,6 +219,8 @@ export interface OpenAIFunctionTool {
     parameters: Record<string, unknown>;
   };
   handler: (args: any) => Promise<unknown>;
+  run: (args: any) => Promise<unknown>;
+  execute: (args: any) => Promise<unknown>;
 }
 
 export class OpenAIAgentsAdapter {
@@ -245,6 +247,8 @@ export class OpenAIAgentsAdapter {
           },
         },
         handler: async (args: { query: string }) => contract.discover(args.query),
+        run: async (args: { query: string }) => contract.discover(args.query),
+        execute: async (args: { query: string }) => contract.discover(args.query),
       },
       {
         type: 'function',
@@ -260,6 +264,8 @@ export class OpenAIAgentsAdapter {
           },
         },
         handler: async (args: { agentId: string }) => contract.connect(args.agentId),
+        run: async (args: { agentId: string }) => contract.connect(args.agentId),
+        execute: async (args: { agentId: string }) => contract.connect(args.agentId),
       },
       {
         type: 'function',
@@ -277,6 +283,10 @@ export class OpenAIAgentsAdapter {
         },
         handler: async (args: { capability: string; category?: string }) =>
           contract.emit(args.capability, args.category),
+        run: async (args: { capability: string; category?: string }) =>
+          contract.emit(args.capability, args.category),
+        execute: async (args: { capability: string; category?: string }) =>
+          contract.emit(args.capability, args.category),
       },
       {
         type: 'function',
@@ -293,6 +303,8 @@ export class OpenAIAgentsAdapter {
           },
         },
         handler: async (args: { need: string; category?: string }) => contract.intake(args.need, args.category),
+        run: async (args: { need: string; category?: string }) => contract.intake(args.need, args.category),
+        execute: async (args: { need: string; category?: string }) => contract.intake(args.need, args.category),
       },
       {
         type: 'function',
@@ -310,6 +322,10 @@ export class OpenAIAgentsAdapter {
         },
         handler: async (args: { connectionId: string; content: string }) =>
           contract.sendMessage(args.connectionId, args.content),
+        run: async (args: { connectionId: string; content: string }) =>
+          contract.sendMessage(args.connectionId, args.content),
+        execute: async (args: { connectionId: string; content: string }) =>
+          contract.sendMessage(args.connectionId, args.content),
       },
       {
         type: 'function',
@@ -325,6 +341,8 @@ export class OpenAIAgentsAdapter {
           },
         },
         handler: async (args: { connectionId: string }) => contract.getMessages(args.connectionId),
+        run: async (args: { connectionId: string }) => contract.getMessages(args.connectionId),
+        execute: async (args: { connectionId: string }) => contract.getMessages(args.connectionId),
       },
     ];
   }
@@ -354,7 +372,7 @@ export function createOpenAIAgentTools(target?: AamarvaBridge | AamarvaIntegrati
 }
 
 // =============================================================================
-// 3. CrewAI Native Adapter
+// 3. CrewAI Framework Adapter
 // =============================================================================
 
 export interface CrewAiToolLike {
@@ -553,7 +571,7 @@ export function createGoogleAdkIntegration(target?: AamarvaBridge | AamarvaInteg
 }
 
 // =============================================================================
-// 5. OpenClaw Native Skill / Plugin Mechanism
+// 5. OpenClaw Skill / Plugin Mechanism
 // =============================================================================
 
 export interface OpenClawAction {
@@ -569,6 +587,7 @@ export interface OpenClawSkill {
   version: string;
   actions: Record<string, (args: any) => Promise<unknown>>;
   actionDefinitions?: Record<string, OpenClawAction>;
+  schema?: Record<string, unknown>;
 }
 
 export class OpenClawAdapter {
@@ -585,6 +604,16 @@ export class OpenClawAdapter {
       name: 'AAMARVA Autonomous Agent Network Skill',
       description: 'Provides autonomous discovery, decentralized floor broadcasting, and E2EE agent communication.',
       version: '1.0.0',
+      schema: {
+        actions: {
+          discover: { description: 'Search the AAMARVA network for agents and posts', parameters: { query: { type: 'string' } } },
+          connect: { description: 'Request a connection with an AAMARVA agent', parameters: { agentId: { type: 'string' } } },
+          emit: { description: 'Broadcast a capability on the Floor', parameters: { capability: { type: 'string' } } },
+          intake: { description: 'Broadcast a need on the Floor', parameters: { need: { type: 'string' } } },
+          sendMessage: { description: 'Send E2EE message', parameters: { connectionId: { type: 'string' }, content: { type: 'string' } } },
+          getMessages: { description: 'Get E2EE messages', parameters: { connectionId: { type: 'string' } } },
+        },
+      },
       actions: {
         discover: (args: { query: string } | string) => {
           const q = typeof args === 'string' ? args : args.query;
@@ -647,7 +676,7 @@ export function createOpenClawSkill(target?: AamarvaBridge | AamarvaIntegrationC
 }
 
 // =============================================================================
-// 6. Hermes Agent Framework Native Adapter
+// 6. Hermes Agent Framework Framework Adapter
 // =============================================================================
 
 export interface HermesToolDefinition {
@@ -767,7 +796,7 @@ export class HermesAamarvaAdapter {
     return {
       name: 'hermes-aamarva-adapter',
       version: '1.0.0',
-      description: 'Hermes native adapter for autonomous multi-agent collaboration via AAMARVA.',
+      description: 'Hermes adapter for autonomous multi-agent collaboration via AAMARVA.',
       tools,
       getTool: (name: string) => toolMap.get(name),
       executeTool: async (name: string, params: any, context?: any) => {
@@ -792,7 +821,7 @@ export function createHermesSkillProvider(
 }
 
 // =============================================================================
-// 7. AutoGen Native Adapter
+// 7. AutoGen Framework Adapter
 // =============================================================================
 
 export interface AutoGenFunctionConfig {
@@ -901,7 +930,7 @@ export function createAutoGenTools(target?: AamarvaBridge | AamarvaIntegrationCo
 }
 
 // =============================================================================
-// 8. Agno (Phidata) Native Adapter
+// 8. Agno (Phidata) Framework Adapter
 // =============================================================================
 
 export interface AgnoTool {
@@ -956,7 +985,7 @@ export function createAgnoToolkit(target?: AamarvaBridge | AamarvaIntegrationCon
 }
 
 // =============================================================================
-// 9. ElizaOS Native Plugin Adapter
+// 9. ElizaOS Plugin Adapter
 // =============================================================================
 
 export interface ElizaAction {
