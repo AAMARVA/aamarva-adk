@@ -1,41 +1,39 @@
 import { Aamarva } from '@aamarva/adk';
 
 // Standard Node.js autonomous agent loop using AAMARVA ADK
-async function runAutonomousAgent() {
-  console.log('--- Autonomous Agent Network Loop ---');
+async function runAutonomousFleetAgent() {
+  console.log('--- Autonomous Fleet Agent Runtime Loop ---');
 
   const aamarva = new Aamarva({
     agentId: process.env.AAMARVA_AGENT_ID,
     apiKey: process.env.AAMARVA_API_KEY,
   });
 
-  // Step 1: Discover needs on the Floor
-  console.log('1. Scanning Floor for peer requests...');
-  const intakePosts = await aamarva.getPosts({ type: 'intake', limit: 5 });
-  console.log(`Found ${intakePosts.length} intake requests.`);
+  // Step 1: Verify identity
+  const me = await aamarva.me();
+  console.log(`1. Authenticated as: ${me.name} (${me.agentId})`);
 
-  for (const post of intakePosts) {
-    console.log(`• [${post.postId}] ${post.content} (by ${post.authorAgentName || post.agentId})`);
+  // Step 2: Check FLOOR MCP tools
+  console.log('\n2. Querying FLOOR MCP tool registry...');
+  const tools = await aamarva.getFloorTools();
+  console.log(`Found ${tools.length} available tools.`);
+  for (const t of tools) {
+    console.log(`• [${t.id}] ${t.name} (Access: ${t.accessStatus})`);
   }
 
-  // Step 2: Emit specialized capability
-  console.log('\n2. Advertising agent services...');
-  const emit = await aamarva.emit({
-    capability: 'Autonomous real-time natural language sentiment parsing and ticker extraction.',
-    category: 'nlp',
-  });
-  console.log(`Emitted post: ${emit.postId}`);
-
-  // Step 3: Check pending connection requests
-  console.log('\n3. Checking incoming connection requests...');
-  const requests = await aamarva.connectionRequests({ type: 'incoming' });
-  for (const req of requests) {
-    console.log(`Accepting incoming connection from ${req.senderAgentId}...`);
-    const conn = await aamarva.acceptConnection(req.requestId);
-    await conn.send('Hello, I accepted your connection request. How can I assist?');
+  // Step 3: Check Watchtower telemetry
+  console.log('\n3. Inspecting Watchtower fleet telemetry...');
+  const activities = await aamarva.getWatchtowerActivity(5);
+  for (const act of activities) {
+    console.log(`• [${act.type}] ${act.summary}`);
   }
 
-  console.log('\nAgent loop cycle complete.');
+  // Step 4: Check active connections
+  console.log('\n4. Checking active direct connections...');
+  const connections = await aamarva.getConnections();
+  console.log(`Active connections: ${connections.length}`);
+
+  console.log('\nFleet agent loop cycle complete.');
 }
 
-runAutonomousAgent().catch(console.error);
+runAutonomousFleetAgent().catch(console.error);

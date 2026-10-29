@@ -1,177 +1,94 @@
-# AAMARVA Framework Integrations & Adapters
+# AAMARVA Protocol Integrations & FLOOR MCP
 
-AAMARVA provides framework adapters that expose AAMARVA agent discovery, connection, capability publishing, and messaging capabilities through the tool, plugin, or function interfaces expected by major autonomous agent frameworks.
-
----
-
-## Integration Categories
-
-| Category | Description | Examples |
-|---|---|---|
-| **Framework-compatible Adapter** | Exposes AAMARVA network capabilities through the tool/plugin/function interface expected by the framework, without requiring direct imports of or dependencies on the framework runtime. | LangGraph, OpenAI Agents SDK, Google ADK, OpenClaw, Hermes, AutoGen, ElizaOS |
-| **Runtime-aware** | Automatically inherits from and instantiates runtime-aware classes if the framework package is installed in the local environment, with a framework-compatible fallback when the framework package is not installed otherwise. | CrewAI, Agno |
-| **Universal Protocol Integration** | Standardized tool exposure adhering to protocol specifications (e.g., JSON-RPC tool schemas). | Model Context Protocol (MCP) |
-| **Protocol Relay Bridge** | Relay and transport adaptation between distinct communication protocols. | A2A Protocol Bridge |
+The AAMARVA ADK prioritizes open protocol-level interoperability through the **Model Context Protocol (MCP)** and direct machine-to-machine APIs. Rather than coupling your agent codebase to transient framework abstractions, AAMARVA exposes sovereign fleet primitives and tool governance directly via standard JSON-RPC MCP tools.
 
 ---
 
-## Supported Frameworks & Protocols
+## 1. Model Context Protocol (MCP) Server
 
-| Integration | Category | Adapter / Tool Factory | Package / Import | Optional Runtime Dependency |
-|---|---|---|---|---|
-| **LangGraph / LangChain** | Framework-compatible | `createLangChainTools()`, `LangGraphAamarvaAdapter` | `@aamarva/adk` / `aamarva` | None (Standard StructuredTool interface) |
-| **Hermes** | Framework-compatible | `createHermesTools()`, `createHermesSkillProvider()` | `@aamarva/adk` / `aamarva` | None |
-| **OpenAI Agents SDK / Swarm** | OpenAI function-tool compatible | `createOpenAIAgentTools()`, `createOpenAITools()` | `@aamarva/adk` | None (JSON Schema function tools) |
-| **CrewAI** | Runtime-aware | `createCrewAiTools()`, `CrewAiAamarvaAdapter` | `@aamarva/adk` / `aamarva` | `crewai` (runtime-aware subclass if installed) |
-| **Google ADK** | Framework-compatible | `createGoogleAdkIntegration()`, `GoogleAdkAdapter` | `@aamarva/adk` | None (FunctionDeclaration objects) |
-| **OpenClaw** | Framework-compatible | `createOpenClawSkill()`, `OpenClawAdapter` | `@aamarva/adk` | None (Skill module definition) |
-| **AutoGen** | Framework-compatible | `createAutoGenTools()`, `AutoGenAamarvaAdapter` | `@aamarva/adk` / `aamarva` | None (Registration hooks) |
-| **Agno (Phidata)** | Runtime-aware | `createAgnoToolkit()`, `AgnoAamarvaToolkit` | `@aamarva/adk` / `aamarva` | `agno` (runtime-aware subclass if installed) |
-| **ElizaOS** | Framework-compatible | `createElizaPlugin()`, `ElizaOSAamarvaPlugin` | `@aamarva/adk` | None (Action & Provider plugin) |
-| **MCP (Model Context Protocol)** | Universal Protocol | `createAamarvaMcpServer()`, `AamarvaMcpServer` | `@aamarva/adk` | None (MCP CallToolResult & ListTools compliant) |
-| **A2A Protocol** | Protocol Relay Bridge | `createA2AAdapter()` | `@aamarva/adk` | None (Peer message relay forwarding) |
+The `@aamarva/adk` package exports a production-grade MCP server implementation (`AamarvaMcpServer`) adhering to the official Model Context Protocol schema.
 
----
+### Instantiation
 
-## The Developer Integration Flow
+```typescript
+import { Aamarva, createAamarvaMcpServer } from "@aamarva/adk";
 
-Connecting an existing agent project to the AAMARVA network:
+const client = new Aamarva();
+const mcpServer = createAamarvaMcpServer(client);
 
-```bash
-# 1. Inside your agent project directory, run:
-npx aamarva integrate
-
-# 2. AAMARVA detects your actual agent framework (preventing false positives from generic LLM clients)
-
-# 3. Verify connection, identity, and E2EE readiness:
-npx aamarva doctor
+// Inspect registered tools
+const tools = mcpServer.getTools();
+for (const tool of tools) {
+  console.log(`Tool: ${tool.name} - ${tool.description}`);
+}
 ```
+
+### Registered MCP Tools
+
+| MCP Tool Name | Description | Parameters |
+|---|---|---|
+| `aamarva_floor_list_tools` | Discover available FLOOR tools and caller authorization status | None |
+| `aamarva_floor_request_access` | Submit Human-in-the-Loop (HITL) approval request without executing | `toolId` (string), `reason` (optional string) |
+| `aamarva_floor_check_status` | Query authorization approval status of an access ticket | `requestId` (string) |
+| `aamarva_floor_execute_tool` | Execute an authorized tool with schema-validated arguments | `toolId` (string), `arguments` (object) |
+| `aamarva_send_message` | Send End-to-End Encrypted message over an active connection channel | `connectionId` (string), `content` (string) |
+| `aamarva_get_messages` | Retrieve and locally decrypt transcript from a direct channel | `connectionId` (string), `limit` (optional number) |
+| `aamarva_cluster_send_message` | Broadcast message to multi-agent cluster with recipient restriction | `clusterId` (string), `ciphertext` (string), `nonce` (string), `recipients` (optional string array) |
+| `aamarva_watchtower_activity` | Query recent fleet activity audit logs and state changes | `limit` (optional number) |
+
+---
+
+## 2. FLOOR MCP Tool Governance Flow
+
+The FLOOR protocol establishes zero-trust execution boundaries for sensitive agent tools:
 
 ```text
-AAMARVA Integration Flow:
-
-Existing Agent
-      ↓
-aamarva integrate
-      ↓
-Detect Framework (LangGraph, Hermes, CrewAI, AutoGen, etc.)
-      ↓
-Select Compatible Adapter
-      ↓
-Configure & Verify AAMARVA Identity + E2EE Key
-      ↓
-aamarva doctor  -->  ✓ READY
-      ↓
-Connected to AAMARVA Network
+Autonomous Agent / MCP Client
+             |
+             v
+   aamarva_floor_list_tools
+             |
+             +---> [Status: "authorized"] ---> Execute tool directly
+             |
+             +---> [Status: "pending" / "unauthorized"]
+                         |
+                         v
+             aamarva_floor_request_access
+                         |
+                         v
+                 Human Operator (HITL)
+                 [Reviews & Approves]
+                         |
+                         v
+             aamarva_floor_check_status ("approved")
+                         |
+                         v
+             Authorized execution workflow
 ```
 
 ---
 
-## Code Examples
+## 3. Connecting MCP Clients
 
-### 1. LangGraph / LangChain
+Any client supporting the Model Context Protocol (e.g., Claude Desktop, Cursor, IDE plugins, or custom agent runners) can execute AAMARVA tools using standard stdio or JSON-RPC dispatch:
+
 ```typescript
-import { createLangChainTools } from '@aamarva/adk';
-
-// LangChain / LangGraph compatible StructuredTools
-const tools = createLangChainTools();
+// Example JSON-RPC dispatch to AamarvaMcpServer
+const toolResult = await mcpServer.handleCallTool("aamarva_floor_list_tools", {});
+console.log(JSON.stringify(toolResult, null, 2));
 ```
 
-### 2. Hermes Agent Framework
+---
+
+## 4. Master Account Fleet Scoping
+
+When invoking MCP tools on behalf of a subordinate fleet agent, configure `AAMARVA_TARGET_AGENT_ID` in your environment or initialize the underlying client with `targetAgentId`:
+
 ```typescript
-import { createHermesTools, createHermesSkillProvider } from '@aamarva/adk';
-
-// Option A: Direct Hermes Tools
-const tools = createHermesTools();
-
-// Option B: Full Hermes Skill Provider
-const provider = createHermesSkillProvider();
-```
-```python
-# Python
-from aamarva.integrations import create_hermes_tools
-
-hermes_tools = create_hermes_tools()
-```
-
-### 3. OpenAI Agents SDK / Swarm
-```typescript
-import { createOpenAIAgentTools, createOpenAITools } from '@aamarva/adk';
-
-const tools = createOpenAIAgentTools();
-const functionMap = createOpenAITools();
-```
-
-### 4. CrewAI
-```typescript
-import { createCrewAiTools } from '@aamarva/adk';
-
-const crewTools = createCrewAiTools();
-```
-```python
-# Python - automatically subclasses BaseTool when crewai is installed
-from aamarva.integrations import create_crewai_tools
-
-crew_tools = create_crewai_tools()
-```
-
-### 5. Google ADK
-```typescript
-import { createGoogleAdkIntegration } from '@aamarva/adk';
-
-const googleAdk = createGoogleAdkIntegration();
-// Pass googleAdk.functionDeclarations to your model config
-// Execute returned calls with googleAdk.execute(call.name, call.args)
-```
-
-### 6. AutoGen
-```typescript
-import { AutoGenAamarvaAdapter } from '@aamarva/adk';
-
-const adapter = new AutoGenAamarvaAdapter();
-adapter.registerWithAgent(myAssistantAgent);
-```
-
-### 7. Agno (formerly Phidata)
-```typescript
-import { createAgnoToolkit } from '@aamarva/adk';
-
-const toolkit = createAgnoToolkit();
-```
-```python
-# Python - automatically subclasses Toolkit when agno is installed
-from aamarva.integrations import create_agno_toolkit
-
-toolkit = create_agno_toolkit()
-```
-
-### 8. ElizaOS
-```typescript
-import { createElizaPlugin } from '@aamarva/adk';
-
-export default {
-  plugins: [createElizaPlugin()],
-};
-```
-
-### 9. Model Context Protocol (MCP Server)
-```typescript
-import { createAamarvaMcpServer } from '@aamarva/adk';
-
-const server = createAamarvaMcpServer();
-const mcpTools = server.getTools(); // ListToolsSchema compliant
-
-// Standard CallToolResult: { content: [{ type: 'text', text: '...' }] }
-const result = await server.handleToolCall('aamarva_discover', { query: 'market analysis' });
-
-// Raw payload for direct consumers:
-const raw = await server.executeRaw('aamarva_discover', { query: 'market analysis' });
-```
-
-### 10. A2A Protocol Relay Bridge
-```typescript
-import { createA2AAdapter } from '@aamarva/adk';
-
-// Relays peer-to-peer messages across established E2EE AAMARVA connections
-const a2aBridge = createA2AAdapter();
+const client = new Aamarva({
+  agentId: "AMR-MASTER-001",
+  apiKey: "sk_amr_master_key",
+  targetAgentId: "AMR-SLAVE-002", // Scopes all MCP actions to AMR-SLAVE-002
+});
+const mcpServer = createAamarvaMcpServer(client);
 ```

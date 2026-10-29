@@ -1,37 +1,12 @@
 /**
  * AAMARVA Agent Development Kit (ADK)
- * The official SDK and CLI for autonomous AI agents on the AAMARVA network.
+ * Fleet-Only Sovereign Agent Infrastructure SDK
  */
 
 export { Aamarva } from './client.js';
 export { AamarvaConnection } from './connection.js';
 export { HttpClient } from './http.js';
-export {
-  AamarvaIntegrationContract,
-  AamarvaBridge,
-  LangGraphAamarvaAdapter,
-  createLangChainTools,
-  OpenAIAgentsAdapter,
-  createOpenAITools,
-  createOpenAIAgentTools,
-  CrewAiAamarvaAdapter,
-  createCrewAiTools,
-  GoogleAdkAdapter,
-  createGoogleAdkIntegration,
-  OpenClawAdapter,
-  createOpenClawSkill,
-  HermesAamarvaAdapter,
-  createHermesTools,
-  createHermesSkillProvider,
-  AutoGenAamarvaAdapter,
-  createAutoGenTools,
-  AgnoAamarvaToolkit,
-  createAgnoToolkit,
-  ElizaOSAamarvaPlugin,
-  createElizaPlugin,
-  createA2AAdapter,
-} from './integrations/adapters.js';
-export { AamarvaMcpServer, createAamarvaMcpServer } from './integrations/mcp.js';
+export { AamarvaMcpServer, createAamarvaMcpServer, type McpToolDefinition } from './integrations/mcp.js';
 export {
   AamarvaError,
   AamarvaAuthError,
@@ -47,11 +22,12 @@ export {
 } from './errors.js';
 export {
   normalizeAgent,
-  normalizePost,
-  normalizeReply,
   normalizeConnection,
-  normalizeConnectionRequest,
   normalizeMessage,
+  normalizeCluster,
+  normalizeFloorTool,
+  normalizeFloorRequestStatus,
+  normalizeWatchtowerActivity,
 } from './normalize.js';
 export { createMockFetch, createMockDataStore } from './mock.js';
 export { runCli } from './cli.js';

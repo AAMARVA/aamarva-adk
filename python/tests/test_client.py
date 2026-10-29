@@ -1,26 +1,14 @@
-import io
-import json
 import unittest
-import urllib.error
-from unittest.mock import patch, MagicMock
-
-import aamarva
-from aamarva import Aamarva, AamarvaConnection, Agent, Post, Reply, ConnectionRequest, Connection, Message, DiscoveryResult
+from unittest.mock import MagicMock
+from aamarva import Aamarva, AamarvaConnection, Agent, Connection, Message
 from aamarva.errors import (
     AamarvaError,
     AamarvaAPIError,
     AamarvaAuthenticationError,
-    AamarvaRateLimitError,
-    AamarvaTimeoutError,
-    AamarvaConnectionError,
     AamarvaValidationError
 )
 from aamarva.crypto import (
-    get_local_identity_key,
-    get_local_public_key_pem,
     compute_key_fingerprint,
-    encrypt_message_with_keys,
-    decrypt_message_with_keys,
     export_public_key_jwk,
     sign_identity_binding
 )
@@ -33,730 +21,494 @@ except ImportError:
     serialization = None
     HAS_CRYPTOGRAPHY = False
 
-class TestAamarvaClientAPIs(unittest.TestCase):
+class TestAamarvaFleetClient(unittest.TestCase):
     def setUp(self):
-        self.client = Aamarva(agent_id="test-agent", api_key="test-key")
+        self.client = Aamarva(agent_id="AMR-TEST-1111", api_key="sk_amr_test_123")
         self.client.http.request = MagicMock()
         if HAS_CRYPTOGRAPHY:
             self.peer_priv = ec.generate_private_key(ec.SECP256R1())
-            self.peer_pub_pem = self.peer_priv.public_key().public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            ).decode('utf-8')
             self.peer_pub_jwk = export_public_key_jwk(self.peer_priv.public_key())
             self.peer_fp = compute_key_fingerprint(self.peer_priv.public_key())
             
             self.peer_identity_priv = ec.generate_private_key(ec.SECP256R1())
             self.peer_identity_pub_jwk = export_public_key_jwk(self.peer_identity_priv.public_key())
-            self.peer_sig = sign_identity_binding(self.peer_identity_priv, "AMR-B", self.peer_fp)
+            self.peer_sig = sign_identity_binding(self.peer_identity_priv, "AMR-PEER-2222", self.peer_fp)
         else:
             self.peer_priv = None
-            self.peer_pub_pem = None
             self.peer_pub_jwk = None
             self.peer_fp = None
             self.peer_identity_priv = None
             self.peer_identity_pub_jwk = None
             self.peer_sig = None
 
-    def test_discover_all(self):
-        def mock_request(method, path, auth, params=None, json_data=None):
-            if path == "/agents":
-                return {"success": True, "data": {"agents": [{"agentId": "AMR-1", "name": "Agent 1", "bio": "Agent Bio"}], "total": 1}}
-            elif path == "/posts":
-                return {"success": True, "data": {"posts": [{"postId": "post-1", "agentId": "AMR-1", "type": "emit", "content": "hello", "createdAt": "2023-01-01"}], "total": 1}}
-            return {}
-        self.client.http.request.side_effect = mock_request
-        
-        res = self.client.discover(need="query")
-        self.assertEqual(res.query, "query")
-        self.assertEqual(len(res.agents), 1)
-        self.assertEqual(res.agents[0].agentId, "AMR-1")
-        self.assertEqual(res.agents[0].name, "Agent 1")
-        self.assertEqual(len(res.posts), 1)
-        self.assertEqual(res.posts[0].postId, "post-1")
-        self.assertEqual(res.totalAgents, 1)
-        self.assertEqual(res.totalPosts, 1)
+    def test_health(self):
+        self.client.http.request.return_value = {"success": True, "status": "ok"}
+        res = self.client.health()
+        self.assertEqual(res.get("status"), "ok")
+        self.client.http.request.assert_called_with("GET", "/health", auth=False)
 
-    def test_discover_agents_only(self):
-        self.client.http.request.return_value = {"success": True, "data": {"agents": [{"agentId": "AMR-1", "name": "Agent 1"}], "total": 1}}
-        res = self.client.discover(capability="cap", type="agents")
-        self.assertEqual(len(res.agents), 1)
-        self.assertEqual(len(res.posts), 0)
-        self.client.http.request.assert_called_with("GET", "/agents", auth=False, params={"page": 1, "limit": 20, "q": "cap"})
+    def test_me(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {"agentId": "AMR-TEST-1111", "name": "Fleet Commander"}
+        }
+        agent = self.client.me()
+        self.assertEqual(agent.agentId, "AMR-TEST-1111")
+        self.assertEqual(agent.name, "Fleet Commander")
+        self.client.http.request.assert_called_with("GET", "/agents/me", auth=True)
 
-    def test_discover_posts_only(self):
-        self.client.http.request.return_value = {"success": True, "data": {"posts": [{"postId": "post-1", "agentId": "AMR-1", "type": "emit", "content": "content", "createdAt": "2023"}], "total": 1}}
-        res = self.client.discover(q="some-query", type="posts")
-        self.assertEqual(len(res.agents), 0)
-        self.assertEqual(len(res.posts), 1)
-        self.client.http.request.assert_called_with("GET", "/posts", auth=False, params={"page": 1, "limit": 20, "q": "some-query"})
+    def test_get_connections(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": [{"connectionId": "conn_1", "agentId": "AMR-PEER-2222", "status": "active", "createdAt": "2026-01-01"}]
+        }
+        conns = self.client.connections()
+        self.assertEqual(len(conns), 1)
+        self.assertEqual(conns[0].connectionId, "conn_1")
+        self.client.http.request.assert_called_with("GET", "/connections", auth=True)
 
-    def test_get_agent(self):
-        self.client.http.request.return_value = {"success": True, "data": {"agentId": "AMR-1", "name": "Agent 1"}}
-        agent = self.client.get_agent("AMR-1")
-        self.assertEqual(agent.agentId, "AMR-1")
-        self.client.http.request.assert_called_with("GET", "/agents/AMR-1", auth=False)
+    def test_get_connection(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {"connectionId": "conn_1", "agentId": "AMR-PEER-2222", "status": "active", "createdAt": "2026-01-01"}
+        }
+        conn = self.client.get_connection("conn_1")
+        self.assertEqual(conn.connectionId, "conn_1")
+        self.client.http.request.assert_called_with("GET", "/connections/conn_1", auth=True)
 
-    def test_get_post(self):
-        self.client.http.request.return_value = {"success": True, "data": {"postId": "p-1", "agentId": "AMR-1", "type": "emit", "content": "test", "createdAt": "2023"}}
-        post = self.client.get_post("p-1")
-        self.assertEqual(post.postId, "p-1")
-        self.client.http.request.assert_called_with("GET", "/posts/p-1", auth=False)
+    def test_clusters(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {"clusterId": "cluster_1", "name": "Arbitrage Fleet"}
+        }
+        cluster = self.client.create_cluster(name="Arbitrage Fleet", description="L2 liquidity")
+        self.assertEqual(cluster.clusterId, "cluster_1")
+        self.assertEqual(cluster.name, "Arbitrage Fleet")
+        self.client.http.request.assert_called_with(
+            "POST", "/clusters", auth=True, json_data={"name": "Arbitrage Fleet", "description": "L2 liquidity"}
+        )
 
-    def test_emit(self):
-        self.client.http.request.return_value = {"success": True, "data": {"postId": "p-1", "agentId": "AMR-1", "type": "emit", "content": "cap", "createdAt": "2023", "category": "tech"}}
-        post = self.client.emit("cap", category="tech")
-        self.assertEqual(post.postId, "p-1")
-        self.assertEqual(post.category, "tech")
-        self.client.http.request.assert_called_with("POST", "/posts", auth=True, json_data={"type": "emit", "content": "cap", "category": "tech"})
+    def test_watchtower_activity(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": [{"id": "act_1", "type": "connection.created", "summary": "Direct channel formed", "timestamp": "2026-01-01"}]
+        }
+        acts = self.client.get_watchtower_activity(limit=10)
+        self.assertEqual(len(acts), 1)
+        self.assertEqual(acts[0].summary, "Direct channel formed")
+        self.client.http.request.assert_called_with("GET", "/watchtower/activity", auth=True, params={"limit": 10})
 
-    def test_intake(self):
-        self.client.http.request.return_value = {"success": True, "data": {"postId": "p-1", "agentId": "AMR-1", "type": "intake", "content": "need", "createdAt": "2023"}}
-        post = self.client.intake("need")
-        self.assertEqual(post.postId, "p-1")
-        self.client.http.request.assert_called_with("POST", "/posts", auth=True, json_data={"type": "intake", "content": "need"})
+    def test_floor_tools(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": [{"id": "tool_sec", "name": "SEC Extractor", "description": "10-K data", "inputSchema": {}, "accessStatus": "authorized"}]
+        }
+        tools = self.client.get_floor_tools()
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0].id, "tool_sec")
+        self.assertEqual(tools[0].accessStatus, "authorized")
 
-    def test_request_connection(self):
-        self.client.http.request.return_value = {"success": True, "data": {"requestId": "req-1", "senderAgentId": "AMR-A", "receiverAgentId": "AMR-B", "status": "pending", "createdAt": "2023"}}
-        req = self.client.request_connection("AMR-B")
-        self.assertEqual(req.requestId, "req-1")
-        self.client.http.request.assert_called_with("POST", "/connections/requests", auth=True, json_data={"receiverAgentId": "AMR-B"})
+    def test_floor_access_request(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "status": "pending",
+            "data": {"status": "pending", "requestId": "req_tool_99"}
+        }
+        res = self.client.request_floor_access("tool_orderbook", "Need market depth data")
+        self.assertEqual(res.status, "pending")
+        self.assertEqual(res.requestId, "req_tool_99")
+        self.client.http.request.assert_called_with(
+            "POST", "/floor/tools/tool_orderbook/request-access", auth=True,
+            json_data={"reason": "Need market depth data"}
+        )
+
+    def test_floor_execute(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "status": "executed",
+            "data": {"status": "executed", "result": {"data": 123}}
+        }
+        res = self.client.execute_floor_tool("tool_sec", {"ticker": "AAPL"})
+        self.assertEqual(res.status, "executed")
+        self.assertEqual(res.result, {"data": 123})
+        self.client.http.request.assert_called_with(
+            "POST", "/floor/tools/tool_sec/execute", auth=True,
+            json_data={"arguments": {"ticker": "AAPL"}}
+        )
+
+    def test_legacy_removal_on_client(self):
+        # Assert obsolete methods do not exist
+        self.assertFalse(hasattr(self.client, "discover"))
+        self.assertFalse(hasattr(self.client, "emit"))
+        self.assertFalse(hasattr(self.client, "intake"))
+        self.assertFalse(hasattr(self.client, "reply"))
+        self.assertFalse(hasattr(self.client, "submit_review"))
+        self.assertFalse(hasattr(self.client, "get_posts"))
+        self.assertFalse(hasattr(self.client, "create_post"))
+        self.assertFalse(hasattr(self.client, "establish_connection"))
+        self.assertFalse(hasattr(self.client, "get_floor_temporary_access"))
+        self.assertFalse(hasattr(self.client, "invoke_floor_tool"))
 
     @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
-    def test_get_messages_raw_strings(self):
+    def test_login_auto_registers_public_key(self):
+        calls = []
+        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
+            calls.append((method, path, json_data))
+            if path == "/auth/login":
+                return {"success": True, "data": {"accessToken": "at_1", "refreshToken": "rt_1"}}
+            if path == "/agents/me/e2ee":
+                return {"success": True, "message": "Key registered"}
+            return {}
+        self.client.http.request.side_effect = mock_req
+        res = self.client.login("AMR-TEST-1111", "sk_amr_test_123")
+        self.assertEqual(res.get("accessToken"), "at_1")
+        # Ensure login triggered PUT /agents/me/e2ee
+        e2ee_calls = [c for c in calls if c[1] == "/agents/me/e2ee"]
+        self.assertEqual(len(e2ee_calls), 1)
+
+    def test_floor_execute_fail_closed_missing_status(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {"result": {"some": "data"}}
+        }
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.execute_floor_tool("tool_sec", {"ticker": "AAPL"})
+        self.assertEqual(ctx.exception.code, "FLOOR_EXECUTION_FAILED")
+
+    def test_floor_execute_fail_closed_unknown_status(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {"status": "in_progress", "result": {"some": "data"}}
+        }
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.execute_floor_tool("tool_sec", {"ticker": "AAPL"})
+        self.assertEqual(ctx.exception.code, "FLOOR_EXECUTION_FAILED")
+
+    def test_floor_execute_fail_closed_malformed_data(self):
+        # 1. data is null
+        self.client.http.request.return_value = {"success": True, "data": None}
+        with self.assertRaises(AamarvaError) as ctx1:
+            self.client.execute_floor_tool("tool_sec", {})
+        self.assertEqual(ctx1.exception.code, "FLOOR_EXECUTION_FAILED")
+
+        # 2. data is string
+        self.client.http.request.return_value = {"success": True, "data": "unexpected_string"}
+        with self.assertRaises(AamarvaError) as ctx2:
+            self.client.execute_floor_tool("tool_sec", {})
+        self.assertEqual(ctx2.exception.code, "FLOOR_EXECUTION_FAILED")
+
+        # 3. data is list
+        self.client.http.request.return_value = {"success": True, "data": [1, 2, 3]}
+        with self.assertRaises(AamarvaError) as ctx3:
+            self.client.execute_floor_tool("tool_sec", {})
+        self.assertEqual(ctx3.exception.code, "FLOOR_EXECUTION_FAILED")
+
+        # 4. response itself is string
+        self.client.http.request.return_value = "raw_non_json_string"
+        with self.assertRaises(AamarvaError) as ctx4:
+            self.client.execute_floor_tool("tool_sec", {})
+        self.assertEqual(ctx4.exception.code, "FLOOR_EXECUTION_FAILED")
+
+    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
+    def test_registration_cache_identity_aware(self):
+        put_calls = []
+        fail_next = False
+        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
+            nonlocal put_calls, fail_next
+            if path == "/agents/me/e2ee" and method == "PUT":
+                put_calls.append(json_data)
+                if fail_next:
+                    return {"success": False, "message": "Server error"}
+                return {"success": True, "message": "Registered"}
+            return {}
+
+        self.client.http.request.side_effect = mock_req
+        self.client.http.agent_id = "AMR-IDENT-1"
+
+        # 1. Initial registration for AMR-IDENT-1
+        self.client.register_public_key()
+        self.assertEqual(len(put_calls), 1)
+        self.assertEqual(self.client.registered_agent_id, "AMR-IDENT-1")
+        initial_fp = self.client.registered_key_fingerprint
+        self.assertIsNotNone(initial_fp)
+
+        # 2. Repeated call with same identity and fingerprint is cached (no new call)
+        self.client.register_public_key()
+        self.assertEqual(len(put_calls), 1)
+
+        # 3. Switching agent ID with same fingerprint MUST trigger registration for new identity
+        self.client.http.agent_id = "AMR-IDENT-2"
+        self.client.register_public_key()
+        self.assertEqual(len(put_calls), 2)
+        self.assertEqual(self.client.registered_agent_id, "AMR-IDENT-2")
+
+        # 4. Failed registration attempt is not cached as successful and is retried
+        fail_next = True
+        self.client.http.agent_id = "AMR-IDENT-FAIL"
+        with self.assertRaises(AamarvaError):
+            self.client.register_public_key()
+
+        self.assertIsNone(self.client.registered_agent_id)
+        self.assertIsNone(self.client.registered_key_fingerprint)
+
+        # Retrying succeeds and records cache
+        fail_next = False
+        self.client.register_public_key()
+        self.assertEqual(self.client.registered_agent_id, "AMR-IDENT-FAIL")
+        self.assertEqual(self.client.registered_key_fingerprint, initial_fp)
+
+    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
+    def test_register_public_key_malformed_response_fails_and_retries(self):
+        response_data = None
+        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
+            if path == "/agents/me/e2ee":
+                return response_data
+            return {}
+
+        self.client.http.request.side_effect = mock_req
+        self.client.http.agent_id = "AMR-MALFORMED-1"
+
+        # 1. Non-dict (string) response raises E2EE_KEY_REGISTRATION_FAILED
+        response_data = "invalid_string_response"
+        with self.assertRaises(AamarvaError) as ctx1:
+            self.client.register_public_key()
+        self.assertEqual(ctx1.exception.code, "E2EE_KEY_REGISTRATION_FAILED")
+        self.assertIsNone(self.client.registered_agent_id)
+
+        # 2. Response with success=False raises E2EE_KEY_REGISTRATION_FAILED
+        response_data = {"success": False, "message": "Key fingerprint rejected"}
+        with self.assertRaises(AamarvaError) as ctx2:
+            self.client.register_public_key()
+        self.assertEqual(ctx2.exception.code, "E2EE_KEY_REGISTRATION_FAILED")
+        self.assertIsNone(self.client.registered_agent_id)
+
+        # 3. Valid success response succeeds and sets cache
+        response_data = {"success": True, "message": "Key registered"}
+        self.client.register_public_key()
+        self.assertEqual(self.client.registered_agent_id, "AMR-MALFORMED-1")
+
+    def test_set_credentials_preserves_tokens(self):
+        self.client.http.access_token = "at_valid"
+        self.client.http.refresh_token = "rt_valid"
+        # Preserving existing tokens
+        self.client.http.set_credentials("AMR-TEST-NEW", "sk_new", preserve_tokens=True)
+        self.assertEqual(self.client.http.agent_id, "AMR-TEST-NEW")
+        self.assertEqual(self.client.http.api_key, "sk_new")
+        self.assertEqual(self.client.http.access_token, "at_valid")
+        self.assertEqual(self.client.http.refresh_token, "rt_valid")
+
+        # Not preserving clears tokens
+        self.client.http.set_credentials("AMR-TEST-NEW", "sk_new", preserve_tokens=False)
+        self.assertIsNone(self.client.http.access_token)
+        self.assertIsNone(self.client.http.refresh_token)
+
+    def test_register_installs_credentials_and_tokens_before_key_registration(self):
+        state_during_e2ee = {}
+        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
+            if path == "/auth/register":
+                return {
+                    "success": True,
+                    "data": {
+                        "agentId": "AMR-REG-777",
+                        "apiKey": "sk_reg_777",
+                        "tokens": {
+                            "accessToken": "at_reg_777",
+                            "refreshToken": "rt_reg_777"
+                        }
+                    }
+                }
+            if path == "/agents/me/e2ee":
+                state_during_e2ee["agent_id"] = self.client.http.agent_id
+                state_during_e2ee["api_key"] = self.client.http.api_key
+                state_during_e2ee["access_token"] = self.client.http.access_token
+                state_during_e2ee["refresh_token"] = self.client.http.refresh_token
+                state_during_e2ee["skip_auto_auth"] = skip_auto_auth
+                return {"success": True, "message": "Key registered"}
+            return {}
+
+        self.client.http.request.side_effect = mock_req
+        res = self.client.register(email="agent777@aamarva.com", name="Agent 777")
+        self.assertEqual(res.get("agentId"), "AMR-REG-777")
+        self.assertEqual(self.client.http.agent_id, "AMR-REG-777")
+        self.assertEqual(self.client.http.api_key, "sk_reg_777")
+        self.assertEqual(self.client.http.access_token, "at_reg_777")
+        self.assertEqual(self.client.http.refresh_token, "rt_reg_777")
+        if HAS_CRYPTOGRAPHY:
+            self.assertEqual(state_during_e2ee.get("agent_id"), "AMR-REG-777")
+            self.assertEqual(state_during_e2ee.get("access_token"), "at_reg_777")
+            self.assertTrue(state_during_e2ee.get("skip_auto_auth"))
+
+    def test_register_public_key_server_rejection_raises(self):
+        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
+            if path == "/auth/register":
+                return {
+                    "success": True,
+                    "data": {
+                        "agentId": "AMR-REG-REJECT",
+                        "apiKey": "sk_reg_reject",
+                        "tokens": {
+                            "accessToken": "at_reject",
+                            "refreshToken": "rt_reject"
+                        }
+                    }
+                }
+            if path == "/agents/me/e2ee":
+                return {"success": False, "message": "Key signature verification failed"}
+            return {}
+
+        self.client.http.request.side_effect = mock_req
+        if HAS_CRYPTOGRAPHY:
+            with self.assertRaises(AamarvaError) as ctx:
+                self.client.register(email="reject@aamarva.com", name="Reject Agent")
+            self.assertEqual(ctx.exception.code, "E2EE_KEY_REGISTRATION_FAILED")
+
+    def test_send_cluster_message_enforces_sender_and_master(self):
+        last_body = {}
+        def mock_req(method, path, auth=False, params=None, json_data=None):
+            nonlocal last_body
+            if path == "/agents/me":
+                return {"success": True, "data": {"agentId": "AMR-TEST-1111", "masterId": "AMR-MASTER-AUTH"}}
+            last_body = json_data or {}
+            return {"success": True, "messageId": "msg_c_1"}
+        self.client.http.request.side_effect = mock_req
+        self.client.target_agent_id = "AMR-SLAVE-TARGET-99"
+
+        res = self.client.send_cluster_message(
+            cluster_id="c_1",
+            ciphertext="cipher_123",
+            nonce="nonce_123",
+            recipients=["AMR-WORKER-1", "AMR-WORKER-1"]
+        )
+        self.assertEqual(last_body.get("senderAgentId"), "AMR-TEST-1111")
+        recipients = last_body.get("recipients", [])
+        self.assertIn("AMR-MASTER-AUTH", recipients)
+        self.assertNotIn("AMR-SLAVE-TARGET-99", recipients)
+        self.assertIn("AMR-TEST-1111", recipients)
+        self.assertIn("AMR-WORKER-1", recipients)
+        self.assertEqual(recipients.count("AMR-WORKER-1"), 1)
+
+    def test_send_cluster_message_fails_if_master_unresolvable(self):
+        def mock_req(method, path, auth=False, params=None, json_data=None):
+            if path == "/agents/me":
+                raise AamarvaAPIError("Profile corrupt", status_code=500)
+            return {}
+        self.client.http.request.side_effect = mock_req
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.send_cluster_message(
+                cluster_id="c_1",
+                ciphertext="cipher",
+                nonce="nonce"
+            )
+        self.assertEqual(ctx.exception.code, "MASTER_RESOLUTION_FAILED")
+
+    def test_send_cluster_message_rejects_spoofed_sender(self):
+        with self.assertRaises(AamarvaValidationError):
+            self.client.send_cluster_message(
+                cluster_id="c_1",
+                ciphertext="cipher",
+                nonce="nonce",
+                sender_agent_id="AMR-SPOOFED"
+            )
+
+    def test_master_identity_aliases(self):
+        for field in ["masterId", "master_id", "masterAgentId", "master_agent_id", "ownerAgentId", "owner_agent_id"]:
+            last_body = {}
+            def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False):
+                nonlocal last_body
+                if path == "/agents/me":
+                    return {"success": True, "data": {"agentId": "AMR-SLAVE-1", field: "AMR-MASTER-ALIAS"}}
+                last_body = json_data or {}
+                return {"success": True, "messageId": "msg_c_1"}
+            self.client.http.request.side_effect = mock_req
+            self.client.send_cluster_message("c_1", "cipher", "nonce")
+            self.assertIn("AMR-MASTER-ALIAS", last_body.get("recipients", []))
+
+    def test_conflicting_master_identity_fails_closed(self):
+        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False):
+            if path == "/agents/me":
+                return {
+                    "success": True,
+                    "data": {
+                        "agentId": "AMR-SLAVE-1",
+                        "masterId": "AMR-MASTER-A",
+                        "ownerAgentId": "AMR-MASTER-B"
+                    }
+                }
+            return {}
+        self.client.http.request.side_effect = mock_req
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.send_cluster_message("c_1", "cipher", "nonce")
+        self.assertEqual(ctx.exception.code, "MASTER_RESOLUTION_FAILED")
+
+    def test_missing_master_identity_fails_closed(self):
+        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False):
+            if path == "/agents/me":
+                return {
+                    "success": True,
+                    "data": {
+                        "agentId": "AMR-ORPHAN-SLAVE"
+                    }
+                }
+            return {}
+        self.client.http.request.side_effect = mock_req
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.send_cluster_message("c_1", "cipher", "nonce")
+        self.assertEqual(ctx.exception.code, "MASTER_RESOLUTION_FAILED")
+
+    def test_floor_execute_denied_status_raises(self):
+        self.client.http.request.return_value = {
+            "success": False,
+            "status": "denied",
+            "data": {"status": "denied", "message": "Access not granted"}
+        }
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.execute_floor_tool("tool_denied", {})
+        self.assertEqual(ctx.exception.code, "FLOOR_ACCESS_DENIED")
+
+    def test_floor_listing_and_request_never_execute(self):
+        calls = []
+        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False):
+            calls.append((method, path))
+            if "/floor/agent/tools" in path:
+                return {"success": True, "data": []}
+            if "request-access" in path:
+                return {"success": True, "status": "pending", "data": {"status": "pending", "requestId": "req_1"}}
+            if "/floor/requests/" in path:
+                return {"success": True, "data": {"status": "pending", "requestId": "req_1"}}
+            return {}
+        self.client.http.request.side_effect = mock_req
+        self.client.get_floor_tools()
+        self.client.request_floor_access("tool_1", "testing")
+        self.client.get_floor_request_status("req_1")
+
+        # Verify no execute path was ever called
+        execute_calls = [c for c in calls if "execute" in c[1]]
+        self.assertEqual(len(execute_calls), 0)
+
+    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
+    def test_get_messages_rejects_plaintext(self):
         def mock_req(method, path, auth=False, params=None, json_data=None):
             if path == "/connections/conn-1/peer-key":
-                return {"success": True, "data": {"peerAgentId": "AMR-B", "peerE2eePublicKey": self.peer_pub_jwk, "peerKeyFingerprint": self.peer_fp, "peerIdentityKey": self.peer_identity_pub_jwk, "peerKeySignature": self.peer_sig, "peerKeyEpoch": 1}}
+                return {
+                    "success": True,
+                    "data": {
+                        "peerAgentId": "AMR-PEER-2222",
+                        "peerE2eePublicKey": self.peer_pub_jwk,
+                        "peerKeyFingerprint": self.peer_fp,
+                        "peerIdentityKey": self.peer_identity_pub_jwk,
+                        "peerKeySignature": self.peer_sig,
+                        "peerKeyEpoch": 1
+                    }
+                }
             if path == "/connections/conn-1/messages":
                 return [
-                    "AMR-X7F2-K9B4: Initiating dataset transfer.",
-                    "AMR-9999-0000: Acknowledged. Ready for receipt."
+                    "Unencrypted raw message plaintext string"
                 ]
             return {}
         self.client.http.request.side_effect = mock_req
         with self.assertRaises(AamarvaError) as ctx:
-            self.client.get_messages("conn-1")
+            self.client.get_messages("conn-1", "AMR-PEER-2222")
         self.assertEqual(ctx.exception.code, "PLAINTEXT_MESSAGE_RECEIVED")
-
-    def test_get_post_nested_contract(self):
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": {
-                "post": {
-                    "id": "post_112233",
-                    "agentId": "AMR-X7F2-K9B4",
-                    "type": "emit",
-                    "content": "Broadcasting initial telemetry findings."
-                },
-                "author": {
-                    "agentId": "AMR-X7F2-K9B4",
-                    "displayName": "Agent 01",
-                    "avatar": "https://aamarva.com/avatars/default.png"
-                },
-                "replies": []
-            }
-        }
-        post = self.client.get_post("post_112233")
-        self.assertEqual(post.postId, "post_112233")
-        self.assertEqual(post.agentId, "AMR-X7F2-K9B4")
-        self.assertEqual(post.authorAgentName, "Agent 01")
-        self.assertEqual(post.content, "Broadcasting initial telemetry findings.")
-
-    def test_connection_requests_openapi(self):
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": [
-                {
-                    "id": "req_112233",
-                    "senderAgentId": "AMR-X7F2-K9B4",
-                    "senderAgentName": "Agent 01",
-                    "createdAt": "2026-08-12T12:00:00.000Z"
-                }
-            ]
-        }
-        reqs = self.client.connection_requests()
-        self.assertEqual(len(reqs), 1)
-        self.assertEqual(reqs[0].requestId, "req_112233")
-        self.assertEqual(reqs[0].senderAgentId, "AMR-X7F2-K9B4")
-        self.assertEqual(reqs[0].senderAgentName, "Agent 01")
-        self.assertEqual(reqs[0].status, "pending")
-
-    def test_accept_connection_openapi(self):
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": {
-                "id": "conn_445566",
-                "postOwnerAgentId": "AMR-X7F2-K9B4",
-                "replyAuthorAgentId": "AMR-9999-0000",
-                "createdAt": "2026-08-12T12:05:00.000Z"
-            }
-        }
-        self.client.http.agent_id = "AMR-X7F2-K9B4"
-        conn = self.client.accept_connection("req-1")
-        self.assertEqual(conn.connectionId, "conn_445566")
-        self.assertEqual(conn.agentId, "AMR-9999-0000")
-
-    def test_connection_requests(self):
-        self.client.http.request.return_value = {"success": True, "data": [{"requestId": "req-1", "senderAgentId": "AMR-A", "receiverAgentId": "AMR-B", "status": "pending", "createdAt": "2023"}]}
-        reqs = self.client.connection_requests(type="incoming", status="pending")
-        self.assertEqual(len(reqs), 1)
-        self.assertEqual(reqs[0].requestId, "req-1")
-        self.client.http.request.assert_called_with("GET", "/connections/requests", auth=True, params={"type": "incoming", "status": "pending"})
-
-    def test_accept_connection(self):
-        self.client.http.request.return_value = {"success": True, "data": {"connectionId": "conn-1", "agentId": "AMR-B", "status": "active", "createdAt": "2023"}}
-        conn = self.client.accept_connection("req-1")
-        self.assertIsInstance(conn, AamarvaConnection)
-        self.assertEqual(conn.connectionId, "conn-1")
-        self.client.http.request.assert_called_with("POST", "/connections/requests/req-1/accept", auth=True)
-
-    def test_connections(self):
-        self.client.http.request.return_value = {"success": True, "data": [{"connectionId": "conn-1", "agentId": "AMR-B", "status": "active", "createdAt": "2023"}]}
-        conns = self.client.connections()
-        self.assertEqual(len(conns), 1)
-        self.assertEqual(conns[0].connectionId, "conn-1")
-        self.client.http.request.assert_called_with("GET", "/connections", auth=True)
-
-    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
-    def test_send_message(self):
-        captured_body = {}
-        def mock_req(method, path, auth=False, params=None, json_data=None):
-            if path == "/agents/me/e2ee":
-                return {"success": True}
-            if path == "/connections/conn-1/peer-key":
-                return {"success": True, "data": {"peerAgentId": "AMR-B", "peerE2eePublicKey": self.peer_pub_jwk, "peerKeyFingerprint": self.peer_fp, "peerIdentityKey": self.peer_identity_pub_jwk, "peerKeySignature": self.peer_sig, "peerKeyEpoch": 1}}
-            if path == "/connections/conn-1/messages" and method == "POST":
-                nonlocal captured_body
-                captured_body = json_data
-                return {"success": True, "data": {
-                    "connectionId": "conn-1",
-                    "senderAgentId": "test-agent",
-                    "ciphertext": json_data["ciphertext"],
-                    "nonce": json_data["nonce"],
-                    "version": json_data.get("version", 1),
-                    "keyEpoch": json_data.get("keyEpoch", 1),
-                    "createdAt": "2026-01-01T00:00:00Z",
-                    "messageId": "msg-1"
-                }}
-            return {}
-        self.client.http.request.side_effect = mock_req
-        msg = self.client.send_message("conn-1", "msg")
-        self.assertEqual(msg.messageId, "msg-1")
-        self.assertEqual(msg.content, "msg")
-        self.assertNotIn("msg", json.dumps(captured_body))
-        self.assertIn("ciphertext", captured_body)
-        self.assertIn("nonce", captured_body)
-
-    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
-    def test_get_messages(self):
-        local_pub_pem = get_local_public_key_pem()
-        local_fp = compute_key_fingerprint(local_pub_pem)
-        encrypted_env = encrypt_message_with_keys("msg", "conn-1", self.peer_priv, local_pub_pem, local_fp, "test-agent", sign_identity_binding(self.peer_identity_priv, "test-agent", local_fp), self.peer_identity_pub_jwk, key_epoch=1)
-
-        def mock_req(method, path, auth=False, params=None, json_data=None):
-            if path == "/connections/conn-1/peer-key":
-                return {"success": True, "data": {"peerAgentId": "AMR-B", "peerE2eePublicKey": self.peer_pub_jwk, "peerKeyFingerprint": self.peer_fp, "peerIdentityKey": self.peer_identity_pub_jwk, "peerKeySignature": self.peer_sig, "peerKeyEpoch": 1}}
-            if path == "/connections/conn-1/messages":
-                return {"success": True, "data": [{
-                    "connectionId": "conn-1",
-                    "senderAgentId": "AMR-B",
-                    "ciphertext": encrypted_env["ciphertext"],
-                    "nonce": encrypted_env["nonce"],
-                    "version": encrypted_env["version"],
-                    "keyEpoch": encrypted_env["keyEpoch"],
-                    "createdAt": "2026-01-01T00:00:00Z"
-                }]}
-            return {}
-        self.client.http.request.side_effect = mock_req
-        msgs = self.client.get_messages("conn-1")
-        self.assertEqual(len(msgs), 1)
-        self.assertEqual(msgs[0].content, "msg")
-
-    def test_reply(self):
-        self.client.http.request.side_effect = None
-        self.client.http.request.return_value = {"success": True, "data": {"replyId": "r-1", "postId": "p-1", "authorAgentId": "AMR-A", "content": "reply content", "createdAt": "2023"}}
-        reply = self.client.reply("p-1", "reply content")
-        self.assertEqual(reply.replyId, "r-1")
-        self.client.http.request.assert_called_with("POST", "/posts/p-1/replies", auth=True, json_data={"content": "reply content"})
-
-    def test_connect_from_reply(self):
-        self.client.http.request.side_effect = None
-        self.client.http.request.return_value = {"success": True, "data": {"connectionId": "conn-1", "agentId": "AMR-B", "status": "active", "createdAt": "2023"}}
-        conn = self.client.connect_from_reply("reply-1")
-        self.assertEqual(conn.connectionId, "conn-1")
-        self.client.http.request.assert_called_with("POST", "/connections", auth=True, json_data={"replyId": "reply-1"})
-
-    def test_health(self):
-        self.client.http.request.side_effect = None
-        self.client.http.request.return_value = {"status": "ok"}
-        h = self.client.health()
-        self.assertEqual(h["status"], "ok")
-        self.client.http.request.assert_called_with("GET", "/adk", auth=False)
-
-    @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
-    def test_connection_object_methods(self):
-        conn_kwargs = {
-            "connectionId": "conn-1",
-            "agentId": "AMR-B",
-            "status": "active",
-            "createdAt": "2023"
-        }
-        conn = AamarvaConnection(client=self.client, **conn_kwargs)
-
-        captured_body = {}
-        local_pub_pem = get_local_public_key_pem()
-        local_fp = compute_key_fingerprint(local_pub_pem)
-        encrypted_env = encrypt_message_with_keys("hello from peer", "conn-1", self.peer_priv, local_pub_pem, local_fp, "test-agent", sign_identity_binding(self.peer_identity_priv, "test-agent", local_fp), self.peer_identity_pub_jwk, key_epoch=1)
-
-        def mock_req(method, path, auth=False, params=None, json_data=None):
-            if path == "/agents/me/e2ee":
-                return {"success": True}
-            if path == "/connections/conn-1/peer-key":
-                return {"success": True, "data": {"peerAgentId": "AMR-B", "peerE2eePublicKey": self.peer_pub_jwk, "peerKeyFingerprint": self.peer_fp, "peerIdentityKey": self.peer_identity_pub_jwk, "peerKeySignature": self.peer_sig, "peerKeyEpoch": 1}}
-            if path == "/connections/conn-1/messages" and method == "POST":
-                nonlocal captured_body
-                captured_body = json_data
-                return {"success": True, "data": {
-                    "connectionId": "conn-1",
-                    "senderAgentId": "test-agent",
-                    "ciphertext": json_data["ciphertext"],
-                    "nonce": json_data["nonce"],
-                    "version": json_data.get("version", 1),
-                    "keyEpoch": json_data.get("keyEpoch", 1),
-                    "createdAt": "2026-01-01T00:00:00Z",
-                    "messageId": "msg-1"
-                }}
-            if path == "/connections/conn-1/messages" and method == "GET":
-                return {"success": True, "data": [{
-                    "connectionId": "conn-1",
-                    "senderAgentId": "AMR-B",
-                    "ciphertext": encrypted_env["ciphertext"],
-                    "nonce": encrypted_env["nonce"],
-                    "version": encrypted_env["version"],
-                    "keyEpoch": encrypted_env["keyEpoch"],
-                    "createdAt": "2026-01-01T00:00:00Z"
-                }]}
-            return {}
-        self.client.http.request.side_effect = mock_req
-
-        msg = conn.send("hello")
-        self.assertEqual(msg.content, "hello")
-        self.assertNotIn("hello", json.dumps(captured_body))
-        self.assertIn("ciphertext", captured_body)
-
-        msgs = conn.get_messages()
-        self.assertEqual(len(msgs), 1)
-        self.assertEqual(msgs[0].content, "hello from peer")
-
-    def test_cluster_methods(self):
-        # 1. create_cluster
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": {
-                "clusterId": "cluster_123",
-                "name": "Market Cluster",
-                "description": "L2 Arbitrage",
-                "ownerAgentId": "test-agent",
-                "createdAt": "2026-09-16T07:22:00Z"
-            }
-        }
-        cluster = self.client.create_cluster("Market Cluster", "L2 Arbitrage")
-        self.assertEqual(cluster.clusterId, "cluster_123")
-        self.assertEqual(cluster.name, "Market Cluster")
-        self.client.http.request.assert_called_with("POST", "/clusters", auth=True, json_data={"name": "Market Cluster", "description": "L2 Arbitrage"})
-
-        # 2. get_clusters
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": [{
-                "id": "cluster_123",
-                "name": "Market Cluster",
-                "description": "L2 Arbitrage",
-                "ownerUserId": "usr_123",
-                "ownerAgentId": "test-agent",
-                "createdAt": "2026-09-16T07:22:00Z",
-                "updatedAt": "2026-09-16T07:22:00Z"
-            }]
-        }
-        clusters = self.client.get_clusters()
-        self.assertEqual(len(clusters), 1)
-        self.assertEqual(clusters[0].clusterId, "cluster_123")
-        self.client.http.request.assert_called_with("GET", "/clusters", auth=True)
-
-        # 3. get_cluster
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": {
-                "clusterId": "cluster_123",
-                "name": "Market Cluster",
-                "description": "L2 Arbitrage",
-                "ownerAgentId": "test-agent",
-                "membersCount": 3,
-                "createdAt": "2026-09-16T07:22:00Z"
-            }
-        }
-        c_details = self.client.get_cluster("cluster_123")
-        self.assertEqual(c_details.clusterId, "cluster_123")
-        self.assertEqual(c_details.membersCount, 3)
-
-        # 4. update_cluster
-        self.client.http.request.return_value = {"success": True, "message": "Cluster successfully updated."}
-        up_res = self.client.update_cluster("cluster_123", name="Phase II")
-        self.assertTrue(up_res.get("success"))
-
-        # 5. invite_to_cluster
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": {
-                "inviteId": "inv_999",
-                "status": "pending"
-            }
-        }
-        inv = self.client.invite_to_cluster("cluster_123", "agent_beta")
-        self.assertEqual(inv.inviteId, "inv_999")
-        self.assertEqual(inv.status, "pending")
-
-        # 6. get_cluster_invites
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": [{
-                "id": "inv_999",
-                "clusterId": "cluster_123",
-                "inviterUserId": "usr_123",
-                "inviteeAgentId": "agent_beta",
-                "status": "pending",
-                "createdAt": "2026-09-16T07:25:00Z"
-            }]
-        }
-        invites = self.client.get_cluster_invites("cluster_123")
-        self.assertEqual(len(invites), 1)
-        self.assertEqual(invites[0].inviteId, "inv_999")
-
-        # 7. join_cluster
-        self.client.http.request.return_value = {"success": True, "message": "You have joined the cluster successfully."}
-        join_res = self.client.join_cluster("cluster_123", "inv_999")
-        self.assertTrue(join_res.get("success"))
-
-        # 8. remove_cluster_member
-        self.client.http.request.return_value = {"success": True, "message": "Member was successfully removed from the cluster."}
-        rm_res = self.client.remove_cluster_member("cluster_123", "agent_beta")
-        self.assertTrue(rm_res.get("success"))
-
-        # 9. send_cluster_message
-        self.client.http.request.return_value = {
-            "success": True,
-            "messageId": "msg_abc",
-            "createdAt": "2026-09-16T07:30:00Z"
-        }
-        send_res = self.client.send_cluster_message("cluster_123", "c-text", "iv-nonce")
-        self.assertTrue(send_res.get("success"))
-
-        # 10. get_cluster_messages
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": [{
-                "messageId": "msg_abc",
-                "senderAgentId": "test-agent",
-                "ciphertext": "c-text",
-                "nonce": "iv-nonce",
-                "createdAt": "2026-09-16T07:30:00Z"
-            }]
-        }
-        msgs = self.client.get_cluster_messages("cluster_123")
-        self.assertEqual(len(msgs), 1)
-        self.assertEqual(msgs[0].messageId, "msg_abc")
-
-        # 11. disband_cluster
-        self.client.http.request.return_value = {"success": True, "message": "Cluster successfully disbanded."}
-        dis_res = self.client.disband_cluster("cluster_123")
-        self.assertTrue(dis_res.get("success"))
-
-class TestAamarvaHTTP(unittest.TestCase):
-    @patch("urllib.request.urlopen")
-    def test_http_success_200(self, mock_urlopen):
-        res = MagicMock()
-        res.__enter__.return_value = res
-        res.read.return_value = b'{"success": true, "data": {"status": "ok"}}'
-        mock_urlopen.return_value = res
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=0)
-        client.access_token = "valid_token"
-        
-        resp = client.request("GET", "/endpoint")
-        self.assertEqual(resp["data"]["status"], "ok")
-
-    @patch("urllib.request.urlopen")
-    def test_http_success_201(self, mock_urlopen):
-        res = MagicMock()
-        res.__enter__.return_value = res
-        res.read.return_value = b'{"success": true, "data": {"created": true}}'
-        mock_urlopen.return_value = res
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=0)
-        client.access_token = "valid_token"
-        
-        resp = client.request("POST", "/endpoint", json_data={"foo": "bar"})
-        self.assertEqual(resp["data"]["created"], True)
-
-    @patch("time.sleep")
-    @patch("urllib.request.urlopen")
-    def test_http_retry_on_5xx(self, mock_urlopen, mock_sleep):
-        err = urllib.error.HTTPError(
-            "http://test/api/endpoint", 
-            500, 
-            "Internal Server Error", 
-            {}, 
-            io.BytesIO(b"Something went wrong")
-        )
-        mock_urlopen.side_effect = err
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=2)
-        client.access_token = "valid_token"
-        
-        with self.assertRaises(AamarvaAPIError) as ctx:
-            client.request("GET", "/endpoint")
-        
-        self.assertEqual(ctx.exception.status_code, 500)
-        self.assertEqual(mock_urlopen.call_count, 3)
-        self.assertEqual(mock_sleep.call_count, 2)
-
-    @patch("time.sleep")
-    @patch("urllib.request.urlopen")
-    def test_http_retry_on_429(self, mock_urlopen, mock_sleep):
-        err = urllib.error.HTTPError(
-            "http://test/api/endpoint", 
-            429, 
-            "Too Many Requests", 
-            {}, 
-            io.BytesIO(b"Rate limit")
-        )
-        mock_urlopen.side_effect = err
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=1)
-        client.access_token = "valid_token"
-        
-        with self.assertRaises(AamarvaRateLimitError) as ctx:
-            client.request("GET", "/endpoint")
-            
-        self.assertEqual(ctx.exception.status_code, 429)
-        self.assertEqual(mock_urlopen.call_count, 2)
-        self.assertEqual(mock_sleep.call_count, 1)
-
-    @patch("urllib.request.urlopen")
-    def test_http_reauthenticate_on_401(self, mock_urlopen):
-        err_401 = urllib.error.HTTPError(
-            "http://test/api/endpoint", 
-            401, 
-            "Unauthorized", 
-            {}, 
-            io.BytesIO(b"Unauthorized")
-        )
-        
-        res_login = MagicMock()
-        res_login.__enter__.return_value = res_login
-        res_login.read.return_value = b'{"success": true, "data": {"accessToken": "new_access_token"}}'
-        
-        res_success = MagicMock()
-        res_success.__enter__.return_value = res_success
-        res_success.read.return_value = b'{"success": true, "data": {"status": "ok"}}'
-        
-        mock_urlopen.side_effect = [err_401, res_login, res_success]
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=1)
-        client.access_token = "old_token"
-        
-        resp = client.request("GET", "/endpoint", auth=True)
-        self.assertEqual(resp["data"]["status"], "ok")
-        self.assertEqual(client.access_token, "new_access_token")
-        self.assertEqual(mock_urlopen.call_count, 3)
-
-    @patch("urllib.request.urlopen")
-    def test_http_timeout(self, mock_urlopen):
-        err = urllib.error.URLError(reason=TimeoutError("timed out"))
-        mock_urlopen.side_effect = err
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=2)
-        client.access_token = "valid_token"
-        
-        with self.assertRaises(AamarvaTimeoutError):
-            client.request("GET", "/endpoint")
-            
-        self.assertEqual(mock_urlopen.call_count, 3)
-
-    @patch("urllib.request.urlopen")
-    def test_http_status_errors(self, mock_urlopen):
-        from aamarva.http import HttpClient
-        
-        for status_code in [400, 403, 404, 409]:
-            err = urllib.error.HTTPError(
-                "http://test", 
-                status_code, 
-                "Error", 
-                {}, 
-                io.BytesIO(f"Error {status_code}".encode())
-            )
-            mock_urlopen.side_effect = err
-            
-            client = HttpClient(agent_id="test", api_key="key", max_retries=0)
-            client.access_token = "valid_token"
-            
-            with self.assertRaises(AamarvaAPIError) as ctx:
-                client.request("GET", "/endpoint")
-            self.assertEqual(ctx.exception.status_code, status_code)
-
-    @patch("urllib.request.urlopen")
-    def test_http_malformed_json(self, mock_urlopen):
-        res = MagicMock()
-        res.__enter__.return_value = res
-        res.read.return_value = b'invalid json string'
-        mock_urlopen.value = res
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=0)
-        client.access_token = "valid_token"
-        
-        with self.assertRaises(Exception):
-            client.request("GET", "/endpoint")
-
-class TestAamarvaPublicImports(unittest.TestCase):
-    def test_imports(self):
-        self.assertTrue(hasattr(aamarva, "Aamarva"))
-        self.assertTrue(hasattr(aamarva, "AamarvaConnection"))
-        self.assertTrue(hasattr(aamarva, "Agent"))
-        self.assertTrue(hasattr(aamarva, "Post"))
-        self.assertTrue(hasattr(aamarva, "Reply"))
-        self.assertTrue(hasattr(aamarva, "DiscoveryResult"))
-        self.assertTrue(hasattr(aamarva, "ConnectionRequest"))
-        self.assertTrue(hasattr(aamarva, "Connection"))
-        self.assertTrue(hasattr(aamarva, "Message"))
-        self.assertTrue(hasattr(aamarva, "AamarvaError"))
-        self.assertTrue(hasattr(aamarva, "AamarvaAPIError"))
-        self.assertTrue(hasattr(aamarva, "AamarvaAuthenticationError"))
-
-class TestAamarvaConfig(unittest.TestCase):
-    @patch.dict("os.environ", {
-        "AAMARVA_AGENT_ID": "env-agent-id",
-        "AAMARVA_API_KEY": "env-api-key",
-        "AAMARVA_BASE_URL": "https://env-base.com/api"
-    })
-    def test_config_from_env(self):
-        client = Aamarva()
-        self.assertEqual(client.http.agent_id, "env-agent-id")
-        self.assertEqual(client.http.api_key, "env-api-key")
-        self.assertEqual(client.http.base_url, "https://env-base.com/api")
-
-    def test_explicit_config(self):
-        client = Aamarva(
-            agent_id="explicit-id",
-            api_key="explicit-key",
-            base_url="https://explicit-base.com"
-        )
-        self.assertEqual(client.http.agent_id, "explicit-id")
-        self.assertEqual(client.http.api_key, "explicit-key")
-        self.assertEqual(client.http.base_url, "https://explicit-base.com")
-
-class TestHttpClientRetry(unittest.TestCase):
-    @patch("time.sleep")
-    @patch("urllib.request.urlopen")
-    def test_get_retries_on_500(self, mock_urlopen, mock_sleep):
-        err = urllib.error.HTTPError(
-            "http://test/api/endpoint", 
-            500, 
-            "Internal Server Error", 
-            {}, 
-            io.BytesIO(b"Something went wrong")
-        )
-        mock_urlopen.side_effect = err
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=2)
-        client.access_token = "valid_token"
-        
-        with self.assertRaises(AamarvaAPIError) as ctx:
-            client.request("GET", "/endpoint")
-        
-        self.assertEqual(ctx.exception.status_code, 500)
-        self.assertEqual(mock_urlopen.call_count, 3)
-        self.assertEqual(mock_sleep.call_count, 2)
-
-    @patch("time.sleep")
-    @patch("urllib.request.urlopen")
-    def test_post_does_not_retry_on_500(self, mock_urlopen, mock_sleep):
-        err = urllib.error.HTTPError(
-            "http://test/api/endpoint", 
-            500, 
-            "Internal Server Error", 
-            {}, 
-            io.BytesIO(b"Something went wrong")
-        )
-        mock_urlopen.side_effect = err
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=2)
-        client.access_token = "valid_token"
-        
-        with self.assertRaises(AamarvaAPIError) as ctx:
-            client.request("POST", "/endpoint", json_data={"foo": "bar"})
-        
-        self.assertEqual(ctx.exception.status_code, 500)
-        self.assertEqual(mock_urlopen.call_count, 1)
-        self.assertEqual(mock_sleep.call_count, 0)
-
-    @patch("time.sleep")
-    @patch("urllib.request.urlopen")
-    def test_patch_does_not_retry_on_429(self, mock_urlopen, mock_sleep):
-        err = urllib.error.HTTPError(
-            "http://test/api/endpoint", 
-            429, 
-            "Too Many Requests", 
-            {}, 
-            io.BytesIO(b"Rate limit")
-        )
-        mock_urlopen.side_effect = err
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=2)
-        client.access_token = "valid_token"
-        
-        with self.assertRaises(AamarvaRateLimitError):
-            client.request("PATCH", "/endpoint", json_data={"foo": "bar"})
-        
-        self.assertEqual(mock_urlopen.call_count, 1)
-        self.assertEqual(mock_sleep.call_count, 0)
-
-    @patch("urllib.request.urlopen")
-    def test_delete_does_not_retry_on_timeout(self, mock_urlopen):
-        err = urllib.error.URLError(reason=TimeoutError("timed out"))
-        mock_urlopen.side_effect = err
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=2)
-        client.access_token = "valid_token"
-        
-        with self.assertRaises(AamarvaTimeoutError):
-            client.request("DELETE", "/endpoint")
-            
-        self.assertEqual(mock_urlopen.call_count, 1)
-
-    @patch("urllib.request.urlopen")
-    def test_head_retries_on_timeout(self, mock_urlopen):
-        err = urllib.error.URLError(reason=TimeoutError("timed out"))
-        mock_urlopen.side_effect = err
-        
-        from aamarva.http import HttpClient
-        client = HttpClient(agent_id="test", api_key="key", max_retries=2)
-        client.access_token = "valid_token"
-        
-        with self.assertRaises(AamarvaTimeoutError):
-            client.request("HEAD", "/endpoint")
-            
-        self.assertEqual(mock_urlopen.call_count, 3)
 
 if __name__ == "__main__":
     unittest.main()

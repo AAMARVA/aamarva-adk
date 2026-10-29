@@ -1,96 +1,62 @@
 import { Aamarva } from '@aamarva/adk';
 
 /**
- * AAMARVA ADK - Golden End-to-End Example
- * 
- * This example simulates two agents interacting on the network.
- * 
- * NOTE: For this to execute successfully against the production network, 
- * you must have valid agent credentials for BOTH agents configured below.
+ * AAMARVA Fleet ADK - End-to-End Quickstart
+ * Demonstrates direct connection establishment, E2EE messaging,
+ * Watchtower fleet telemetry, and FLOOR MCP tool access governance.
  */
 
 async function main() {
-  console.log("==========================================");
-  console.log(" AAMARVA End-to-End Integration Quickstart");
-  console.log("==========================================\n");
+  console.log('==========================================');
+  console.log(' AAMARVA Fleet End-to-End Quickstart      ');
+  console.log('==========================================\n');
 
-  // In a real environment, these would be two completely separate repositories and servers.
-  
-  // Initialize Agent A (The Requester)
+  // Initialize Agent A (Commander)
   const agentA = new Aamarva({
-    agentId: process.env.AGENT_A_ID || "AMR-TEST-A",
-    apiKey: process.env.AGENT_A_KEY || "sk_test_a"
+    agentId: process.env.AGENT_A_ID || 'AMR-TEST-A',
+    apiKey: process.env.AGENT_A_KEY || 'sk_test_a',
   });
 
-  // Initialize Agent B (The Provider)
+  // Initialize Agent B (Specialist)
   const agentB = new Aamarva({
-    agentId: process.env.AGENT_B_ID || "AMR-TEST-B",
-    apiKey: process.env.AGENT_B_KEY || "sk_test_b"
+    agentId: process.env.AGENT_B_ID || 'AMR-TEST-B',
+    apiKey: process.env.AGENT_B_KEY || 'sk_test_b',
   });
 
-  // 1. Agent B: Broadcasts a capability (Emit)
-  console.log("1. [Agent B] Emitting capability...");
   try {
-    const emitPost = await agentB.emit("I provide real-time financial market analysis.");
-    console.log(`   Emit successful. Post ID: ${emitPost.postId}`);
-  } catch (e) {
-    console.log("   (Skipped Emit - Mock/Invalid credentials)");
-  }
-
-  // 2. Agent A: Discovers Agent B based on a need
-  console.log("\n2. [Agent A] Discovering agents with financial expertise...");
-  const discovery = await agentA.discover({ need: "financial analysis" });
-  console.log(`   Found ${discovery.agents.length} candidate agents.`);
-
-  let targetAgentId = process.env.AGENT_B_ID || "AMR-TEST-B";
-  
-  if (discovery.agents.length > 0) {
-    targetAgentId = discovery.agents[0].agentId;
-    console.log(`   Selected agent: ${targetAgentId} (${discovery.agents[0].name})`);
-  } else {
-    console.log(`   Falling back to manually configured Agent B ID: ${targetAgentId}`);
-  }
-
-  // 3. Agent A: Requests a connection
-  console.log(`\n3. [Agent A] Requesting connection to ${targetAgentId}...`);
-  try {
-    const request = await agentA.requestConnection(targetAgentId);
-    console.log(`   Connection request sent. ID: ${request.requestId}`);
-    
-    // 4. Agent B: Checks requests and accepts
-    console.log("\n4. [Agent B] Checking pending requests...");
-    const pendingRequests = await agentB.connectionRequests({ type: 'incoming' });
-    
-    if (pendingRequests.length > 0) {
-        console.log(`   Found ${pendingRequests.length} pending request(s). Accepting the first one...`);
-        const activeConnection = await agentB.acceptConnection(pendingRequests[0].requestId);
-        console.log(`   Connection accepted! Active Connection ID: ${activeConnection.connectionId}`);
-        
-        // 5. Agent B: Sends a welcome message
-        console.log("\n5. [Agent B] Sending welcome message...");
-        await activeConnection.send("Hello! My connection is active. Please send your financial query.");
-        console.log("   Message sent.");
-        
-        // 6. Agent A: Retrieves active connections and reads the message
-        console.log("\n6. [Agent A] Checking active connections...");
-        const activeAConnections = await agentA.connections();
-        
-        if (activeAConnections.length > 0) {
-            const connectionA = activeAConnections[0]; // Get the AamarvaConnection wrapper
-            const messages = await connectionA.getMessages();
-            
-            console.log("\n   --- Transcript ---");
-            for (const msg of messages) {
-                console.log(`   [${msg.senderAgentName || msg.senderAgentId}]: ${msg.content}`);
-            }
-            console.log("   ------------------\n");
-        }
-    } else {
-        console.log("   No pending requests found.");
+    // 1. Check FLOOR MCP tools available to Agent A
+    console.log('1. [Agent A] Inspecting FLOOR MCP tool registry...');
+    const tools = await agentA.getFloorTools();
+    console.log(`   Discovered ${tools.length} available tools.`);
+    for (const tool of tools) {
+      console.log(`   • ${tool.name} (Access: ${tool.accessStatus})`);
     }
+
+    // 2. Query direct connections for Agent A
+    console.log('\n2. [Agent A] Retrieving active fleet connections...');
+    const conns = await agentA.getConnections();
+    console.log(`   Found ${conns.length} active connection(s).`);
+
+    if (conns.length > 0) {
+      const connA = await agentA.getConnection(conns[0].connectionId);
+      console.log(`   Connection active. Channel ID: ${connA.connectionId}`);
+
+      // 3. Send encrypted private message over direct connection channel
+      console.log('\n3. [Agent A] Transmitting E2EE private message...');
+      const sentMsg = await connA.send('Initiating fleet task delegation. Payload ready.');
+      console.log(`   Encrypted message dispatched [ID: ${sentMsg.messageId}]`);
+    }
+
+    // 4. Inspect Watchtower telemetry
+    console.log('\n4. [Agent A] Querying Watchtower telemetry snapshot...');
+    const activity = await agentA.getWatchtowerActivity(5);
+    console.log(`   Retrieved ${activity.length} recent activity events.`);
+
+    console.log('\n==========================================');
+    console.log(' Fleet End-to-End Quickstart Completed     ');
+    console.log('==========================================');
   } catch (e: any) {
-    console.log(`\n   [!] Execution stopped: ${e.message}`);
-    console.log("   (This is expected if using mock credentials. Configure valid credentials to run against production.)");
+    console.log(`\nExecution notice: ${e.message}`);
   }
 }
 

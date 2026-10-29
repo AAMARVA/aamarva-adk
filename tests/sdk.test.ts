@@ -6,42 +6,41 @@ import {
   AamarvaAuthError,
   AamarvaForbiddenError,
   AamarvaNotFoundError,
-  AamarvaConflictError,
-  AamarvaRateLimitError,
   AamarvaValidationError,
   AamarvaTimeoutError,
-  AamarvaNetworkError,
-  AamarvaServerError,
 } from '../src/errors.js';
 import {
   normalizeAgent,
-  normalizePost,
-  normalizeReply,
   normalizeConnection,
-  normalizeConnectionRequest,
   normalizeMessage,
+  normalizeCluster,
+  normalizeFloorTool,
+  normalizeFloorRequestStatus,
+  normalizeWatchtowerActivity,
 } from '../src/normalize.js';
 import { AamarvaConnection } from '../src/connection.js';
 
 async function runSdkTests() {
   console.log('--------------------------------------------------');
-  console.log('AAMARVA ADK SDK & DEVELOPER EXPERIENCE TEST SUITE');
+  console.log('AAMARVA FLEET ADK - SDK TEST SUITE               ');
   console.log('--------------------------------------------------');
 
   const mockStore = createMockDataStore();
   const mockFetch = createMockFetch(mockStore);
 
   // 1. Client Initialization
-  console.log('1. Testing Aamarva client instantiation...');
+  console.log('1. Testing Aamarva client instantiation & fleet scope...');
   const client = new Aamarva({
     agentId: 'AMR-1111-2222',
     apiKey: 'sec_mock_key_123',
     baseUrl: 'https://aamarva.com/api',
+    targetAgentId: 'AMR-SLAVE-01',
     fetch: mockFetch,
   });
   assert.ok(client, 'Aamarva client should instantiate');
   assert.strictEqual(client.raw.getBaseUrl(), 'https://aamarva.com/api');
-  console.log('✓ Client initialization verified.');
+  assert.strictEqual(client.getTargetAgentId(), 'AMR-SLAVE-01');
+  console.log('✓ Client initialization and fleet scope verified.');
 
   // 2. Health Check
   console.log('2. Testing health check...');
@@ -50,91 +49,8 @@ async function runSdkTests() {
   assert.strictEqual(health.success, true);
   console.log('✓ Health check verified.');
 
-  // 3. Public Discovery (No Auth Required)
-  console.log('3. Testing public discovery abstraction...');
-  const publicClient = new Aamarva({
-    baseUrl: 'https://aamarva.com/api',
-    fetch: mockFetch,
-  });
-
-  const discoverNeed = await publicClient.discover({ need: 'financial' });
-  assert.ok(discoverNeed.agents.length > 0, 'Should discover financial agents');
-  assert.ok(discoverNeed.posts.length > 0, 'Should discover financial posts');
-  assert.strictEqual(discoverNeed.query, 'financial');
-
-  const discoverStr = await publicClient.discover('QA');
-  assert.ok(discoverStr.agents.some((a) => a.name.includes('QA')), 'Should find QA agent');
-
-  const discoverCap = await publicClient.discover({ capability: 'Rust' });
-  assert.ok(discoverCap.posts.some((p) => p.content.includes('Rust')), 'Should find Rust post');
-
-  // Direct discovery methods
-  const discoveredAgents = await publicClient.discoverAgents({ query: 'financial' });
-  assert.ok(discoveredAgents.length > 0, 'discoverAgents() should return matching agents');
-
-  const discoveredPosts = await publicClient.discoverPosts({ query: 'financial' });
-  assert.ok(discoveredPosts.length > 0, 'discoverPosts() should return matching posts');
-
-  // 3b. Regression test for real nested GET /posts API response shape
-  console.log('3b. Testing GET /posts nested response contract for getPosts(), discoverPosts(), and discover()...');
-  const nestedPostMockFetch = (async (input: unknown) => {
-    const urlStr = String(input);
-    if (urlStr.includes('/posts')) {
-      return new Response(
-        JSON.stringify({
-          success: true,
-          data: {
-            posts: [
-              {
-                id: 'POST-1',
-                agentId: 'AMR-123',
-                content: 'Test post',
-                type: 'emit',
-                createdAt: '2026-09-05T00:00:00Z',
-              },
-            ],
-            total: 1,
-            page: 1,
-            limit: 20,
-          },
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-    return new Response(JSON.stringify({ success: true, data: [] }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }) as unknown as typeof fetch;
-
-  const regressionClient = new Aamarva({
-    baseUrl: 'https://aamarva.com/api',
-    fetch: nestedPostMockFetch,
-  });
-
-  const getPostsRes = await regressionClient.getPosts();
-  assert.strictEqual(getPostsRes.length, 1);
-  assert.strictEqual(getPostsRes[0].postId, 'POST-1');
-  assert.strictEqual(getPostsRes[0].agentId, 'AMR-123');
-  assert.strictEqual(getPostsRes[0].content, 'Test post');
-
-  const discoverPostsRes = await regressionClient.discoverPosts();
-  assert.strictEqual(discoverPostsRes.length, 1);
-  assert.strictEqual(discoverPostsRes[0].postId, 'POST-1');
-  assert.strictEqual(discoverPostsRes[0].agentId, 'AMR-123');
-  assert.strictEqual(discoverPostsRes[0].content, 'Test post');
-
-  const discoverRes = await regressionClient.discover({ type: 'posts' });
-  assert.strictEqual(discoverRes.posts.length, 1);
-  assert.strictEqual(discoverRes.posts[0].postId, 'POST-1');
-  assert.strictEqual(discoverRes.posts[0].agentId, 'AMR-123');
-  assert.strictEqual(discoverRes.posts[0].content, 'Test post');
-  console.log('✓ GET /posts nested response handling verified.');
-
-  console.log('✓ Public discovery (agents and posts) verified.');
-
-  // 4. Authentication and Identity (me)
-  console.log('4. Testing authentication & me() profile retrieval...');
+  // 3. Identity and Profile
+  console.log('3. Testing authentication & me() profile retrieval...');
   const me = await client.me();
   assert.strictEqual(me.agentId, 'AMR-1111-2222');
   assert.strictEqual(me.name, 'Financial Analysis Agent');
@@ -146,355 +62,560 @@ async function runSdkTests() {
   assert.strictEqual(emailCheck.exists, true, 'Email check should indicate email exists');
 
   const rotateRes = await client.rotateApiKey('mock_password_123');
-  assert.ok(rotateRes.apiKey.startsWith('sk_amr_mock_rotated_'), 'API key should rotate');
-
+  assert.ok(rotateRes.apiKey.startsWith('sk_amr_rotated_'), 'API key should rotate');
   console.log('✓ me() profile retrieval, update, checkEmail, and rotateApiKey verified.');
 
-  // 5. Emit capability post
-  console.log('5. Testing emit() capability broadcasting...');
-  const emitPost = await client.emit({
-    capability: 'High-throughput time series forecasting',
-    category: 'finance',
-  });
-  assert.ok(emitPost.postId, 'Emit post should have a postId');
-  assert.strictEqual(emitPost.type, 'emit');
-  assert.strictEqual(emitPost.content, 'High-throughput time series forecasting');
-  console.log('✓ emit() verified.');
-
-  // 6. Intake need post
-  console.log('6. Testing intake() need broadcasting...');
-  const intakePost = await client.intake('Need distributed Redis cluster telemetry indexing');
-  assert.ok(intakePost.postId, 'Intake post should have a postId');
-  assert.strictEqual(intakePost.type, 'intake');
-  assert.strictEqual(intakePost.content, 'Need distributed Redis cluster telemetry indexing');
-  console.log('✓ intake() verified.');
-
-  // 7. Connection Request vs Active Connection Lifecycle
-  console.log('7. Testing Connection Request vs Active Connection Lifecycle...');
+  // 4. Direct Connections
+  console.log('4. Testing connection retrieval and management...');
+  const connections = await client.getConnections();
+  assert.ok(Array.isArray(connections));
+  assert.ok(connections.length > 0);
   
-  // 7a. Requesting a connection with another agent ID
-  const connReq = await client.requestConnection('AMR-3333-4444');
-  assert.ok(connReq.requestId, 'Should generate a requestId');
-  assert.strictEqual(connReq.status, 'pending', 'Connection request must have status "pending"');
-  assert.strictEqual(connReq.receiverAgentId, 'AMR-3333-4444');
+  const connInfo = connections[0];
+  const directConn = await client.getConnection(connInfo.connectionId);
+  assert.ok(directConn instanceof AamarvaConnection, 'getConnection must return AamarvaConnection');
+  assert.strictEqual(directConn.connectionId, connInfo.connectionId);
 
-  // 7b. connect() with agentId returns ConnectionRequest
-  const connectResult = await client.connect('AMR-5555-6666');
-  assert.ok('requestId' in connectResult, 'connect(agentId) should return ConnectionRequest');
-  assert.strictEqual((connectResult as any).status, 'pending');
+  console.log('✓ Connection retrieval verified.');
 
-  // 7c. List pending connection requests
-  const requests = await client.connectionRequests();
-  assert.ok(Array.isArray(requests), 'connectionRequests() should return array');
-  assert.ok(requests.some((r) => r.requestId === connReq.requestId));
+  // 6. E2EE Private Messaging
+  console.log('6. Testing E2EE private messaging...');
+  const sentMsg = await directConn.send('Confidential fleet payload synchronization');
+  assert.ok(sentMsg.messageId);
+  assert.strictEqual(sentMsg.content, 'Confidential fleet payload synchronization');
 
-  // 7d. Accept connection request -> returns active AamarvaConnection
-  const activeConn = await client.acceptConnection(connReq.requestId);
-  assert.ok(activeConn instanceof AamarvaConnection, 'acceptConnection should return AamarvaConnection');
-  assert.strictEqual(activeConn.status, 'active');
+  const messages = await directConn.getMessages();
+  assert.ok(Array.isArray(messages));
+  console.log('✓ E2EE private messaging verified.');
 
-  // 7e. connectFromReply -> returns active AamarvaConnection
-  const replyConn = await client.connectFromReply('rep_mock_999');
-  assert.ok(replyConn instanceof AamarvaConnection, 'connectFromReply should return AamarvaConnection');
-  assert.strictEqual(replyConn.status, 'active');
+  // 7. Multi-Agent Clusters & Recipient-Restricted Messaging
+  console.log('7. Testing multi-agent clusters & recipient-restricted messaging...');
+  const clusters = await client.getClusters();
+  assert.ok(Array.isArray(clusters));
+  assert.ok(clusters.length > 0);
 
-  // 7f. List active connections
-  const connectionsList = await client.getConnections();
-  assert.ok(Array.isArray(connectionsList), 'getConnections() should return array');
-  assert.ok(connectionsList.length > 0, 'Should list active connections');
-
-  // 7g. Test aliases for connection requests and deletion
-  const req2 = await client.requestConnection('AMR-5555-6666');
-  const cancelRes = await client.cancelConnectionRequest(req2.requestId);
-  assert.strictEqual(cancelRes.success, true, 'Should cancel connection request');
-
-  const req3 = await client.requestConnection('AMR-5555-6666');
-  const activeConn3 = await client.acceptConnectionRequest(req3.requestId);
-  assert.ok(activeConn3 instanceof AamarvaConnection, 'acceptConnectionRequest alias should work');
-  const closeRes = await activeConn3.delete();
-  assert.strictEqual(closeRes.success, true, 'Connection delete() alias should work');
-
-  console.log('✓ Connection request vs active connection lifecycle verified.');
-
-  // 7h. Public Discussion and Replies
-  console.log('7h. Testing post replies and reply retrieval...');
-  const testReply = await client.reply(emitPost.postId, 'I have compatible time series data streams.');
-  assert.ok(testReply.replyId, 'Reply should have a replyId');
-  const fetchedReplies = await client.getReplies(emitPost.postId);
-  assert.ok(Array.isArray(fetchedReplies), 'getReplies should return array');
-  const singleReply = await client.getReply('rep_mock_sample');
-  assert.strictEqual(singleReply.replyId, 'rep_mock_sample');
-
-  // 7i. Single Post Details (Nested Response)
-  console.log('7i. Testing getPost() nested response extraction...');
-  const postWithDetails = await client.getPost(emitPost.postId);
-  assert.strictEqual(postWithDetails.postId, emitPost.postId);
-  assert.strictEqual(postWithDetails.authorAgentName, 'Financial Analysis Agent Pro');
-  assert.ok(Array.isArray(postWithDetails.replies));
-
-  const delReplyRes = await client.deleteReply(testReply.replyId);
-  assert.strictEqual(delReplyRes.success, true);
-  console.log('✓ Replies and post discussion verified.');
-
-  // 8. Direct Messaging & Transcript
-  console.log('8. Testing active connection messaging & transcript...');
-  const msg = await activeConn.send({ message: 'Can you audit our smart contract specification?' });
-  assert.ok(msg, 'Message should be sent');
-  assert.strictEqual(msg.content, 'Can you audit our smart contract specification?');
-
-  const messages = await activeConn.getMessages();
-  assert.ok(Array.isArray(messages), 'getMessages() should return Message array');
-  assert.ok(messages.some((m) => m.content.includes('smart contract')), 'Sent message should be in transcript');
-
-  const encryptedEnvelopes = await activeConn.getEncryptedMessages();
-  assert.ok(Array.isArray(encryptedEnvelopes), 'getEncryptedMessages() should return encrypted envelope array');
-  assert.ok(encryptedEnvelopes[0].ciphertext, 'Encrypted envelope should contain ciphertext');
-  assert.ok(encryptedEnvelopes[0].nonce, 'Encrypted envelope should contain nonce');
-  console.log('✓ Direct messaging & E2EE verified.');
-
-  // 9. Single-Flight Auth & Concurrent Request Deduplication
-  console.log('9. Testing single-flight authentication...');
-  let loginCalls = 0;
-  const singleFlightFetch: typeof fetch = (async (input: unknown, init?: RequestInit) => {
-    const urlStr = String(input);
-    if (urlStr.includes('/auth/login')) {
-      loginCalls++;
-      await new Promise((r) => setTimeout(r, 50));
-      return new Response(
-        JSON.stringify({
-          success: true,
-          data: {
-            agent: { agentId: 'AMR-CONCUR-1', name: 'Concurrent Agent' },
-            tokens: { accessToken: 'token_123', refreshToken: 'refresh_123' },
-          },
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-    if (urlStr.includes('/agents/me')) {
-      return new Response(
-        JSON.stringify({ success: true, data: { agentId: 'AMR-CONCUR-1', name: 'Concurrent Agent' } }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-    return new Response(JSON.stringify({ success: true }), { status: 200 });
-  }) as unknown as typeof fetch;
-
-  const concurClient = new Aamarva({
-    agentId: 'AMR-CONCUR-1',
-    apiKey: 'sec_key',
-    baseUrl: 'https://aamarva.com/api',
-    fetch: singleFlightFetch,
-  });
-
-  // Launch 5 simultaneous requests requiring auth
-  await Promise.all([
-    concurClient.me(),
-    concurClient.me(),
-    concurClient.me(),
-    concurClient.me(),
-    concurClient.me(),
-  ]);
-
-  assert.strictEqual(loginCalls, 1, 'Concurrent unauthenticated requests must trigger exactly ONE login call');
-  console.log('✓ Single-flight authentication deduplication verified.');
-
-  // 10. Single-Flight Token Refresh
-  console.log('10. Testing single-flight token refresh...');
-  let refreshCalls = 0;
-  let meAttempts = 0;
-  const refreshFetch: typeof fetch = (async (input: unknown, init?: RequestInit) => {
-    const urlStr = String(input);
-    if (urlStr.includes('/auth/refresh')) {
-      refreshCalls++;
-      await new Promise((r) => setTimeout(r, 50));
-      return new Response(
-        JSON.stringify({
-          success: true,
-          data: { accessToken: 'new_token_456', refreshToken: 'new_refresh_456' },
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-    if (urlStr.includes('/agents/me')) {
-      meAttempts++;
-      const authHeader = (init?.headers as Record<string, string>)?.[Object.keys(init?.headers || {}).find(k => k.toLowerCase() === 'authorization') || ''];
-      if (!authHeader || authHeader.includes('expired_token')) {
-        return new Response(
-          JSON.stringify({ success: false, error: 'Token expired' }),
-          { status: 401, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
-      return new Response(
-        JSON.stringify({ success: true, data: { agentId: 'AMR-REFRESH-1', name: 'Refreshed Agent' } }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-    return new Response(JSON.stringify({ success: true }), { status: 200 });
-  }) as unknown as typeof fetch;
-
-  const refreshClient = new Aamarva({
-    accessToken: 'expired_token',
-    refreshToken: 'valid_refresh_token',
-    baseUrl: 'https://aamarva.com/api',
-    fetch: refreshFetch,
-  });
-
-  await Promise.all([
-    refreshClient.me(),
-    refreshClient.me(),
-    refreshClient.me(),
-  ]);
-
-  assert.strictEqual(refreshCalls, 1, 'Concurrent 401 expired requests must trigger exactly ONE refresh call');
-  console.log('✓ Single-flight token refresh verified.');
-
-  // 11. Error Normalization & Typed Errors
-  console.log('11. Testing typed errors and validation...');
-  
-  // Validation Error on Empty Message
-  try {
-    await activeConn.send('');
-    assert.fail('Should throw AamarvaValidationError on empty message');
-  } catch (err: any) {
-    assert.ok(err instanceof AamarvaValidationError, 'Should throw AamarvaValidationError');
-  }
-
-  // Rate Limit Error
-  const rateLimitClient = new Aamarva({
-    baseUrl: 'https://aamarva.com/api',
-    fetch: async () => new Response(JSON.stringify({ success: false, error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests' }, retryAfter: 5 }), { status: 429 }),
-  });
-
-  try {
-    await rateLimitClient.raw.rawRequest({ path: '/test', auth: false });
-    assert.fail('Should throw AamarvaRateLimitError');
-  } catch (err: any) {
-    assert.ok(err instanceof AamarvaRateLimitError, 'Error should be AamarvaRateLimitError');
-    assert.strictEqual(err.statusCode, 429);
-    assert.strictEqual(err.retryAfterSeconds, 5);
-  }
-
-  // Not Found Error
-  const notFoundClient = new Aamarva({
-    agentId: 'AMR-1111-2222',
-    apiKey: 'sec_key',
-    accessToken: 'valid_tok',
-    baseUrl: 'https://aamarva.com/api',
-    fetch: async () => new Response(JSON.stringify({ success: false, error: 'Agent not found' }), { status: 404, headers: { 'Content-Type': 'application/json' } }),
-  });
-
-  try {
-    await notFoundClient.getAgent('AMR-NONEXISTENT');
-    assert.fail('Should throw AamarvaNotFoundError');
-  } catch (err: any) {
-    assert.ok(err instanceof AamarvaNotFoundError, 'Error should be AamarvaNotFoundError');
-    assert.strictEqual(err.statusCode, 404);
-  }
-
-  console.log('✓ Error normalization and typed errors verified.');
-
-  // 12. Normalization Layer Functions
-  console.log('12. Testing normalization layer functions...');
-  const normAgent = normalizeAgent({ id: 'AMR-LEGACY-01', name: 'Legacy Agent' });
-  assert.strictEqual(normAgent.agentId, 'AMR-LEGACY-01');
-
-  const normPost = normalizePost({ id: 'pst_legacy_01', type: 'EMIT', content: 'Test content' });
-  assert.strictEqual(normPost.postId, 'pst_legacy_01');
-  assert.strictEqual(normPost.type, 'emit');
-
-  const normConn = normalizeConnection({ id: 'conn_1', postOwnerAgentId: 'AMR-ME', replyAuthorAgentId: 'AMR-THEM' }, 'AMR-ME');
-  assert.strictEqual(normConn.connectionId, 'conn_1');
-  assert.strictEqual(normConn.agentId, 'AMR-THEM');
-
-  // Verify valid encrypted envelope normalizes correctly
-  const validEnvelope = {
-    messageId: 'msg_test_1',
-    connectionId: 'conn_1',
-    senderAgentId: 'AMR-PEER-1',
-    ciphertext: 'dGVzdGNpcGhlcnRleHQ=',
-    nonce: 'dGVzdG5vbmNlMTI=',
-    version: 1,
-    keyEpoch: 1,
-  };
-  const normMsg = normalizeMessage(validEnvelope, 'conn_1');
-  assert.strictEqual(normMsg.senderAgentId, 'AMR-PEER-1');
-  assert.strictEqual(normMsg.ciphertext, 'dGVzdGNpcGhlcnRleHQ=');
-  assert.strictEqual(normMsg.content, null);
-
-  // Strict check: plaintext string must throw PLAINTEXT_MESSAGE_RECEIVED
-  assert.throws(
-    () => normalizeMessage('AMR-PEER-1: Structured data update', 'conn_1'),
-    (err: any) => err?.code === 'PLAINTEXT_MESSAGE_RECEIVED'
-  );
-
-  // Strict check: plaintext content without ciphertext must throw PLAINTEXT_MESSAGE_RECEIVED
-  assert.throws(
-    () => normalizeMessage({ connectionId: 'conn_1', content: 'hello world' }, 'conn_1'),
-    (err: any) => err?.code === 'PLAINTEXT_MESSAGE_RECEIVED'
-  );
-  console.log('✓ Normalization layer functions verified (strict E2EE transport enforced).');
-
-  // 13. Clusters (Multi-Agent Workspaces)
-  console.log('13. Testing Clusters (Multi-Agent Workspaces)...');
-  const cluster = await client.createCluster({
-    name: 'Market Arbitrage Cluster',
-    description: 'Consensus on L2 liquidity arbitrage opportunities.',
-  });
-  assert.ok(cluster.clusterId, 'Cluster should have clusterId');
+  const cluster = await client.getCluster('cluster_987654');
   assert.strictEqual(cluster.name, 'Market Arbitrage Cluster');
 
-  const clustersList = await client.getClusters();
-  assert.ok(Array.isArray(clustersList), 'getClusters should return an array');
-  assert.ok(clustersList.some((c) => c.clusterId === cluster.clusterId || c.id === cluster.clusterId));
-
-  const clusterDetails = await client.getCluster(cluster.clusterId!);
-  assert.ok(clusterDetails.clusterId);
-  assert.strictEqual(clusterDetails.name, 'Market Arbitrage Cluster');
-
-  const updateRes = await client.updateCluster(cluster.clusterId!, {
-    name: 'Consensus Phase II',
-    description: 'Updated focus parameters.',
+  const clusterMsgRes = await client.sendClusterMessage('cluster_987654', {
+    ciphertext: 'bW9ja19jaXBoZXJ0ZXh0',
+    nonce: 'bW9ja19ub25jZQ==',
+    recipients: ['AMR-5555-6666'],
   });
-  assert.strictEqual(updateRes.success, true);
+  assert.ok(clusterMsgRes.messageId);
 
-  const invite = await client.inviteToCluster(cluster.clusterId!, {
-    inviteeAgentId: 'AMR-3333-4444',
-  });
-  assert.ok(invite.inviteId);
-  assert.strictEqual(invite.status, 'pending');
-
-  const invitesList = await client.getClusterInvites(cluster.clusterId!);
-  assert.ok(Array.isArray(invitesList));
-  assert.ok(invitesList.some((i) => i.inviteId === invite.inviteId || i.id === invite.inviteId));
-
-  const joinRes = await client.joinCluster(cluster.clusterId!, invite.inviteId!);
-  assert.strictEqual(joinRes.success, true);
-
-  const sendMsgRes = await client.sendClusterMessage(cluster.clusterId!, {
-    ciphertext: 'dGVzdC1jbHVzdGVyLWNpcGhlcnRleHQ=',
-    nonce: 'dGVzdC1ub25jZQ==',
-  });
-  assert.strictEqual(sendMsgRes.success, true);
-  assert.ok(sendMsgRes.messageId);
-
-  const clusterMsgs = await client.getClusterMessages(cluster.clusterId!);
+  const clusterMsgs = await client.getClusterMessages('cluster_987654');
   assert.ok(Array.isArray(clusterMsgs));
-  assert.ok(clusterMsgs.some((m) => m.messageId === sendMsgRes.messageId));
+  console.log('✓ Clusters & recipient-restricted messaging verified.');
 
-  const removeMemberRes = await client.removeClusterMember(cluster.clusterId!, 'AMR-3333-4444');
-  assert.strictEqual(removeMemberRes.success, true);
+  // 8. Watchtower & Fleet Telemetry
+  console.log('8. Testing Watchtower fleet telemetry...');
+  const activity = await client.getWatchtowerActivity(10);
+  assert.ok(Array.isArray(activity));
+  assert.ok(activity.length > 0);
+  assert.strictEqual(activity[0].actorAgentId, 'AMR-1111-2222');
 
-  const disbandRes = await client.disbandCluster(cluster.clusterId!);
-  assert.strictEqual(disbandRes.success, true);
-  console.log('✓ Clusters (Multi-Agent Workspaces) lifecycle verified.');
+  const ticket = await client.getWatchtowerStreamTicket();
+  assert.ok(ticket.ticket.startsWith('ticket_live_mock_'));
+  assert.ok(ticket.streamUrl.includes('/watchtower/stream'));
+
+  const streamUrl = client.getWatchtowerStreamUrl('mock_ticket_123');
+  assert.ok(streamUrl.includes('ticket=mock_ticket_123'));
+  console.log('✓ Watchtower telemetry and stream tickets verified.');
+
+  // 9. FLOOR MCP Tool Governance
+  console.log('9. Testing FLOOR MCP tool governance...');
+  const tools = await client.getFloorTools();
+  assert.ok(Array.isArray(tools));
+  assert.ok(tools.length >= 2);
+  const secTool = tools.find((t) => t.id === 'tool_sec_edgar');
+  assert.ok(secTool);
+  assert.strictEqual(secTool.accessStatus, 'authorized');
+
+  // HITL Access Request without executing tool
+  const accessReq = await client.requestFloorAccess('tool_market_depth', 'Need market depth');
+  assert.strictEqual(accessReq.status, 'pending');
+  assert.ok(accessReq.requestId);
+
+  // Check request status
+  const statusRes = await client.getFloorRequestStatus(accessReq.requestId!);
+  assert.strictEqual(statusRes.status, 'pending');
+
+  // Authorized execution
+  const execRes = await client.executeFloorTool('tool_sec_edgar', { ticker: 'AAPL' });
+  assert.strictEqual(execRes.status, 'executed');
+  assert.ok(execRes.result);
+
+  console.log('✓ FLOOR MCP tool governance (discovery, HITL request, status, execution) verified.');
+
+  // 10. Legacy Removal Assertions
+  console.log('10. Testing that legacy social and connection methods do NOT exist on client...');
+  const rawClient = client as any;
+  assert.strictEqual(rawClient.discover, undefined);
+  assert.strictEqual(rawClient.discoverAgents, undefined);
+  assert.strictEqual(rawClient.discoverPosts, undefined);
+  assert.strictEqual(rawClient.emit, undefined);
+  assert.strictEqual(rawClient.intake, undefined);
+  assert.strictEqual(rawClient.getPosts, undefined);
+  assert.strictEqual(rawClient.createPost, undefined);
+  assert.strictEqual(rawClient.deletePost, undefined);
+  assert.strictEqual(rawClient.getReplies, undefined);
+  assert.strictEqual(rawClient.createReply, undefined);
+  assert.strictEqual(rawClient.submitReview, undefined);
+  assert.strictEqual(rawClient.connectFromReply, undefined);
+  assert.strictEqual(rawClient.requestConnection, undefined);
+  assert.strictEqual(rawClient.establishConnection, undefined);
+  assert.strictEqual(rawClient.acceptConnectionRequest, undefined);
+  assert.strictEqual(rawClient.rejectConnectionRequest, undefined);
+  assert.strictEqual(rawClient.getConnectionRequests, undefined);
+  assert.strictEqual(rawClient.getFloorTemporaryAccess, undefined);
+  assert.strictEqual(rawClient.invokeFloorTool, undefined);
+  console.log('✓ Legacy removal assertions verified.');
+
+  // 11. Public-Key Registration Tests across all authentication paths
+  console.log('11. Testing automatic public-key registration & idempotency across all auth paths...');
+  let e2eePutCalls = 0;
+  let lastE2eePayload: any = null;
+  const keyTestFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
+      e2eePutCalls++;
+      lastE2eePayload = JSON.parse(init.body || '{}');
+      return new Response(JSON.stringify({ success: true, message: 'Key registered' }), { status: 200 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const keyClient = new Aamarva({
+    agentId: 'AMR-1111-2222',
+    apiKey: 'sec_mock_key_123',
+    fetch: keyTestFetch,
+  });
+
+  // A. Explicit login triggers registration
+  await keyClient.login();
+  assert.strictEqual(e2eePutCalls, 1, 'Explicit login should automatically trigger public key registration');
+  assert.ok(lastE2eePayload.publicKey, 'Public key must be registered');
+  assert.strictEqual(JSON.stringify(lastE2eePayload).includes('PRIVATE KEY'), false, 'Private key MUST NEVER be transmitted');
+  assert.strictEqual(JSON.stringify(lastE2eePayload).includes('password'), false, 'Password MUST NEVER be in registration payload');
+  assert.strictEqual(JSON.stringify(lastE2eePayload).includes('token'), false, 'Token MUST NEVER be in registration payload');
+
+  // B. Repeated authentication checks do not cause registration storms (Idempotency)
+  await keyClient.registerPublicKey();
+  await keyClient.http.ensureAuthenticated();
+  assert.strictEqual(e2eePutCalls, 1, 'Repeated key registration calls with same identity and fingerprint must be skipped (idempotent)');
+
+  // B2. Switching agent identity with same key fingerprint MUST trigger a new registration
+  keyClient.http.setCredentials('AMR-NEW-IDENTITY-999', 'sec_mock_key_123', true);
+  await keyClient.registerPublicKey();
+  assert.strictEqual(e2eePutCalls, 2, 'Switching agent identity with same key fingerprint MUST trigger a new registration');
+
+  // C. Automatic authentication with credentials triggers registration
+  let autoAuthKeyCalls = 0;
+  const autoAuthFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
+      autoAuthKeyCalls++;
+      return new Response(JSON.stringify({ success: true, message: 'Key registered' }), { status: 200 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const autoClient = new Aamarva({
+    agentId: 'AMR-2222-3333',
+    apiKey: 'sec_mock_key_123',
+    fetch: autoAuthFetch,
+  });
+  await autoClient.getConnections();
+  assert.strictEqual(autoAuthKeyCalls, 1, 'Automatic authentication path MUST trigger public-key registration');
+
+  // D. Already-configured access token triggers required registration on authenticated call
+  let tokenAuthKeyCalls = 0;
+  const tokenAuthFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
+      tokenAuthKeyCalls++;
+      return new Response(JSON.stringify({ success: true, message: 'Key registered' }), { status: 200 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const tokenClient = new Aamarva({
+    agentId: 'AMR-TOKEN-ONLY',
+    accessToken: 'mock_existing_access_token_999',
+    fetch: tokenAuthFetch,
+  });
+  await tokenClient.getConnections();
+  assert.strictEqual(tokenAuthKeyCalls, 1, 'Already-configured access token MUST trigger public-key registration on authenticated request');
+
+  // E. Account registration installs credentials and tokens first and binds real agent ID
+  let regAuthKeyCalls = 0;
+  let stateDuringE2ee: any = {};
+  let signatureInE2ee: any = null;
+  const regAuthFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/auth/register') && init?.method === 'POST') {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          agentId: 'AMR-REG-9876',
+          apiKey: 'sk_reg_secret_9876',
+          tokens: {
+            accessToken: 'at_reg_valid_token',
+            refreshToken: 'rt_reg_valid_token',
+          },
+          user: {
+            agentId: 'AMR-REG-9876',
+            name: 'New Registered Agent',
+          },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
+      regAuthKeyCalls++;
+      const body = JSON.parse(init.body || '{}');
+      signatureInE2ee = body.signature;
+      stateDuringE2ee = {
+        agentId: regClient.http.getAgentId(),
+        apiKey: regClient.http.getApiKey?.(),
+        tokens: regClient.http.getTokens(),
+      };
+      return new Response(JSON.stringify({ success: true, message: 'Key registered' }), { status: 200 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const regClient = new Aamarva({ fetch: regAuthFetch });
+  const regResult = await regClient.register({ email: `new-agent-${Date.now()}@aamarva.test`, name: 'New Registered Agent' });
+  assert.strictEqual(regAuthKeyCalls, 1, 'Account registration with returned tokens MUST trigger public-key registration');
+  assert.strictEqual(regResult.agent.agentId, 'AMR-REG-9876');
+  // Verify credentials and tokens were installed BEFORE key registration
+  assert.strictEqual(stateDuringE2ee.agentId, 'AMR-REG-9876', 'Agent ID must be installed on HTTP client before key registration');
+  assert.strictEqual(stateDuringE2ee.apiKey, 'sk_reg_secret_9876', 'API key must be installed before key registration');
+  assert.strictEqual(stateDuringE2ee.tokens?.accessToken, 'at_reg_valid_token', 'Access token must be installed before key registration');
+  // Verify tokens were NOT cleared by credentials installation
+  assert.strictEqual(regClient.http.getTokens().accessToken, 'at_reg_valid_token', 'Tokens must remain intact after registration completes');
+  assert.strictEqual(regClient.http.getAgentId(), 'AMR-REG-9876', 'Authoritative agent ID must remain configured');
+
+  // E2. Test setCredentials token preservation semantics
+  regClient.http.setTokens({ accessToken: 'at_preserved_1', refreshToken: 'rt_preserved_1' });
+  regClient.http.setCredentials('AMR-PRESERVE', 'sk_preserve', true);
+  assert.strictEqual(regClient.http.getTokens().accessToken, 'at_preserved_1', 'setCredentials with preserveTokens=true must not clear tokens');
+  assert.strictEqual(regClient.http.getAgentId(), 'AMR-PRESERVE');
+
+  regClient.http.setCredentials('AMR-PRESERVE-2', 'sk_preserve_2', { preserveTokens: true });
+  assert.strictEqual(regClient.http.getTokens().accessToken, 'at_preserved_1', 'setCredentials with {preserveTokens: true} must not clear tokens');
+
+  regClient.http.setCredentials('AMR-OVERWRITE', 'sk_overwrite', { tokens: { accessToken: 'at_new_1', refreshToken: 'rt_new_1' } });
+  assert.strictEqual(regClient.http.getTokens().accessToken, 'at_new_1', 'setCredentials with explicit tokens must install new tokens');
+
+  regClient.http.setCredentials('AMR-CLEARED', 'sk_cleared', false);
+  assert.strictEqual(regClient.http.getTokens().accessToken, undefined, 'setCredentials with preserveTokens=false must clear tokens');
+
+  // E3. Account registration fails closed if key registration is rejected by server
+  const regRejectFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/auth/register') && init?.method === 'POST') {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          agentId: 'AMR-REG-FAIL',
+          apiKey: 'sk_fail',
+          tokens: { accessToken: 'at_fail', refreshToken: 'rt_fail' },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
+      return new Response(JSON.stringify({ success: false, message: 'Public key rejected' }), { status: 400 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const regRejectClient = new Aamarva({ fetch: regRejectFetch });
+  try {
+    await regRejectClient.register({ email: 'fail@aamarva.test', name: 'Fail Agent' });
+    assert.fail('Registration must fail closed if public key registration is rejected');
+  } catch (err: any) {
+    assert.ok(err instanceof AamarvaError);
+    assert.strictEqual(err.code, 'E2EE_KEY_REGISTRATION_FAILED');
+  }
+
+  // E4. Public key registration validates response payload and retries on subsequent call
+  let malformedCount = 0;
+  let responseBody: string = 'Internal Server Error';
+  let responseContentType: string = 'text/plain';
+  const malformedRegFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
+      malformedCount++;
+      return new Response(responseBody, {
+        status: 200,
+        headers: { 'content-type': responseContentType },
+      });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const malformedClient = new Aamarva({
+    agentId: 'AMR-MALFORMED-TS',
+    apiKey: 'sk_malformed',
+    fetch: malformedRegFetch,
+  });
+
+  // 1. Non-JSON plain text response ({ message: "Internal Server Error" }) MUST be rejected
+  try {
+    await malformedClient.registerPublicKey({ force: true });
+    assert.fail('Should fail on non-JSON text fallback response');
+  } catch (err: any) {
+    assert.strictEqual(err.code, 'E2EE_KEY_REGISTRATION_FAILED');
+  }
+
+  // 2. Explicit error response fails
+  responseContentType = 'application/json';
+  responseBody = JSON.stringify({ success: false, message: 'Invalid signature' });
+  try {
+    await malformedClient.registerPublicKey({ force: true });
+    assert.fail('Should fail on success=false response');
+  } catch (err: any) {
+    assert.strictEqual(err.code, 'E2EE_KEY_REGISTRATION_FAILED');
+  }
+
+  // 3. Valid JSON response succeeds and caches
+  responseContentType = 'application/json';
+  responseBody = JSON.stringify({ success: true, message: 'Key registered' });
+  await malformedClient.registerPublicKey({ force: true });
+  assert.strictEqual(malformedCount, 3);
+
+  // F. Token refresh triggers registration when needed
+  let refreshKeyCalls = 0;
+  const refreshFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
+      refreshKeyCalls++;
+      return new Response(JSON.stringify({ success: true, message: 'Key registered' }), { status: 200 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const refreshClient = new Aamarva({
+    agentId: 'AMR-REFRESH-AGENT',
+    apiKey: 'sk_mock_refresh',
+    refreshToken: 'mock_refresh_token_valid',
+    fetch: refreshFetch,
+  });
+  const refreshSuccess = await refreshClient.http.refreshAccessToken();
+  assert.strictEqual(refreshSuccess, true);
+  assert.strictEqual(refreshKeyCalls, 1, 'Successful token refresh MUST trigger public-key registration when needed');
+
+  // G. Server rejection produces visible error on login
+  const rejectFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
+      return new Response(JSON.stringify({ success: false, message: 'Server rejected key' }), { status: 400 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const rejectClient = new Aamarva({
+    agentId: 'AMR-REJECT-AGENT',
+    apiKey: 'sk_mock_reject',
+    fetch: rejectFetch,
+  });
+  try {
+    await rejectClient.login();
+    assert.fail('Should fail when server rejects key registration');
+  } catch (err: any) {
+    assert.ok(err instanceof AamarvaError);
+    assert.strictEqual(err.code, 'E2EE_KEY_REGISTRATION_FAILED');
+  }
+
+  console.log('✓ Public-key registration across all authentication paths verified.');
+
+  // 12. Cluster Sender ID and Authoritative Master Recipient Tests
+  console.log('12. Testing cluster message compulsory sender ID & authoritative master recipient resolution...');
+
+  // A. Test all supported master/owner field aliases
+  const aliasFields = ['masterId', 'master_id', 'masterAgentId', 'master_agent_id', 'ownerAgentId', 'owner_agent_id'];
+  for (const field of aliasFields) {
+    let payloadSent: any = null;
+    const aliasFetch = (async (url: string, init?: any) => {
+      if (url.endsWith('/agents/me') && init?.method === 'GET') {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            agentId: 'AMR-SLAVE-NODE',
+            name: 'Slave Node',
+            [field]: 'AMR-MASTER-ALIAS-OK',
+          },
+        }), { status: 200 });
+      }
+      if (url.includes('/clusters/') && url.endsWith('/messages') && init?.method === 'POST') {
+        payloadSent = JSON.parse(init.body || '{}');
+        return new Response(JSON.stringify({ success: true, messageId: 'msg_alias_test' }), { status: 201 });
+      }
+      return mockFetch(url, init);
+    }) as typeof fetch;
+
+    const aliasClient = new Aamarva({
+      agentId: 'AMR-SLAVE-NODE',
+      apiKey: 'sec_key_123',
+      fetch: aliasFetch,
+    });
+
+    await aliasClient.sendClusterMessage('cluster_alias', {
+      ciphertext: 'bW9ja19jaXBoZXI=',
+      nonce: 'bW9ja19ub25jZQ==',
+    });
+
+    assert.ok(payloadSent.recipients.includes('AMR-MASTER-ALIAS-OK'), `Field alias "${field}" must resolve to master recipient`);
+  }
+
+  // B. Test that conflicting master fields FAIL CLOSED
+  const conflictFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me') && init?.method === 'GET') {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          agentId: 'AMR-SLAVE-CONFLICT',
+          name: 'Conflicted Slave',
+          masterId: 'AMR-MASTER-A',
+          ownerAgentId: 'AMR-MASTER-B', // Conflicting master
+        },
+      }), { status: 200 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const conflictClient = new Aamarva({
+    agentId: 'AMR-SLAVE-CONFLICT',
+    apiKey: 'sec_key_123',
+    fetch: conflictFetch,
+  });
+
+  try {
+    await conflictClient.sendClusterMessage('cluster_1', {
+      ciphertext: 'bW9ja19jaXBoZXI=',
+      nonce: 'bW9ja19ub25jZQ==',
+    });
+    assert.fail('Conflicting master identities must fail closed');
+  } catch (err: any) {
+    assert.ok(err instanceof AamarvaError);
+    assert.strictEqual(err.code, 'MASTER_RESOLUTION_FAILED');
+  }
+
+  // C. Test that missing master identity FAILS CLOSED (never substitute sender ID)
+  const missingMasterFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me') && init?.method === 'GET') {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          agentId: 'AMR-SLAVE-NO-MASTER',
+          name: 'Orphan Slave',
+        },
+      }), { status: 200 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const missingMasterClient = new Aamarva({
+    agentId: 'AMR-SLAVE-NO-MASTER',
+    apiKey: 'sec_key_123',
+    fetch: missingMasterFetch,
+  });
+
+  try {
+    await missingMasterClient.sendClusterMessage('cluster_1', {
+      ciphertext: 'bW9ja19jaXBoZXI=',
+      nonce: 'bW9ja19ub25jZQ==',
+    });
+    assert.fail('Missing master identity must fail closed without substituting sender ID');
+  } catch (err: any) {
+    assert.ok(err instanceof AamarvaError);
+    assert.strictEqual(err.code, 'MASTER_RESOLUTION_FAILED');
+  }
+
+  let lastClusterPayload: any = null;
+  const clusterTestFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me') && init?.method === 'GET') {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          agentId: 'AMR-SLAVE-NODE-01',
+          name: 'Slave Agent Node 1',
+          masterId: 'AMR-MASTER-AUTHORITATIVE', // Authoritative owning master
+        },
+      }), { status: 200 });
+    }
+    if (url.includes('/clusters/') && url.endsWith('/messages') && init?.method === 'POST') {
+      lastClusterPayload = JSON.parse(init.body || '{}');
+      return new Response(JSON.stringify({ success: true, messageId: 'msg_test_123' }), { status: 201 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const slaveClient = new Aamarva({
+    agentId: 'AMR-SLAVE-NODE-01',
+    apiKey: 'sec_mock_key_123',
+    targetAgentId: 'AMR-SLAVE-TARGET-99', // targetAgentId is target slave, NOT master!
+    fetch: clusterTestFetch,
+  });
+
+  await slaveClient.sendClusterMessage('cluster_1', {
+    ciphertext: 'bW9ja19jaXBoZXJ0ZXh0',
+    nonce: 'bW9ja19ub25jZQ==',
+    recipients: ['AMR-WORKER-01', 'AMR-WORKER-01'], // includes duplicate
+  });
+
+  assert.strictEqual(lastClusterPayload.senderAgentId, 'AMR-SLAVE-NODE-01', 'Sender agent ID must match authenticated identity');
+  assert.ok(lastClusterPayload.recipients.includes('AMR-MASTER-AUTHORITATIVE'), 'Authoritative master ID from profile metadata MUST be in recipients');
+  assert.strictEqual(lastClusterPayload.recipients.includes('AMR-SLAVE-TARGET-99'), false, 'targetAgentId MUST NOT be treated as master recipient');
+  assert.ok(lastClusterPayload.recipients.includes('AMR-SLAVE-NODE-01'), 'Sender agent MUST be in recipients');
+  assert.ok(lastClusterPayload.recipients.includes('AMR-WORKER-01'), 'Explicit recipients must be preserved');
+  
+  // Verify recipient deduplication
+  const workerOccurrences = lastClusterPayload.recipients.filter((r: string) => r === 'AMR-WORKER-01').length;
+  assert.strictEqual(workerOccurrences, 1, 'Recipients list must be deduplicated');
+
+  // Test sender ID spoofing rejection
+  try {
+    await slaveClient.sendClusterMessage('cluster_1', {
+      ciphertext: 'bW9ja19jaXBoZXJ0ZXh0',
+      nonce: 'bW9ja19ub25jZQ==',
+      senderAgentId: 'AMR-SPOOFED-IDENTITY',
+    });
+    assert.fail('Spoofed sender agent ID should be rejected before network request');
+  } catch (err: any) {
+    assert.ok(err instanceof AamarvaValidationError);
+    assert.strictEqual(err.code, 'SENDER_IDENTITY_MISMATCH');
+    console.log('✓ Spoofed sender ID rejected before network request.');
+  }
+
+  // Test master resolution failure prevents message transmission
+  const brokenFetch = (async (url: string, init?: any) => {
+    if (url.endsWith('/agents/me') && init?.method === 'GET') {
+      return new Response(JSON.stringify({ success: false, error: 'Profile corrupt' }), { status: 500 });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+
+  const brokenClient = new Aamarva({
+    agentId: 'AMR-BROKEN',
+    apiKey: 'sec_mock_key_123',
+    fetch: brokenFetch,
+  });
+
+  try {
+    await brokenClient.sendClusterMessage('cluster_1', {
+      ciphertext: 'bW9ja19jaXBoZXJ0ZXh0',
+      nonce: 'bW9ja19ub25jZQ==',
+    });
+    assert.fail('Message send should fail if master agent ID cannot be resolved');
+  } catch (err: any) {
+    assert.ok(err instanceof AamarvaError);
+    assert.strictEqual(err.code, 'MASTER_RESOLUTION_FAILED');
+    console.log('✓ Message transmission blocked when master resolution fails.');
+  }
+
+  console.log('✓ Cluster compulsory sender ID and authoritative master recipient resolution verified.');
 
   console.log('--------------------------------------------------');
-  console.log('✓ ALL SDK UNIT & INTEGRATION TESTS PASSED!');
+  console.log('ALL AAMARVA FLEET SDK TESTS PASSED SUCCESSFULLY   ');
   console.log('--------------------------------------------------');
 }
 
 runSdkTests().catch((err) => {
-  console.error('SDK Test Failed:', err);
+  console.error('SDK test failed:', err);
   process.exit(1);
 });

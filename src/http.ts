@@ -23,6 +23,7 @@ export class HttpClient {
   private apiKey?: string;
   private accessToken?: string;
   private refreshToken?: string;
+  private targetAgentId?: string;
   private timeoutMs: number;
   private maxRetries: number;
   private fetchFn: typeof fetch;
@@ -30,6 +31,7 @@ export class HttpClient {
 
   private authPromise: Promise<void> | null = null;
   private refreshPromise: Promise<boolean> | null = null;
+  private onAuthSuccess?: () => Promise<void>;
 
   constructor(config: AamarvaConfig = {}) {
     const defaultUrl = 'https://aamarva.com/api';
@@ -40,10 +42,15 @@ export class HttpClient {
     this.apiKey = config.apiKey || (typeof process !== 'undefined' && process.env?.AAMARVA_API_KEY) || undefined;
     this.accessToken = config.accessToken || (typeof process !== 'undefined' && process.env?.AAMARVA_ACCESS_TOKEN) || undefined;
     this.refreshToken = config.refreshToken || (typeof process !== 'undefined' && process.env?.AAMARVA_REFRESH_TOKEN) || undefined;
+    this.targetAgentId = config.targetAgentId || (typeof process !== 'undefined' && process.env?.AAMARVA_TARGET_AGENT_ID) || undefined;
     this.timeoutMs = config.timeoutMs || 15000;
     this.maxRetries = typeof config.maxRetries === 'number' ? config.maxRetries : 3;
     this.fetchFn = config.fetch || globalThis.fetch.bind(globalThis);
     this.autoLogin = config.autoLogin !== false;
+  }
+
+  public setOnAuthSuccess(fn?: () => Promise<void>): void {
+    this.onAuthSuccess = fn;
   }
 
   public setTokens(tokens: AuthTokens): void {
@@ -58,15 +65,49 @@ export class HttpClient {
     };
   }
 
-  public setCredentials(agentId: string, apiKey: string): void {
+  public setTargetAgentId(targetAgentId?: string): void {
+    this.targetAgentId = targetAgentId;
+  }
+
+  public getTargetAgentId(): string | undefined {
+    return this.targetAgentId;
+  }
+
+  public setCredentials(
+    agentId: string,
+    apiKey: string,
+    options?: AuthTokens | boolean | { preserveTokens?: boolean; tokens?: AuthTokens }
+  ): void {
     this.agentId = agentId;
     this.apiKey = apiKey;
+
+    if (options) {
+      if (typeof options === 'object' && 'accessToken' in options) {
+        this.accessToken = options.accessToken;
+        this.refreshToken = options.refreshToken;
+        return;
+      }
+      if (typeof options === 'object' && options.tokens) {
+        this.accessToken = options.tokens.accessToken;
+        this.refreshToken = options.tokens.refreshToken;
+        return;
+      }
+      if (options === true || (typeof options === 'object' && options.preserveTokens)) {
+        // Keep existing valid tokens intact
+        return;
+      }
+    }
+
     this.accessToken = undefined;
     this.refreshToken = undefined;
   }
 
   public getAgentId(): string | undefined {
     return this.agentId;
+  }
+
+  public getApiKey(): string | undefined {
+    return this.apiKey;
   }
 
   public getBaseUrl(): string {
@@ -78,6 +119,9 @@ export class HttpClient {
    */
   public async ensureAuthenticated(): Promise<void> {
     if (this.accessToken) {
+      if (this.onAuthSuccess) {
+        await this.onAuthSuccess();
+      }
       return;
     }
 
@@ -119,6 +163,10 @@ export class HttpClient {
           this.accessToken = data.accessToken;
           this.refreshToken = data.refreshToken;
         }
+
+        if (this.onAuthSuccess && this.accessToken) {
+          await this.onAuthSuccess();
+        }
       } finally {
         this.authPromise = null;
       }
@@ -159,6 +207,9 @@ export class HttpClient {
           if (response.data.refreshToken) {
             this.refreshToken = response.data.refreshToken;
           }
+          if (this.onAuthSuccess) {
+            await this.onAuthSuccess();
+          }
           return true;
         }
         return false;
@@ -179,7 +230,7 @@ export class HttpClient {
   public async request<T = unknown>(options: RequestOptions): Promise<ApiResponse<T>> {
     const isAuthRequired = options.auth !== false;
 
-    if (isAuthRequired && this.autoLogin && !this.accessToken) {
+    if (isAuthRequired && this.autoLogin && !options.skipAutoAuth) {
       await this.ensureAuthenticated();
     }
 
@@ -266,6 +317,10 @@ export class HttpClient {
       headers['Authorization'] = `Bearer ${this.accessToken}`;
     }
 
+    if (this.targetAgentId && !headers['x-target-agent-id']) {
+      headers['x-target-agent-id'] = this.targetAgentId;
+    }
+
     const timeout = options.timeoutMs || this.timeoutMs;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -282,6 +337,7 @@ export class HttpClient {
 
       const contentType = response.headers.get('content-type') || '';
       let data: unknown;
+      let isFallbackText = false;
 
       if (contentType.includes('application/json')) {
         data = await response.json().catch(() => null);
@@ -291,6 +347,7 @@ export class HttpClient {
           data = JSON.parse(text);
         } catch {
           data = { message: text };
+          isFallbackText = true;
         }
       }
 
@@ -299,12 +356,17 @@ export class HttpClient {
       }
 
       if (data && typeof data === 'object' && 'success' in data) {
-        return data as ApiResponse<T>;
+        return {
+          ...(data as Record<string, unknown>),
+          success: Boolean((data as any).success),
+          isRawText: isFallbackText,
+        } as ApiResponse<T>;
       }
 
       return {
-        success: true,
+        success: !isFallbackText,
         data: data as T,
+        isRawText: isFallbackText,
       };
     } catch (err: unknown) {
       clearTimeout(timer);

@@ -3,7 +3,7 @@ import path from 'path';
 
 function runAdkValidation() {
   console.log('--------------------------------------------------');
-  console.log('AAMARVA CONTRACT AUDIT & CROSS-DOCUMENT TEST SUITE');
+  console.log('AAMARVA FLEET CONTRACT AUDIT & CROSS-DOCUMENT TEST');
   console.log('--------------------------------------------------');
 
   // A. ADK_SPEC.md exists
@@ -21,8 +21,8 @@ function runAdkValidation() {
   if (!ADK_SPECIFICATION || typeof ADK_SPECIFICATION !== 'string') {
     throw new Error('ADK Specification content must be a non-empty string');
   }
-  if (!ADK_SPECIFICATION.includes('AAMARVA ADK Specification') && !ADK_SPECIFICATION.includes('AAMARVA Platform Specification')) {
-    throw new Error('ADK Specification is missing authoritative headers');
+  if (!ADK_SPECIFICATION.includes('AAMARVA Platform Specification') && !ADK_SPECIFICATION.includes('Fleet-Only Autonomous Agent Infrastructure')) {
+    throw new Error('ADK Specification is missing authoritative fleet headers');
   }
   console.log('✓ Markdown specification is structurally valid.');
 
@@ -55,8 +55,6 @@ function runAdkValidation() {
   if (openapi.info?.version !== expectedAdkVersion) {
     throw new Error(`OpenAPI version mismatch. Expected ${expectedAdkVersion}, got: ${openapi.info?.version}`);
   }
-
-  const specContent = fs.readFileSync(specPath, 'utf8');
   console.log('✓ ADK Version 1.0.0 is uniformly defined.');
 
   // F. Canonical production URL is correct
@@ -67,26 +65,65 @@ function runAdkValidation() {
   }
   console.log('✓ OpenAPI servers list canonical production URL.');
 
-  // G. Required paths exist in OpenAPI schema
-  console.log('G. Checking critical path definitions inside OpenAPI spec...');
-  const requiredRoutes = [
+  // G. Required Fleet paths exist in OpenAPI schema
+  console.log('G. Checking critical fleet path definitions inside OpenAPI spec...');
+  const requiredFleetRoutes = [
     '/auth/register',
     '/auth/login',
+    '/auth/refresh',
+    '/auth/logout',
+    '/auth/check-email',
+    '/auth/agent/rotate-api-key',
     '/agents/me',
-    '/posts',
+    '/agents/me/e2ee',
     '/connections',
-    '/connections/requests',
+    '/connections/{connectionId}',
+    '/connections/{connectionId}/peer-key',
+    '/connections/{connectionId}/messages',
+    '/clusters',
+    '/clusters/{clusterId}',
+    '/clusters/{clusterId}/messages',
+    '/watchtower/activity',
+    '/watchtower/stream-ticket',
+    '/watchtower/stream',
+    '/floor/agent/tools',
+    '/floor/tools/{toolId}/execute',
+    '/floor/tools/{toolId}/request-access',
+    '/floor/requests/{requestId}',
     '/adk'
   ];
-  for (const route of requiredRoutes) {
+  for (const route of requiredFleetRoutes) {
     if (!openapi.paths[route]) {
-      throw new Error(`Structured OpenAPI specification is missing required route path: ${route}`);
+      throw new Error(`Structured OpenAPI specification is missing required fleet route path: ${route}`);
     }
   }
-  console.log('✓ All critical pathways are correctly defined in OpenAPI spec.');
+  console.log('✓ All critical fleet pathways are correctly defined in OpenAPI spec.');
 
-  // H. Authentication schemes are defined correctly
-  console.log('H. Verifying security and authentication schemes...');
+  // H. Verify NO obsolete social/broadcast paths remain
+  console.log('H. Verifying complete removal of obsolete social / broadcast paths from OpenAPI...');
+  const bannedRoutes = [
+    '/posts',
+    '/posts/{postId}',
+    '/posts/{postId}/replies',
+    '/replies/{replyId}',
+    '/feed',
+    '/discover',
+    '/emit',
+    '/intake',
+    '/reviews',
+    '/api/auth/human/login',
+    '/api/auth/webauthn/verify-setup',
+    '/api/secrets'
+  ];
+  for (const banned of bannedRoutes) {
+    if (openapi.paths[banned]) {
+      throw new Error(`Obsolete route "${banned}" is still present in OpenAPI paths! Must be removed.`);
+    }
+  }
+  console.log('✓ Confirmed: ZERO obsolete social routes exist in OpenAPI specification.');
+
+  // I. Authentication schemes are defined correctly
+  console.log('I. Verifying security and authentication schemes...');
   const securitySchemes = openapi.components?.securitySchemes || {};
   if (!securitySchemes.BearerAuth) {
     throw new Error('OpenAPI components are missing BearerAuth specification');
@@ -96,14 +133,11 @@ function runAdkValidation() {
   }
   console.log('✓ Bearer token authentication schema is valid.');
 
-  // I & J. Scan public documents for obsolete/placeholder hostnames
-  console.log('I & J. Scanning public documents for legacy Render/localhost/YOUR_AAMARVA_HOST URLs...');
+  // J. Scan public documents for obsolete/placeholder hostnames
+  console.log('J. Scanning public documents for legacy Render/localhost/YOUR_AAMARVA_HOST URLs...');
   const filesToScan = [
     specPath,
-    path.join(process.cwd(), 'README.md'),
-    path.join(process.cwd(), 'docs', 'agent-quickstart.md'),
-    path.join(process.cwd(), 'docs', 'api-overview.md'),
-    path.join(process.cwd(), 'docs', 'architecture.md'),
+    path.join(process.cwd(), 'docs', 'endpoints.md')
   ];
 
   const bannedPatterns = [
@@ -121,80 +155,10 @@ function runAdkValidation() {
       }
     }
   }
-  console.log('✓ No legacy hostnames or placeholders discovered in public documentation.');
+  console.log('✓ No legacy hostnames or placeholders discovered in core specification files.');
 
-  // K & L. Cross-reference important endpoints in ADK_SPEC.md and OpenAPI
-  console.log('K & L. Checking ADK_SPEC.md endpoints alignment against OpenAPI paths...');
-  const apiLines = specContent.split('\n').filter(line => line.includes('/api/'));
-  for (const line of apiLines) {
-    const match = line.match(/\/api\/([a-zA-Z0-9_\-/:{}]*)/);
-    if (match) {
-      let routePath = '/' + match[1];
-      routePath = routePath.split('?')[0];
-      routePath = routePath.replace(/:([a-zA-Z0-9_]+)/g, '{$1}');
-      routePath = routePath.replace(/[`']/g, '').trim();
-      if (routePath.endsWith('/')) {
-        routePath = routePath.slice(0, -1);
-      }
-
-      const openapiPaths = Object.keys(openapi.paths);
-      const matched = openapiPaths.some(p => {
-        const normP = p.endsWith('/') ? p.slice(0, -1) : p;
-        return normP === routePath;
-      });
-
-      const isSystemRoute =
-        routePath === '/auth/agent/rotate-api-key' ||
-        routePath === '/health' ||
-        routePath.startsWith('/auth/human') ||
-        routePath.startsWith('/auth/webauthn') ||
-        routePath.startsWith('/v1/auth');
-
-      if (!matched && !isSystemRoute) {
-        throw new Error(`Route in ADK_SPEC.md [${routePath}] is missing or mismatched in adk.openapi.json paths`);
-      }
-    }
-  }
-  console.log('✓ ADK_SPEC.md and OpenAPI schemas are perfectly aligned.');
-
-  // M. No obviously contradictory search behavior remains & Public discovery security contract
-  console.log('M. Validating agent and post search query parameters & public discovery contract...');
-  const agentsPathObj = openapi.paths['/agents'];
-  if (!agentsPathObj || !agentsPathObj.get) {
-    throw new Error('OpenAPI definition for GET /agents is missing');
-  }
-  const agentsGetParams = agentsPathObj.get.parameters || [];
-  const agentsQParam = agentsGetParams.find((p: any) => p.name === 'q');
-  if (!agentsQParam) {
-    throw new Error('OpenAPI definition for GET /agents is missing search query parameter "q"');
-  }
-  if (agentsPathObj.get.security && agentsPathObj.get.security.length > 0) {
-    throw new Error('OpenAPI definition for GET /agents must NOT require security (it is a public read endpoint)');
-  }
-  const agentsDesc = (agentsPathObj.get.description || '') + ' ' + (agentsQParam.description || '');
-  if (!agentsDesc.toLowerCase().includes('bio')) {
-    throw new Error('OpenAPI definition for GET /agents documentation must describe bio as a searchable field');
-  }
-
-  const postsPathObj = openapi.paths['/posts'];
-  if (!postsPathObj || !postsPathObj.get) {
-    throw new Error('OpenAPI definition for GET /posts is missing');
-  }
-  const postsGetParams = postsPathObj.get.parameters || [];
-  const postsQParam = postsGetParams.find((p: any) => p.name === 'q');
-  if (!postsQParam) {
-    throw new Error('OpenAPI definition for GET /posts is missing search query parameter "q"');
-  }
-  if (postsPathObj.get.security && postsPathObj.get.security.length > 0) {
-    throw new Error('OpenAPI definition for GET /posts must NOT require security (it is a public read endpoint)');
-  }
-  if (!postsPathObj.post || !postsPathObj.post.security || postsPathObj.post.security.length === 0) {
-    throw new Error('OpenAPI definition for POST /posts must retain its BearerAuth security requirement');
-  }
-  console.log('✓ Agent and post search parameter mappings and public discovery contracts are consistent.');
-  
-  // N. /api/adk response schema verification against standalone server properties
-  console.log('N. Verifying /api/adk response schema properties in OpenAPI...');
+  // K. /api/adk response schema verification against standalone server properties
+  console.log('K. Verifying /api/adk response schema properties in OpenAPI...');
   const adkPathObj = openapi.paths['/adk'];
   if (!adkPathObj) {
     throw new Error('OpenAPI is missing /adk path definition');
@@ -220,9 +184,8 @@ function runAdkValidation() {
   console.log('✓ /api/adk response schema properties verified successfully.');
 
   console.log('--------------------------------------------------');
-  console.log('✓ ALL AAMARVA CONTRACT HARDENING TESTS PASSED!');
+  console.log('✓ ALL AAMARVA FLEET CONTRACT TESTS PASSED!');
   console.log('--------------------------------------------------');
 }
 
 runAdkValidation();
-

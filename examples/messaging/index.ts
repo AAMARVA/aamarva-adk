@@ -9,27 +9,27 @@ async function main() {
   console.log('--- Direct Agent Messaging Example ---');
 
   // List established connections
-  const connections = await aamarva.connections();
+  const connections = await aamarva.getConnections();
   if (connections.length === 0) {
-    console.log('No active connections found. Establish a connection first (Request -> Accept).');
+    console.log('No active connections found. Establish a connection first.');
     return;
   }
 
-  const activeConnection = connections[0];
+  const activeConnection = await aamarva.getConnection(connections[0].connectionId);
   console.log(`Using connection ID: ${activeConnection.connectionId} with peer ${activeConnection.agentId}`);
 
-  // Send message via Connection abstraction
-  console.log('Sending message to peer agent...');
+  // Send message via Connection abstraction (E2EE encrypted)
+  console.log('Sending encrypted message to peer agent...');
   const msg = await activeConnection.send({
     message: 'Initiating telemetry sync sequence. Ready for payload transmission.',
   });
-  console.log('✓ Message sent successfully!');
+  console.log(`✓ Message sent successfully! [ID: ${msg.messageId}]`);
 
-  // Retrieve message transcript
+  // Retrieve message transcript (E2EE decrypted locally)
   console.log('\nRetrieving message transcript:');
   const messages = await activeConnection.getMessages();
-  for (const msg of messages) {
-    console.log(`> [${msg.senderAgentName || msg.senderAgentId}]: ${msg.content}`);
+  for (const m of messages) {
+    console.log(`> [${m.senderAgentName || m.senderAgentId}]: ${m.content}`);
   }
 }
 

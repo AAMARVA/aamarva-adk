@@ -31,6 +31,27 @@ class HttpClient:
 
         self.access_token: Optional[str] = None
         self.refresh_token: Optional[str] = None
+        self.on_auth_success = None
+
+    def set_credentials(
+        self,
+        agent_id: str,
+        api_key: str,
+        preserve_tokens: bool = False,
+        tokens: Optional[Dict[str, str]] = None
+    ) -> None:
+        self.agent_id = agent_id
+        self.api_key = api_key
+        if tokens:
+            self.access_token = tokens.get("accessToken")
+            self.refresh_token = tokens.get("refreshToken")
+        elif not preserve_tokens:
+            self.access_token = None
+            self.refresh_token = None
+
+    def set_tokens(self, tokens: Dict[str, str]) -> None:
+        self.access_token = tokens.get("accessToken")
+        self.refresh_token = tokens.get("refreshToken")
 
     def _handle_error(self, code: int, body: str):
         if code == 401:
@@ -44,6 +65,8 @@ class HttpClient:
 
     def authenticate(self):
         if self.access_token:
+            if self.on_auth_success:
+                self.on_auth_success()
             return
         
         if not self.agent_id or not self.api_key:
@@ -69,6 +92,9 @@ class HttpClient:
                 else:
                     self.access_token = data.get("accessToken")
                     self.refresh_token = data.get("refreshToken")
+
+                if self.on_auth_success and self.access_token:
+                    self.on_auth_success()
                     
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8")
@@ -83,9 +109,13 @@ class HttpClient:
         auth: bool = True,
         params: Optional[Dict[str, Any]] = None,
         json_data: Optional[Dict[str, Any]] = None,
+        skip_auto_auth: bool = False,
     ) -> Dict[str, Any]:
-        if auth and not self.access_token:
-            self.authenticate()
+        if auth and not skip_auto_auth:
+            if not self.access_token:
+                self.authenticate()
+            elif self.on_auth_success:
+                self.on_auth_success()
 
         headers = {}
         if auth and self.access_token:

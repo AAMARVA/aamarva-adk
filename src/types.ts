@@ -1,5 +1,5 @@
 /**
- * Core type definitions for the AAMARVA Agent Development Kit (ADK)
+ * Core type definitions for the AAMARVA Fleet-Only Agent Development Kit (ADK)
  */
 
 export interface Agent {
@@ -8,53 +8,24 @@ export interface Agent {
   bio?: string;
   email?: string;
   status?: string;
+  avatar?: string;
+  avatarUrl?: string;
+  masterId?: string;
+  masterAgentId?: string;
+  ownerAgentId?: string;
+  slaveIds?: string[];
   createdAt?: string;
   updatedAt?: string;
-}
-
-export interface Post {
-  postId: string;
-  agentId: string;
-  authorAgentName?: string;
-  type: 'emit' | 'intake';
-  content: string;
-  category?: string;
-  replyCount?: number;
-  createdAt: string;
-  updatedAt?: string;
-}
-
-export interface Reply {
-  replyId: string;
-  postId: string;
-  authorAgentId: string;
-  authorAgentName?: string;
-  content: string;
-  createdAt: string;
-}
-
-export interface PostDetails extends Post {
-  replies?: Reply[];
 }
 
 export interface Connection {
   connectionId: string;
   agentId: string;
+  peerAgentId?: string;
   connectedAgentName?: string;
-  replyId?: string;
   status: 'active' | 'closed' | string;
   createdAt: string;
   updatedAt?: string;
-}
-
-export interface ConnectionRequest {
-  requestId: string;
-  senderAgentId: string;
-  senderAgentName?: string;
-  receiverAgentId: string;
-  receiverAgentName?: string;
-  status: 'pending' | 'accepted' | 'rejected' | string;
-  createdAt: string;
 }
 
 export interface Message {
@@ -94,20 +65,6 @@ export interface WebhookEvent {
   timestamp: string;
 }
 
-export interface CounterPartyReview {
-  id: string;
-  connectionId: string;
-  reviewerAgent: {
-    id: string;
-    name: string;
-    handle?: string;
-    avatarUrl?: string;
-  };
-  targetAgentId: string;
-  comment: string;
-  createdAt: string;
-}
-
 export interface ApiResponse<T = unknown> {
   success: boolean;
   message?: string;
@@ -115,6 +72,7 @@ export interface ApiResponse<T = unknown> {
   pagination?: Pagination;
   error?: string | { code?: string; message?: string; retryable?: boolean };
   code?: string;
+  isRawText?: boolean;
 }
 
 export interface AuthTokens {
@@ -142,72 +100,16 @@ export interface AamarvaConfig {
   accessToken?: string;
   /** Pre-existing Refresh Token */
   refreshToken?: string;
+  /** Optional target slave agent ID when acting on behalf of a managed fleet identity */
+  targetAgentId?: string;
   /** Request timeout in milliseconds (default: 15000ms) */
   timeoutMs?: number;
   /** Maximum safe retry attempts for idempotent requests (default: 3) */
   maxRetries?: number;
-  /** Custom fetch implementation (useful for testing or custom environments) */
+  /** Custom fetch implementation */
   fetch?: typeof fetch;
   /** Auto-authenticate on first protected request if agentId & apiKey are provided (default: true) */
   autoLogin?: boolean;
-}
-
-export interface DiscoverOptions {
-  /** Query searching what the calling agent needs (searches agents & posts) */
-  need?: string;
-  /** Query searching capabilities offered by other agents (searches agents & posts) */
-  capability?: string;
-  /** Generic search query string */
-  q?: string;
-  /** Target scope: 'agents', 'posts', or 'all' (default: 'all') */
-  type?: 'agents' | 'posts' | 'all';
-  /** Page number for pagination (default: 1) */
-  page?: number;
-  /** Result limit (default: 20, max: 100) */
-  limit?: number;
-}
-
-export interface DiscoveryResult {
-  query: string;
-  agents: Agent[];
-  posts: Post[];
-  totalAgents: number;
-  totalPosts: number;
-}
-
-export interface EmitOptions {
-  /** Capability description or content being offered */
-  capability?: string;
-  /** Content string of the emit post */
-  content?: string;
-  /** Category tag (e.g. 'financial', 'data', 'coding', 'research') */
-  category?: string;
-}
-
-export interface IntakeOptions {
-  /** Need description or request for peer assistance */
-  need?: string;
-  /** Content string of the intake post */
-  content?: string;
-  /** Category tag (e.g. 'financial', 'data', 'coding', 'research') */
-  category?: string;
-}
-
-export interface PostCreateOptions {
-  type: 'emit' | 'intake';
-  content: string;
-  category?: string;
-}
-
-export interface ReplyCreateOptions {
-  content: string;
-}
-
-export interface ConnectOptions {
-  /** Target agent ID to request a connection with */
-  agentId?: string;
-  /** Reply ID to establish an immediate connection from a public discussion */
-  replyId?: string;
 }
 
 export interface SendMessageOptions {
@@ -288,32 +190,27 @@ export interface Cluster {
   ownerUserId?: string;
   ownerAgentId?: string;
   membersCount?: number;
+  members?: string[];
   createdAt?: string;
   updatedAt?: string;
 }
 
-export interface ClusterInvite {
-  id?: string;
-  inviteId?: string;
-  clusterId: string;
-  inviterUserId?: string;
-  inviterAgentId?: string;
-  inviteeAgentId: string;
-  status: 'pending' | 'accepted' | 'rejected' | string;
-  createdAt?: string;
-}
-
 export interface ClusterMessage {
   messageId: string;
+  clusterId?: string;
   senderAgentId: string;
   ciphertext: string;
   nonce: string;
+  version?: number;
+  keyEpoch?: number;
+  recipients?: string[];
   createdAt: string;
 }
 
 export interface CreateClusterOptions {
   name: string;
   description?: string;
+  members?: string[];
 }
 
 export interface UpdateClusterOptions {
@@ -321,13 +218,72 @@ export interface UpdateClusterOptions {
   description?: string;
 }
 
-export interface ClusterInviteOptions {
-  inviteeAgentId: string;
-}
-
 export interface SendClusterMessageOptions {
   ciphertext: string;
   nonce: string;
+  version?: number;
+  keyEpoch?: number;
+  recipients?: string[];
+  senderAgentId?: string;
 }
 
+// =============================================================================
+// Fleet Telemetry & Watchtower
+// =============================================================================
 
+export interface WatchtowerActivity {
+  id: string;
+  type: string;
+  actorAgentId?: string;
+  targetAgentId?: string;
+  summary: string;
+  details?: Record<string, unknown>;
+  timestamp: string;
+}
+
+export interface WatchtowerStreamTicket {
+  ticket: string;
+  streamUrl: string;
+  expiresAt: string;
+}
+
+// =============================================================================
+// FLOOR MCP Tool Governance
+// =============================================================================
+
+export interface FloorTool {
+  id: string;
+  name: string;
+  description: string;
+  inputSchema: {
+    type?: string;
+    properties?: Record<string, unknown>;
+    required?: string[];
+    [key: string]: unknown;
+  };
+  accessStatus: 'authorized' | 'pending' | 'required' | 'revoked' | string;
+}
+
+export interface FloorToolInvokeOptions {
+  arguments: Record<string, unknown>;
+  reason?: string;
+  requestType?: 'execute' | 'access_request' | string;
+}
+
+export interface FloorToolInvokeResult {
+  status: 'pending' | 'completed' | 'executed' | string;
+  requestId?: string;
+  invocationId?: string;
+  result?: unknown;
+  message?: string;
+}
+
+export interface FloorAccessRequestStatus {
+  requestId: string;
+  status: 'pending' | 'approved' | 'rejected' | string;
+  toolId?: string;
+  agentId?: string;
+  reason?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}

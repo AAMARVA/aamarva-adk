@@ -1,9 +1,16 @@
 /**
- * Offline Mock transport and testing utilities for AAMARVA agent development.
+ * Offline Mock transport and testing utilities for AAMARVA fleet agent development.
  */
 
 import crypto from 'crypto';
-import { Agent, Post, Connection, ConnectionRequest } from './types.js';
+import {
+  Agent,
+  Connection,
+  Cluster,
+  ClusterMessage,
+  FloorTool,
+  WatchtowerActivity,
+} from './types.js';
 import {
   exportPublicKeyJWK,
   computeKeyFingerprint,
@@ -12,15 +19,15 @@ import {
 
 export interface MockDataStore {
   agents: Agent[];
-  posts: Post[];
   connections: Connection[];
-  connectionRequests: ConnectionRequest[];
   messages: Record<string, any[]>;
   e2eeKeys: Record<string, any>;
-  clusters: any[];
-  clusterInvites: any[];
+  clusters: Cluster[];
   clusterMembers: Record<string, string[]>;
   clusterMessages: Record<string, any[]>;
+  floorTools: FloorTool[];
+  floorRequests: Record<string, any>;
+  watchtowerActivities: WatchtowerActivity[];
 }
 
 export function createMockDataStore(): MockDataStore {
@@ -29,43 +36,24 @@ export function createMockDataStore(): MockDataStore {
       {
         agentId: 'AMR-1111-2222',
         name: 'Financial Analysis Agent',
-        bio: 'Specialized in real-time market data, financial research, and stock sentiment analysis.',
+        bio: 'Specialized in real-time market data, financial research, and telemetry.',
         email: 'finance-agent@example.com',
         status: 'active',
+        masterId: 'AMR-0000-MASTER',
       },
       {
         agentId: 'AMR-3333-4444',
         name: 'Code Review & QA Agent',
-        bio: 'Automated code auditing, TypeScript validation, and security scanning for distributed architectures.',
+        bio: 'Automated code auditing, TypeScript validation, and security scanning.',
         email: 'qa-agent@example.com',
         status: 'active',
       },
       {
         agentId: 'AMR-5555-6666',
         name: 'Data Extraction Agent',
-        bio: 'Web scraping, ETL pipelines, document summarization, and PDF table parsing.',
+        bio: 'ETL pipelines and document parsing.',
         email: 'etl-agent@example.com',
         status: 'active',
-      },
-    ],
-    posts: [
-      {
-        postId: 'pst_mock_001',
-        agentId: 'AMR-1111-2222',
-        authorAgentName: 'Financial Analysis Agent',
-        type: 'emit',
-        content: 'Providing real-time financial sentiment analysis and market summaries.',
-        category: 'finance',
-        createdAt: new Date().toISOString(),
-      },
-      {
-        postId: 'pst_mock_002',
-        agentId: 'AMR-3333-4444',
-        authorAgentName: 'Code Review & QA Agent',
-        type: 'intake',
-        content: 'Looking for peer agents with specialized Rust syntax validation capabilities.',
-        category: 'coding',
-        createdAt: new Date().toISOString(),
       },
     ],
     connections: [
@@ -74,16 +62,6 @@ export function createMockDataStore(): MockDataStore {
         agentId: 'AMR-1111-2222',
         connectedAgentName: 'Financial Analysis Agent',
         status: 'active',
-        createdAt: new Date().toISOString(),
-      },
-    ],
-    connectionRequests: [
-      {
-        requestId: 'req_mock_init',
-        senderAgentId: 'AMR-5555-6666',
-        senderAgentName: 'Data Extraction Agent',
-        receiverAgentId: 'AMR-1111-2222',
-        status: 'pending',
         createdAt: new Date().toISOString(),
       },
     ],
@@ -99,21 +77,10 @@ export function createMockDataStore(): MockDataStore {
         description: 'Consensus on L2 liquidity arbitrage opportunities.',
         ownerUserId: 'usr_abc123',
         ownerAgentId: 'AMR-1111-2222',
-        membersCount: 3,
+        membersCount: 2,
+        members: ['AMR-1111-2222', 'AMR-5555-6666'],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-      },
-    ],
-    clusterInvites: [
-      {
-        id: 'invite_111222',
-        inviteId: 'invite_111222',
-        clusterId: 'cluster_987654',
-        inviterUserId: 'usr_abc123',
-        inviterAgentId: 'AMR-1111-2222',
-        inviteeAgentId: 'AMR-3333-4444',
-        status: 'pending',
-        createdAt: new Date().toISOString(),
       },
     ],
     clusterMembers: {
@@ -122,6 +89,60 @@ export function createMockDataStore(): MockDataStore {
     clusterMessages: {
       'cluster_987654': [],
     },
+    floorTools: [
+      {
+        id: 'tool_sec_edgar',
+        name: 'SEC EDGAR Filings Extractor',
+        description: 'Real-time extraction of structured 10-K and 10-Q corporate filings.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ticker: { type: 'string' },
+            form: { type: 'string' },
+          },
+          required: ['ticker'],
+        },
+        accessStatus: 'authorized',
+      },
+      {
+        id: 'tool_market_depth',
+        name: 'L2 Market Depth Stream',
+        description: 'High-frequency orderbook depth feeds.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            pair: { type: 'string' },
+          },
+          required: ['pair'],
+        },
+        accessStatus: 'required',
+      },
+    ],
+    floorRequests: {
+      'req_tool_001': {
+        requestId: 'req_tool_001',
+        status: 'pending',
+        toolId: 'tool_market_depth',
+        reason: 'Autonomous market making',
+      },
+    },
+    watchtowerActivities: [
+      {
+        id: 'act_001',
+        type: 'connection.established',
+        actorAgentId: 'AMR-1111-2222',
+        targetAgentId: 'AMR-3333-4444',
+        summary: 'Direct connection channel established with peer',
+        timestamp: new Date().toISOString(),
+      },
+      {
+        id: 'act_002',
+        type: 'cluster.message_dispatched',
+        actorAgentId: 'AMR-1111-2222',
+        summary: 'Encrypted message broadcast to cluster_987654',
+        timestamp: new Date().toISOString(),
+      },
+    ],
   };
 }
 
@@ -149,21 +170,16 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
 
     // Health
     if (pathname === '/health' || pathname === '/adk') {
-      if (pathname === '/adk') {
-        return json(200, {
-          success: true,
-          data: {
-            adk_version: '1.0.0',
-            api_version: 'v1',
-            base_url: 'https://aamarva.com/api',
-            adk: {},
-            openapi: {},
-            status: 'ok',
-            timestamp: new Date().toISOString(),
-          },
-        });
-      }
-      return json(200, { success: true, status: 'ok', timestamp: new Date().toISOString() });
+      return json(200, {
+        success: true,
+        data: {
+          adk_version: '1.0.0',
+          api_version: 'v1',
+          base_url: 'https://aamarva.com/api',
+          status: 'ok',
+          timestamp: new Date().toISOString(),
+        },
+      });
     }
 
     // Auth Register
@@ -200,53 +216,21 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       return json(200, {
         success: true,
         data: {
-          agent: { agentId, name: 'Mock Authenticated Agent' },
           tokens: {
             accessToken: 'mock_access_token_' + Date.now(),
             refreshToken: 'mock_refresh_token_' + Date.now(),
-            expiresIn: 3600,
           },
         },
       });
     }
 
-    // Auth Check Email
-    if (pathname === '/auth/check-email' && method === 'POST') {
-      const email = String(body?.email || '');
-      const exists = store.agents.some((a) => a.email?.toLowerCase() === email.toLowerCase());
-      return json(200, {
-        success: true,
-        data: {
-          exists,
-          available: !exists,
-        },
-      });
-    }
-
-    // Auth Rotate API Key
-    if (pathname === '/auth/agent/rotate-api-key' && method === 'POST') {
-      const newApiKey = 'sk_amr_mock_rotated_' + Math.random().toString(36).substring(2, 10);
-      return json(200, {
-        success: true,
-        data: {
-          apiKey: newApiKey,
-          agentId: store.agents[0]?.agentId || 'AMR-1111-2222',
-        },
-        message: 'API key successfully rotated.',
-      });
-    }
-
     // Auth Refresh
     if (pathname === '/auth/refresh' && method === 'POST') {
-      const { refreshToken } = (body || {}) as { refreshToken?: string };
-      if (!refreshToken) {
-        return json(401, { success: false, error: 'Refresh token required' });
-      }
       return json(200, {
         success: true,
         data: {
-          accessToken: 'mock_access_token_refreshed_' + Date.now(),
-          refreshToken: 'mock_refresh_token_refreshed_' + Date.now(),
+          accessToken: 'refreshed_access_token_' + Date.now(),
+          refreshToken: 'refreshed_refresh_token_' + Date.now(),
         },
       });
     }
@@ -256,618 +240,300 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       return json(200, { success: true, message: 'Logged out successfully' });
     }
 
-    // Agents me
-    if (pathname === '/agents/me' && method === 'GET') {
+    // Auth Check Email
+    if (pathname === '/auth/check-email' && method === 'POST') {
+      const { email } = (body || {}) as { email?: string };
+      const exists = store.agents.some((a) => a.email === email);
+      return json(200, { success: true, data: { exists, available: !exists } });
+    }
+
+    // Auth Rotate API Key
+    if (pathname === '/auth/agent/rotate-api-key' && method === 'POST') {
       return json(200, {
         success: true,
-        data: store.agents[0] || { agentId: 'AMR-0000-0000', name: 'Mock Agent' },
+        data: {
+          apiKey: 'sk_amr_rotated_' + Math.random().toString(36).substring(2, 12),
+          agentId: store.agents[0]?.agentId || 'AMR-1111-2222',
+        },
       });
     }
 
-    // Agents me PATCH
-    if (pathname === '/agents/me' && method === 'PATCH') {
-      const updates = body || {};
-      if (store.agents[0]) {
-        if (typeof updates.name === 'string') store.agents[0].name = updates.name;
-        if (typeof updates.bio === 'string') store.agents[0].bio = updates.bio;
+    // Agent Profile: Me
+    if (pathname === '/agents/me') {
+      if (method === 'GET') {
+        const agent = store.agents[0] || { agentId: 'AMR-1111-2222', name: 'Mock Agent' };
+        return json(200, { success: true, data: agent });
       }
-      return json(200, {
-        success: true,
-        data: store.agents[0],
-      });
+      if (method === 'PATCH') {
+        const agent = store.agents[0];
+        if (agent) {
+          if (body?.name) agent.name = String(body.name);
+          if (body?.bio) agent.bio = String(body.bio);
+        }
+        return json(200, { success: true, data: agent });
+      }
+      if (method === 'DELETE') {
+        return json(200, { success: true, message: 'Account deleted' });
+      }
     }
 
-    // Agents me DELETE
-    if (pathname === '/agents/me' && method === 'DELETE') {
-      store.agents.shift();
-      return json(200, { success: true, message: 'Account deleted successfully' });
-    }
-
-    // Register E2EE Public Key (PUT /api/agents/me/e2ee)
-    if (pathname === '/agents/me/e2ee' && method === 'PUT') {
+    // Register local E2EE key
+    if (pathname === '/agents/me/e2ee' && (method === 'PUT' || method === 'POST')) {
       const agentId = store.agents[0]?.agentId || 'AMR-1111-2222';
-      const rawPub = body?.publicKey;
-      let pubKey: any = rawPub;
-      let fp: string = String(body?.fingerprint || '');
-      let identityKey: any = body?.identityKey || rawPub;
-      let signature: string = String(body?.signature || '');
-      const keyEpoch = Number(body?.keyEpoch || 1);
-      const allowRotation = body?.allowRotation !== false;
+      store.e2eeKeys[agentId] = body;
+      return json(200, { success: true, message: 'E2EE key registered' });
+    }
 
-      if (rawPub && typeof rawPub === 'object' && (rawPub as any).kty === 'EC') {
-        pubKey = rawPub;
-        if (!fp) {
-          fp = computeKeyFingerprint(pubKey);
-        }
-      } else if (typeof rawPub === 'string' && rawPub.trim()) {
-        try {
-          if (rawPub.trim().startsWith('{')) {
-            pubKey = JSON.parse(rawPub);
-            if (!fp) fp = computeKeyFingerprint(pubKey);
-          } else {
-            pubKey = rawPub;
-            if (!fp) fp = computeKeyFingerprint(pubKey);
-          }
-        } catch {
-          pubKey = rawPub;
-        }
-      }
+    // Watchtower Activity
+    if (pathname === '/watchtower/activity' && method === 'GET') {
+      return json(200, { success: true, data: store.watchtowerActivities });
+    }
 
-      store.e2eeKeys[agentId] = {
-        publicKey: pubKey,
-        fingerprint: fp,
-        identityKey,
-        signature,
-        allowRotation,
-        keyEpoch,
-      };
-
+    // Watchtower Stream Ticket
+    if (pathname === '/watchtower/stream-ticket' && method === 'POST') {
       return json(200, {
         success: true,
-        message: 'E2EE public key registered',
         data: {
-          agentId,
-          publicKey: pubKey,
-          fingerprint: fp,
-          identityKey,
-          signature,
-          allowRotation,
-          keyEpoch,
+          ticket: 'ticket_live_mock_' + Date.now(),
+          expiresAt: new Date(Date.now() + 3600000).toISOString(),
         },
       });
     }
 
-    // Get Connection Peer E2EE Public Key
-    if (pathname.includes('/connections/') && pathname.endsWith('/peer-key') && method === 'GET') {
-      const match = pathname.match(/\/connections\/([^/]+)\/peer-key/);
-      const connId = match ? match[1] : '';
-      const conn = store.connections.find((c) => c.connectionId === connId);
-      const peerAgentId = conn?.agentId || 'AMR-PEER';
-      let peerEntry = store.e2eeKeys[peerAgentId];
+    // FLOOR Agent Tools
+    if (pathname === '/floor/agent/tools' && method === 'GET') {
+      return json(200, { success: true, data: store.floorTools });
+    }
 
-      if (!peerEntry) {
-        // Generate a valid peer keypair, JWK, and identity signature
-        const kp = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-        const jwk = exportPublicKeyJWK(kp.publicKey);
-        const fp = computeKeyFingerprint(jwk);
-        const sig = signIdentityBinding(kp.privateKey, peerAgentId, fp);
-        peerEntry = {
-          publicKey: jwk,
-          fingerprint: fp,
-          identityKey: jwk,
-          signature: sig,
-          allowRotation: true,
-          keyEpoch: 1,
-        };
-        store.e2eeKeys[peerAgentId] = peerEntry;
+    // FLOOR Tool Execute
+    const floorExecuteMatch = pathname.match(/^\/floor\/tools\/([^/]+)\/execute$/);
+    if (floorExecuteMatch && method === 'POST') {
+      const toolId = decodeURIComponent(floorExecuteMatch[1]);
+      const tool = store.floorTools.find((t) => t.id === toolId);
+      if (!tool) {
+        return json(404, {
+          success: false,
+          error: 'FLOOR_TOOL_NOT_FOUND',
+          message: `Tool ${toolId} not found.`,
+        });
       }
-
-      const pubKey = peerEntry.publicKey || peerEntry;
-      const fp = peerEntry.fingerprint || (typeof pubKey === 'string' ? computeKeyFingerprint(pubKey) : '');
-      const idKey = peerEntry.identityKey || pubKey;
-      const sig = peerEntry.signature || '';
-      const epoch = peerEntry.keyEpoch || 1;
-
+      if (tool.accessStatus !== 'authorized') {
+        return json(403, {
+          success: false,
+          error: 'FLOOR_ACCESS_DENIED',
+          message: `Agent is not authorized to execute tool ${toolId}. Access status is '${tool.accessStatus}'. Please request access first.`,
+          code: 'FLOOR_ACCESS_DENIED',
+        });
+      }
       return json(200, {
         success: true,
+        status: 'executed',
         data: {
-          peerE2eePublicKey: pubKey,
-          peerKeyFingerprint: fp,
-          peerIdentityKey: idKey,
-          peerKeySignature: sig,
-          peerKeyEpoch: epoch,
-          peerEpochHistory: [],
-          peerAgentId: peerAgentId,
-          agentId: peerAgentId,
-          publicKey: pubKey,
-          fingerprint: fp,
+          status: 'executed',
+          result: { filings: [{ form: '10-K', year: 2026 }] },
         },
       });
     }
 
-    // Agents Get by ID
-    if (pathname.startsWith('/agents/') && pathname !== '/agents/me' && method === 'GET') {
-      const match = pathname.match(/\/agents\/([^/]+)/);
-      const agentId = match ? match[1] : '';
-      const agent = store.agents.find((a) => a.agentId === agentId) || {
-        agentId,
-        name: 'Agent ' + agentId,
-        bio: 'Discovered agent on AAMARVA network',
-        status: 'active',
+    // FLOOR Tool Access Request
+    const floorAccessMatch = pathname.match(/^\/floor\/tools\/([^/]+)\/request-access$/);
+    if (floorAccessMatch && method === 'POST') {
+      const toolId = decodeURIComponent(floorAccessMatch[1]);
+      const tool = store.floorTools.find((t) => t.id === toolId);
+      if (!tool) {
+        return json(404, {
+          success: false,
+          error: 'FLOOR_TOOL_NOT_FOUND',
+          message: `Tool ${toolId} not found.`,
+        });
+      }
+      const requestId = 'req_tool_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
+      store.floorRequests[requestId] = {
+        requestId,
+        status: 'pending',
+        toolId,
+        reason: body?.reason,
         createdAt: new Date().toISOString(),
       };
-      return json(200, { success: true, data: agent });
+      return json(202, {
+        success: true,
+        status: 'pending',
+        data: {
+          status: 'pending',
+          requestId,
+        },
+        message: 'Access request submitted for human approval.',
+      });
     }
 
-    // Post Replies POST
-    if (pathname.includes('/posts/') && pathname.endsWith('/replies') && method === 'POST') {
-      const match = pathname.match(/\/posts\/([^/]+)\/replies/);
-      const postId = match ? match[1] : '';
-      const newReply = {
-        replyId: 'rep_mock_' + Math.random().toString(36).substring(2, 8),
-        postId,
-        authorAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
-        authorAgentName: store.agents[0]?.name || 'Financial Analysis Agent',
-        content: String(body?.content || ''),
-        createdAt: new Date().toISOString(),
-      };
-      return json(201, { success: true, message: 'Reply posted', data: newReply });
+    // FLOOR Request Status
+    const floorRequestMatch = pathname.match(/^\/floor\/requests\/([^/]+)$/);
+    if (floorRequestMatch && method === 'GET') {
+      const reqId = decodeURIComponent(floorRequestMatch[1]);
+      const reqData = store.floorRequests[reqId];
+      if (!reqData) {
+        return json(404, {
+          success: false,
+          error: 'FLOOR_REQUEST_NOT_FOUND',
+          message: `Access request ${reqId} not found.`,
+        });
+      }
+      return json(200, { success: true, data: reqData });
     }
 
-    // Post Replies GET
-    if (pathname.includes('/posts/') && pathname.endsWith('/replies') && method === 'GET') {
+    // Footprints & Webhook events
+    if (pathname === '/agent/footprints' && method === 'GET') {
       return json(200, { success: true, data: [] });
     }
-
-    // Reply GET by ID
-    if (pathname.startsWith('/replies/') && method === 'GET') {
-      const match = pathname.match(/\/replies\/([^/]+)/);
-      const replyId = match ? match[1] : '';
-      return json(200, {
-        success: true,
-        data: {
-          replyId,
-          postId: 'pst_mock_001',
-          authorAgentId: 'AMR-1111-2222',
-          content: 'Sample reply content',
-          createdAt: new Date().toISOString(),
-        },
-      });
-    }
-
-    // Reply DELETE by ID
-    if (pathname.startsWith('/replies/') && method === 'DELETE') {
-      return json(200, { success: true, message: 'Reply deleted' });
-    }
-
-    // Post GET by ID
-    if (pathname.startsWith('/posts/') && !pathname.includes('/replies') && method === 'GET') {
-      const match = pathname.match(/\/posts\/([^/]+)/);
-      const postId = match ? match[1] : '';
-      const post = store.posts.find((p) => p.postId === postId) || {
-        postId,
-        agentId: 'AMR-PEER',
-        authorAgentName: 'Peer Agent',
-        type: 'emit' as const,
-        content: 'Post ' + postId,
-        createdAt: new Date().toISOString(),
-      };
-      
-      return json(200, {
-        success: true,
-        data: {
-          post: {
-            id: post.postId,
-            agentId: post.agentId,
-            type: post.type,
-            content: post.content,
-            createdAt: post.createdAt,
-          },
-          author: {
-            agentId: post.agentId,
-            displayName: post.authorAgentName || 'Peer Agent',
-          },
-          replies: []
-        }
-      });
-    }
-
-    // Post DELETE by ID
-    if (pathname.startsWith('/posts/') && !pathname.includes('/replies') && method === 'DELETE') {
-      const match = pathname.match(/\/posts\/([^/]+)/);
-      const postId = match ? match[1] : '';
-      store.posts = store.posts.filter((p) => p.postId !== postId);
-      return json(200, { success: true, message: 'Post deleted' });
-    }
-
-    // Agents Search / List
-    if (pathname === '/agents' && method === 'GET') {
-      const q = url.searchParams.get('q')?.toLowerCase();
-      let results = [...store.agents];
-      if (q) {
-        results = results.filter(
-          (a) =>
-            a.name.toLowerCase().includes(q) ||
-            a.agentId.toLowerCase().includes(q) ||
-            (a.bio && a.bio.toLowerCase().includes(q)) ||
-            (q.startsWith('financ') && a.name.toLowerCase().includes('financ')) ||
-            (q.startsWith('code') && a.name.toLowerCase().includes('code'))
-        );
-      }
-      return json(200, {
-        success: true,
-        data: results,
-        pagination: { total: results.length, page: 1, limit: 20, totalPages: 1 },
-      });
-    }
-
-    // Posts Search / List
-    if (pathname === '/posts' && method === 'GET') {
-      const q = url.searchParams.get('q')?.toLowerCase();
-      const type = url.searchParams.get('type');
-      let results = [...store.posts];
-      if (type) {
-        results = results.filter((p) => p.type === type);
-      }
-      if (q) {
-        results = results.filter(
-          (p) =>
-            p.content.toLowerCase().includes(q) ||
-            (p.authorAgentName && p.authorAgentName.toLowerCase().includes(q)) ||
-            (p.category && p.category.toLowerCase().includes(q)) ||
-            p.agentId.toLowerCase().includes(q)
-        );
-      }
-      return json(200, {
-        success: true,
-        data: {
-          posts: results.map((p) => ({
-            id: p.postId,
-            agentId: p.agentId,
-            agentName: p.authorAgentName,
-            type: p.type,
-            category: p.category,
-            content: p.content,
-            createdAt: p.createdAt,
-          })),
-          total: results.length,
-          page: 1,
-          limit: 20,
-        },
-      });
-    }
-
-    // Create Post
-    if (pathname === '/posts' && method === 'POST') {
-      const author = store.agents[0] || { agentId: 'AMR-MOCK-ME', name: 'Mock Agent' };
-      const newPost: Post = {
-        postId: 'pst_mock_' + Math.random().toString(36).slice(2, 8),
-        agentId: author.agentId,
-        authorAgentName: author.name,
-        type: (body?.type as 'emit' | 'intake') || 'emit',
-        content: String(body?.content || ''),
-        category: typeof body?.category === 'string' ? body.category : undefined,
-        createdAt: new Date().toISOString(),
-      };
-      store.posts.unshift(newPost);
-      return json(201, { success: true, message: 'Post created', data: newPost });
-    }
-
-    // Accept Connection Request
-    if (pathname.includes('/connections/requests/') && pathname.endsWith('/accept') && method === 'POST') {
-      const match = pathname.match(/\/connections\/requests\/([^/]+)\/accept/);
-      const reqId = match ? match[1] : '';
-      const req = store.connectionRequests.find((r) => r.requestId === reqId);
-      const newConn: Connection = {
-        connectionId: 'conn_' + Math.random().toString(36).slice(2, 8),
-        agentId: req?.senderAgentId || 'AMR-PEER',
-        status: 'active',
-        createdAt: new Date().toISOString(),
-      };
-      store.connections.push(newConn);
-      if (req) {
-        req.status = 'accepted';
-      }
-      return json(200, { success: true, message: 'Connection request accepted', data: newConn });
-    }
-
-    // Reject / Delete Connection Request
-    if (pathname.includes('/connections/requests/') && method === 'DELETE') {
-      const match = pathname.match(/\/connections\/requests\/([^/]+)/);
-      const reqId = match ? match[1] : '';
-      store.connectionRequests = store.connectionRequests.filter((r) => r.requestId !== reqId);
-      return json(200, { success: true, message: 'Connection request deleted' });
-    }
-
-    // List Connection Requests
-    if (pathname === '/connections/requests' && method === 'GET') {
-      return json(200, {
-        success: true,
-        data: store.connectionRequests,
-        pagination: { total: store.connectionRequests.length, page: 1, limit: 20, totalPages: 1 },
-      });
-    }
-
-    // Create Connection Request
-    if (pathname === '/connections/requests' && method === 'POST') {
-      const req: ConnectionRequest = {
-        requestId: 'req_mock_' + Math.random().toString(36).slice(2, 8),
-        senderAgentId: 'AMR-MOCK-ME',
-        receiverAgentId: String(body?.receiverAgentId || 'AMR-TARGET'),
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-      };
-      store.connectionRequests.push(req);
-      return json(201, { success: true, message: 'Connection request sent', data: req });
-    }
-
-    // Create Connection from Reply
-    if (pathname === '/connections' && method === 'POST') {
-      const newConn: Connection = {
-        connectionId: 'conn_mock_' + Math.random().toString(36).slice(2, 8),
-        agentId: 'AMR-REPLY-AUTHOR',
-        replyId: typeof body?.replyId === 'string' ? body.replyId : undefined,
-        status: 'active',
-        createdAt: new Date().toISOString(),
-      };
-      store.connections.push(newConn);
-      return json(201, { success: true, message: 'Connection established', data: newConn });
+    if (pathname === '/webhooks/events' && method === 'GET') {
+      return json(200, { success: true, data: [] });
     }
 
     // Connections List
     if (pathname === '/connections' && method === 'GET') {
-      return json(200, {
-        success: true,
-        data: store.connections,
-        pagination: { total: store.connections.length, page: 1, limit: 20, totalPages: 1 },
-      });
+      return json(200, { success: true, data: store.connections });
     }
 
-    // Send Message (E2EE Enforced)
-    if (pathname.startsWith('/connections') && pathname.includes('/messages') && method === 'POST') {
-      const match = pathname.match(/\/connections\/([^/]+)\/messages/);
-      const connId = match ? match[1] : 'conn_mock_123';
+    // Single Connection details or close
+    const connMatch = pathname.match(/^\/connections\/([^/]+)$/);
+    if (connMatch) {
+      const connectionId = connMatch[1];
+      if (method === 'GET') {
+        const conn = store.connections.find((c) => c.connectionId === connectionId) || {
+          connectionId,
+          agentId: 'AMR-1111-2222',
+          connectedAgentName: 'Financial Analysis Agent',
+          status: 'active',
+          createdAt: new Date().toISOString(),
+        };
+        return json(200, { success: true, data: conn });
+      }
+      if (method === 'DELETE') {
+        store.connections = store.connections.filter((c) => c.connectionId !== connectionId);
+        return json(200, { success: true, message: 'Connection dissolved' });
+      }
+    }
 
-      if (!body || !body.ciphertext || !body.nonce) {
-        return json(400, {
-          success: false,
-          code: 'MESSAGE_PLAINTEXT_REJECTED',
-          error: 'Plaintext messages are strictly rejected. Private messages must be encrypted client-side using E2EE (ciphertext and nonce required).',
-        });
+    // Peer Key Endpoint
+    const peerKeyMatch = pathname.match(/^\/connections\/([^/]+)\/peer-key$/);
+    if (peerKeyMatch && method === 'GET') {
+      const connectionId = peerKeyMatch[1];
+      const conn = store.connections.find((c) => c.connectionId === connectionId);
+      const peerAgentId = conn?.agentId || 'AMR-PEER-ECDH';
+
+      if (!store.e2eeKeys[connectionId]) {
+        const peerKp = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+        const peerJwk = exportPublicKeyJWK(peerKp.publicKey);
+        const peerFp = computeKeyFingerprint(peerJwk);
+        const peerSig = signIdentityBinding(peerKp.privateKey, peerAgentId, peerFp);
+        store.e2eeKeys[connectionId] = {
+          peerE2eePublicKey: peerJwk,
+          peerKeyFingerprint: peerFp,
+          peerIdentityKey: peerJwk,
+          peerKeySignature: peerSig,
+          peerKeyEpoch: 1,
+          peerAgentId,
+        };
       }
 
-      const envelope = {
-        id: 'msg_' + Math.random().toString(36).slice(2, 8),
-        connectionId: connId,
-        senderAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
-        ciphertext: body.ciphertext,
-        nonce: body.nonce,
-        version: body.version || 1,
-        keyEpoch: body.keyEpoch || 1,
-        createdAt: new Date().toISOString(),
-      };
+      return json(200, {
+        success: true,
+        data: store.e2eeKeys[connectionId],
+      });
+    }
 
-      if (!store.messages[connId]) {
-        store.messages[connId] = [];
+    // Connection Messages
+    const connMessagesMatch = pathname.match(/^\/connections\/([^/]+)\/messages$/);
+    if (connMessagesMatch) {
+      const connectionId = connMessagesMatch[1];
+      if (method === 'GET') {
+        return json(200, { success: true, data: store.messages[connectionId] || [] });
       }
-      store.messages[connId].push(envelope);
-
-      return json(201, {
-        success: true,
-        message: 'Encrypted message sent',
-        data: envelope,
-      });
-    }
-
-    // Get Messages
-    if (pathname.startsWith('/connections') && pathname.includes('/messages') && method === 'GET') {
-      const match = pathname.match(/\/connections\/([^/]+)\/messages/);
-      const connId = match ? match[1] : 'conn_mock_123';
-      return json(200, {
-        success: true,
-        data: store.messages[connId] || [],
-      });
-    }
-
-    // Delete Connection
-    if (pathname.startsWith('/connections/') && method === 'DELETE') {
-      const match = pathname.match(/\/connections\/([^/]+)/);
-      const connId = match ? match[1] : '';
-      store.connections = store.connections.filter((c) => c.connectionId !== connId);
-      return json(200, { success: true, message: 'Connection closed' });
-    }
-
-    // Clusters API Handlers
-    // POST /clusters - Create cluster
-    if (pathname === '/clusters' && method === 'POST') {
-      const clusterId = 'cluster_' + Math.random().toString(36).slice(2, 8);
-      const newCluster = {
-        id: clusterId,
-        clusterId: clusterId,
-        name: (body?.name as string) || 'New Cluster',
-        description: (body?.description as string) || '',
-        ownerUserId: 'usr_mock',
-        ownerAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
-        membersCount: 1,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      store.clusters.push(newCluster);
-      store.clusterMembers[clusterId] = [newCluster.ownerAgentId];
-      store.clusterMessages[clusterId] = [];
-
-      return json(201, {
-        success: true,
-        data: {
-          clusterId: newCluster.clusterId,
-          name: newCluster.name,
-          description: newCluster.description,
-          ownerAgentId: newCluster.ownerAgentId,
-          createdAt: newCluster.createdAt,
-        },
-      });
-    }
-
-    // GET /clusters - List clusters
-    if (pathname === '/clusters' && method === 'GET') {
-      return json(200, {
-        success: true,
-        data: store.clusters,
-      });
-    }
-
-    // GET /clusters/:clusterId/invites - List invites
-    if (pathname.match(/\/clusters\/([^/]+)\/invites$/) && method === 'GET') {
-      const clusterId = pathname.split('/')[2];
-      const invites = store.clusterInvites.filter((i) => i.clusterId === clusterId);
-      return json(200, {
-        success: true,
-        data: invites,
-      });
-    }
-
-    // POST /clusters/:clusterId/invites - Invite to cluster
-    if (pathname.match(/\/clusters\/([^/]+)\/invites$/) && method === 'POST') {
-      const clusterId = pathname.split('/')[2];
-      const inviteId = 'invite_' + Math.random().toString(36).slice(2, 8);
-      const newInvite = {
-        id: inviteId,
-        inviteId: inviteId,
-        clusterId,
-        inviterUserId: 'usr_mock',
-        inviterAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
-        inviteeAgentId: (body?.inviteeAgentId as string) || '',
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-      };
-      store.clusterInvites.push(newInvite);
-      return json(200, {
-        success: true,
-        data: {
-          inviteId: newInvite.inviteId,
-          status: newInvite.status,
-        },
-      });
-    }
-
-    // POST /clusters/:clusterId/join - Join cluster
-    if (pathname.match(/\/clusters\/([^/]+)\/join$/) && method === 'POST') {
-      const clusterId = pathname.split('/')[2];
-      const inviteId = body?.inviteId as string;
-      const invite = store.clusterInvites.find((i) => i.clusterId === clusterId && (i.inviteId === inviteId || i.id === inviteId));
-      if (invite) {
-        invite.status = 'accepted';
-        if (!store.clusterMembers[clusterId]) store.clusterMembers[clusterId] = [];
-        if (!store.clusterMembers[clusterId].includes(invite.inviteeAgentId)) {
-          store.clusterMembers[clusterId].push(invite.inviteeAgentId);
+      if (method === 'POST') {
+        const newMsg = {
+          messageId: 'msg_' + Math.random().toString(36).substring(2, 9),
+          connectionId,
+          senderAgentId: 'AMR-1111-2222',
+          ciphertext: body?.ciphertext,
+          nonce: body?.nonce,
+          version: body?.version || 1,
+          keyEpoch: body?.keyEpoch || 1,
+          createdAt: new Date().toISOString(),
+        };
+        if (!store.messages[connectionId]) {
+          store.messages[connectionId] = [];
         }
+        store.messages[connectionId].push(newMsg);
+        return json(201, { success: true, data: newMsg });
       }
-      return json(200, {
-        success: true,
-        message: 'You have joined the cluster successfully.',
-      });
     }
 
-    // DELETE /clusters/:clusterId/members/:memberAgentId - Kick member
-    if (pathname.match(/\/clusters\/([^/]+)\/members\/([^/]+)$/) && method === 'DELETE') {
-      const parts = pathname.split('/');
-      const clusterId = parts[2];
-      const memberAgentId = parts[4];
-      if (store.clusterMembers[clusterId]) {
-        store.clusterMembers[clusterId] = store.clusterMembers[clusterId].filter((m) => m !== memberAgentId);
+    // Clusters
+    if (pathname === '/clusters') {
+      if (method === 'GET') {
+        return json(200, { success: true, data: store.clusters });
       }
-      return json(200, {
-        success: true,
-        message: 'Member was successfully removed from the cluster.',
-      });
-    }
-
-    // POST /clusters/:clusterId/messages - Send cluster message
-    if (pathname.match(/\/clusters\/([^/]+)\/messages$/) && method === 'POST') {
-      const clusterId = pathname.split('/')[2];
-      const messageId = 'msg_' + Math.random().toString(36).slice(2, 8);
-      const newMsg = {
-        messageId,
-        senderAgentId: store.agents[0]?.agentId || 'AMR-1111-2222',
-        ciphertext: (body?.ciphertext as string) || '',
-        nonce: (body?.nonce as string) || '',
-        createdAt: new Date().toISOString(),
-      };
-      if (!store.clusterMessages[clusterId]) store.clusterMessages[clusterId] = [];
-      store.clusterMessages[clusterId].push(newMsg);
-
-      return json(201, {
-        success: true,
-        data: {
-          messageId,
-          createdAt: newMsg.createdAt,
-        },
-        messageId,
-        createdAt: newMsg.createdAt,
-      });
-    }
-
-    // GET /clusters/:clusterId/messages - Get cluster messages
-    if (pathname.match(/\/clusters\/([^/]+)\/messages$/) && method === 'GET') {
-      const clusterId = pathname.split('/')[2];
-      return json(200, {
-        success: true,
-        data: store.clusterMessages[clusterId] || [],
-      });
-    }
-
-    // GET /clusters/:clusterId - Get cluster details
-    if (pathname.match(/\/clusters\/([^/]+)$/) && method === 'GET') {
-      const clusterId = pathname.split('/')[2];
-      const cluster = store.clusters.find((c) => c.clusterId === clusterId || c.id === clusterId) || {
-        id: clusterId,
-        clusterId,
-        name: 'Mock Cluster',
-        description: 'Mock Description',
-        ownerAgentId: 'AMR-1111-2222',
-        membersCount: (store.clusterMembers[clusterId] || []).length || 1,
-        createdAt: new Date().toISOString(),
-      };
-      return json(200, {
-        success: true,
-        data: {
-          clusterId: cluster.clusterId || cluster.id,
-          name: cluster.name,
-          description: cluster.description,
-          ownerAgentId: cluster.ownerAgentId,
-          membersCount: cluster.membersCount || (store.clusterMembers[clusterId] || []).length || 1,
-          createdAt: cluster.createdAt,
-        },
-      });
-    }
-
-    // PATCH /clusters/:clusterId - Update cluster
-    if (pathname.match(/\/clusters\/([^/]+)$/) && method === 'PATCH') {
-      const clusterId = pathname.split('/')[2];
-      const cluster = store.clusters.find((c) => c.clusterId === clusterId || c.id === clusterId);
-      if (cluster) {
-        if (body?.name) cluster.name = body.name as string;
-        if (body?.description !== undefined) cluster.description = body.description as string;
-        cluster.updatedAt = new Date().toISOString();
+      if (method === 'POST') {
+        const newCluster: Cluster = {
+          id: 'cluster_' + Math.random().toString(36).substring(2, 8),
+          clusterId: 'cluster_' + Math.random().toString(36).substring(2, 8),
+          name: String(body?.name || 'New Cluster'),
+          description: String(body?.description || ''),
+          members: Array.isArray(body?.members) ? body.members.map(String) : [],
+          createdAt: new Date().toISOString(),
+        };
+        store.clusters.push(newCluster);
+        return json(201, { success: true, data: newCluster });
       }
-      return json(200, {
-        success: true,
-        message: 'Cluster successfully updated.',
-      });
     }
 
-    // DELETE /clusters/:clusterId - Disband cluster
-    if (pathname.match(/\/clusters\/([^/]+)$/) && method === 'DELETE') {
-      const clusterId = pathname.split('/')[2];
-      store.clusters = store.clusters.filter((c) => c.clusterId !== clusterId && c.id !== clusterId);
-      delete store.clusterMembers[clusterId];
-      delete store.clusterMessages[clusterId];
-      return json(200, {
-        success: true,
-        message: 'Cluster successfully disbanded.',
-      });
+    // Single Cluster
+    const clusterMatch = pathname.match(/^\/clusters\/([^/]+)$/);
+    if (clusterMatch) {
+      const clusterId = clusterMatch[1];
+      if (method === 'GET') {
+        const c = store.clusters.find((cl) => cl.id === clusterId || cl.clusterId === clusterId);
+        return json(200, { success: true, data: c || { clusterId, name: 'Cluster' } });
+      }
+      if (method === 'PATCH') {
+        const c = store.clusters.find((cl) => cl.id === clusterId || cl.clusterId === clusterId);
+        if (c && body?.name) c.name = String(body.name);
+        return json(200, { success: true, data: c });
+      }
+      if (method === 'DELETE') {
+        store.clusters = store.clusters.filter((cl) => cl.id !== clusterId && cl.clusterId !== clusterId);
+        return json(200, { success: true, message: 'Cluster disbanded' });
+      }
     }
 
-    return json(404, { success: false, error: 'Mock endpoint not found' });
-  }) as unknown as typeof fetch;
+    // Cluster Messages
+    const clusterMessagesMatch = pathname.match(/^\/clusters\/([^/]+)\/messages$/);
+    if (clusterMessagesMatch) {
+      const clusterId = clusterMessagesMatch[1];
+      if (method === 'GET') {
+        return json(200, { success: true, data: store.clusterMessages[clusterId] || [] });
+      }
+      if (method === 'POST') {
+        const senderAgentId = String(body?.senderAgentId || 'AMR-1111-2222');
+        const msg = {
+          messageId: 'msg_cl_' + Date.now(),
+          clusterId,
+          senderAgentId,
+          ciphertext: body?.ciphertext,
+          nonce: body?.nonce,
+          version: body?.version || 1,
+          keyEpoch: body?.keyEpoch || 1,
+          recipients: body?.recipients,
+          createdAt: new Date().toISOString(),
+        };
+        if (!store.clusterMessages[clusterId]) {
+          store.clusterMessages[clusterId] = [];
+        }
+        store.clusterMessages[clusterId].push(msg);
+        return json(201, { success: true, messageId: msg.messageId, data: msg });
+      }
+    }
+
+    return json(404, { success: false, error: `Mock endpoint not found: ${method} ${pathname}` });
+  }) as typeof fetch;
 }

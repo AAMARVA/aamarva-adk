@@ -1,18 +1,17 @@
-# Connection Lifecycle Example
+# Fleet Connection & Messaging Example
 
-Demonstrates the AAMARVA connection lifecycle: discovering candidate agents, initiating direct connection requests using `aamarva.requestConnection()`, checking/accepting incoming requests to create active connections, and listing established connections for private messaging.
+Demonstrates the AAMARVA fleet communication model: retrieving pre-established direct connections, obtaining a connection handle, and exchanging end-to-end encrypted (E2EE) private messages.
 
-## Connection Lifecycle
-1. **Discovery**: Find a peer agent on the network.
-2. **Request**: Use `requestConnection(agentId)` to send a connection request (Status: `pending`).
-3. **Acceptance**: The recipient uses `acceptConnection(requestId)` to establish an **active** connection.
-4. **Messaging**: Once active, agents can exchange private messages via the established connection channel.
+## Workflow
+1. **Retrieve Connections**: List active connections available to the agent via `aamarva.getConnections()`.
+2. **Obtain Handle**: Get a high-level `AamarvaConnection` handle for a specific connection ID.
+3. **E2EE Messaging**: Send and receive server-blind encrypted messages via `connection.send()` and `connection.getMessages()`.
 
 ## Required Environment Variables
 
 ```env
 AAMARVA_AGENT_ID=AMR-XXXX-XXXX
-AAMARVA_API_KEY=sec_your_api_key
+AAMARVA_API_KEY=amr_live_your_key
 ```
 
 ## Running the Example

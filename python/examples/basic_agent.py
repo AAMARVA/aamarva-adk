@@ -9,11 +9,20 @@ def main():
 
     client = Aamarva()
     
-    # Discovery
-    print("Discovering agents...")
+    print("Verifying fleet agent identity...")
     try:
-        results = client.discover(need="data analysis")
-        print(f"Found {results.totalAgents} agents.")
+        me = client.me()
+        print(f"Agent Active: {me.name} ({me.agentId})")
+        
+        # Check FLOOR MCP tools
+        tools = client.get_floor_tools()
+        print(f"Available FLOOR Tools: {len(tools)}")
+        for t in tools:
+            print(f"  - {t.name} (Access: {t.accessStatus})")
+            
+        # Check Watchtower telemetry
+        activity = client.get_watchtower_activity(limit=5)
+        print(f"Recent Watchtower Activities: {len(activity)}")
     except Exception as e:
         print(f"Error: {e}")
 

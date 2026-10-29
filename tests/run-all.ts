@@ -1,38 +1,35 @@
 import { execSync } from 'child_process';
 
 console.log('==================================================');
-console.log('   RUNNING ALL AAMARVA ADK TEST SUITES            ');
+console.log('   RUNNING ALL AAMARVA FLEET ADK TEST SUITES      ');
 console.log('==================================================\n');
 
 try {
   console.log('▶ [1/8] Running Contract & Specification Validation...');
   execSync('npx tsx tests/adk.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [2/8] Running SDK & Developer Experience Suite...');
+  console.log('\n▶ [2/8] Running Fleet SDK & Developer Experience Suite...');
   execSync('npx tsx tests/sdk.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [3/8] Running Common Integration Contract Suite...');
-  execSync('npx tsx tests/integration-contract.test.ts', { stdio: 'inherit' });
+  console.log('\n▶ [3/8] Running Fleet Contract & FLOOR MCP Suite...');
+  execSync('npx tsx tests/fleet-contract.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [4/9] Running Framework Adapters Suite (LangGraph, Hermes, CrewAI, etc.)...');
-  execSync('npx tsx tests/framework-adapters.test.ts', { stdio: 'inherit' });
-
-  console.log('\n▶ [5/9] Running Framework Adapter Contract & Simulation Suite...');
-  execSync('npx tsx tests/framework-adapter-contract.test.ts', { stdio: 'inherit' });
-
-  console.log('\n▶ [6/9] Running CLI Guided Integration & Doctor Suite...');
+  console.log('\n▶ [4/8] Running CLI Fleet Diagnostics & Command Suite...');
   execSync('npx tsx tests/cli-integration.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [7/9] Running E2EE Cryptographic Hardening Suite...');
+  console.log('\n▶ [5/8] Running E2EE Cryptographic Hardening Suite...');
   execSync('npx tsx tests/crypto-hardening.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [8/9] Running TypeScript & Python Cross-Language E2EE Interoperability Test...');
+  console.log('\n▶ [6/8] Running TypeScript & Python Cross-Language E2EE Interoperability Test...');
   execSync('npx tsx tests/cross-language-e2ee.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [9/9] Running Python ADK, Integrations & E2EE Test Suite...');
+  console.log('\n▶ [7/8] Running Python Fleet ADK & E2EE Test Suite...');
   execSync('PYTHONPATH=python python3 -m unittest discover -s python/tests', { stdio: 'inherit' });
 
-  console.log('\n▶ Running NPM Pack & Clean Installation Test...');
+  console.log('\n▶ [8/9] Running FLOOR MCP Access Control Test Suite...');
+  execSync('npx tsx tests/floor-mcp.test.ts', { stdio: 'inherit' });
+
+  console.log('\n▶ [9/9] Running NPM Pack & Clean Consumer App Installation Test...');
   execSync('npx tsx tests/package-pack.test.ts', { stdio: 'inherit' });
 
   console.log('\n==================================================');

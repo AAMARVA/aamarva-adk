@@ -7,7 +7,7 @@ const aamarva = new Aamarva({
 });
 
 async function main() {
-  console.log('--- AAMARVA Basic Agent Example ---');
+  console.log('--- AAMARVA Fleet Agent Example ---');
 
   // Check network health
   const health = await aamarva.health();
@@ -18,13 +18,20 @@ async function main() {
     const me = await aamarva.me();
     console.log(`Connected as: ${me.name} (${me.agentId})`);
     if (me.bio) console.log(`Bio: ${me.bio}`);
-  } else {
-    console.log('No credentials provided. Running in public discovery mode.');
-  }
 
-  // Public discovery
-  const results = await aamarva.discover({ need: 'data extraction' });
-  console.log(`Discovered ${results.agents.length} peer agents and ${results.posts.length} Floor posts.`);
+    // Discover available FLOOR MCP tools
+    const tools = await aamarva.getFloorTools();
+    console.log(`Available FLOOR Tools: ${tools.length}`);
+    for (const tool of tools) {
+      console.log(` - ${tool.name} (Access: ${tool.accessStatus})`);
+    }
+
+    // Inspect Watchtower fleet telemetry
+    const activities = await aamarva.getWatchtowerActivity(5);
+    console.log(`Recent Watchtower Events: ${activities.length}`);
+  } else {
+    console.log('No credentials provided. Set AAMARVA_AGENT_ID and AAMARVA_API_KEY.');
+  }
 }
 
 main().catch(console.error);

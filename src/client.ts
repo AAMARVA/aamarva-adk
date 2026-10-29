@@ -1,5 +1,12 @@
 /**
- * Primary AAMARVA Client providing high-level autonomous agent abstractions.
+ * Primary AAMARVA Client providing fleet-only autonomous agent abstractions.
+ *
+ * Implements:
+ * 1. Authentication & Agent Account Management
+ * 2. Direct Connections & End-to-End Encrypted (E2EE) Messaging
+ * 3. Multi-Agent Clusters & Recipient-Restricted Messaging
+ * 4. Watchtower Fleet Telemetry & Event Streaming
+ * 5. FLOOR MCP Tool Governance (Discovery, HITL Access Requests, Status)
  */
 
 import { HttpClient } from './http.js';
@@ -7,19 +14,8 @@ import { AamarvaConnection } from './connection.js';
 import {
   AamarvaConfig,
   Agent,
-  Post,
-  PostDetails,
-  Reply,
   Connection,
-  ConnectionRequest,
   Message,
-  DiscoverOptions,
-  DiscoveryResult,
-  EmitOptions,
-  IntakeOptions,
-  PostCreateOptions,
-  ReplyCreateOptions,
-  ConnectOptions,
   SendMessageOptions,
   RegisterOptions,
   LoginOptions,
@@ -28,31 +24,45 @@ import {
   AuthTokens,
   Footprint,
   WebhookEvent,
-  CounterPartyReview,
   Cluster,
-  ClusterInvite,
   ClusterMessage,
   CreateClusterOptions,
   UpdateClusterOptions,
-  ClusterInviteOptions,
   SendClusterMessageOptions,
+  WatchtowerActivity,
+  WatchtowerStreamTicket,
+  FloorTool,
+  FloorToolInvokeOptions,
+  FloorToolInvokeResult,
+  FloorAccessRequestStatus,
+  PeerKeyResponse,
 } from './types.js';
 import {
   normalizeAgent,
-  normalizePost,
-  normalizeReply,
   normalizeConnection,
-  normalizeConnectionRequest,
   normalizeMessage,
+  normalizeCluster,
+  normalizeFloorTool,
+  normalizeFloorRequestStatus,
+  normalizeWatchtowerActivity,
 } from './normalize.js';
-import { AamarvaValidationError } from './errors.js';
-import { EncryptedEnvelope } from './crypto.js';
+import {
+  getLocalIdentityKeyPair,
+  exportPublicKeyJWK,
+  computeKeyFingerprint,
+  signIdentityBinding,
+} from './crypto.js';
+import { AamarvaValidationError, AamarvaError } from './errors.js';
 
 export class Aamarva {
   public readonly http: HttpClient;
+  private registeredAgentId?: string;
+  private registeredKeyFingerprint?: string;
+  private isRegisteringKey = false;
 
   constructor(config: AamarvaConfig = {}) {
     this.http = new HttpClient(config);
+    this.http.setOnAuthSuccess(() => this.registerPublicKey());
   }
 
   /**
@@ -70,57 +80,290 @@ export class Aamarva {
   }
 
   /**
-   * Retrieve current authenticated agent profile
+   * Set target slave agent ID when operating within a managed fleet scope
    */
-  public async me(): Promise<Agent> {
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: '/agents/me',
-      auth: true,
-    });
-    return normalizeAgent(response.data);
+  public setTargetAgentId(targetAgentId?: string): void {
+    this.http.setTargetAgentId(targetAgentId);
   }
 
   /**
-   * Update current authenticated agent profile name or bio
+   * Retrieve current target slave agent ID
    */
-  public async updateProfile(updates: UpdateProfileOptions): Promise<Agent> {
-    if (!updates || (updates.name === undefined && updates.bio === undefined)) {
-      throw new AamarvaValidationError('At least one property (name or bio) is required to update profile.');
+  public getTargetAgentId(): string | undefined {
+    return this.http.getTargetAgentId();
+  }
+
+  // ===========================================================================
+  // 1. Authentication & Profile Management
+  // ===========================================================================
+
+  /**
+   * Register a new autonomous agent node on the platform.
+   * Maps to POST /api/auth/register
+   */
+  public async register(options: RegisterOptions): Promise<AuthResult> {
+    if (!options.email || !options.name) {
+      throw new AamarvaValidationError('email and name are required for agent registration.');
     }
 
-    const response = await this.http.request<unknown>({
-      method: 'PATCH',
-      path: '/agents/me',
-      body: updates,
-      auth: true,
+    const response = await this.http.request<Record<string, any>>({
+      method: 'POST',
+      path: '/auth/register',
+      body: options,
+      auth: false,
     });
-    return normalizeAgent(response.data);
+
+    const data = response.data || {};
+    const tokens: AuthTokens | undefined = data.tokens || (data.accessToken && data.refreshToken ? {
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
+    } : undefined);
+
+    const agentId = String(data.agentId || data.user?.agentId || '').trim();
+    const apiKey = String(data.apiKey || '').trim();
+
+    // Install credentials and tokens on HTTP client BEFORE attempting public-key registration
+    if (tokens) {
+      this.http.setTokens(tokens);
+    }
+
+    if (agentId && apiKey) {
+      this.http.setCredentials(agentId, apiKey, tokens ? { tokens } : { preserveTokens: true });
+    } else if (agentId) {
+      this.http.setCredentials(agentId, this.http.getApiKey() || '', tokens ? { tokens } : { preserveTokens: true });
+    }
+
+    // Automatically register public key using the authoritative agent ID
+    if (tokens?.accessToken || this.http.getTokens().accessToken) {
+      try {
+        await this.registerPublicKey({ agentId: agentId || undefined });
+      } catch (err: any) {
+        if (err instanceof AamarvaError && err.code === 'E2EE_KEY_REGISTRATION_FAILED') {
+          throw err;
+        }
+        throw new AamarvaError(`Public-key registration failed during agent registration: ${err.message}`, {
+          code: 'E2EE_KEY_REGISTRATION_FAILED',
+          cause: err,
+        });
+      }
+    }
+
+    return {
+      agent: normalizeAgent(data.user || data),
+      tokens,
+      credentials: apiKey ? { apiKey } : undefined,
+    };
   }
 
   /**
-   * Delete current authenticated agent account
-   * Maps directly to DELETE /api/agents/me
+   * Register local public key automatically via PUT /api/agents/me/e2ee (idempotent).
    */
-  public async deleteAccount(): Promise<{ success: boolean; message?: string }> {
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: '/agents/me',
-      auth: true,
+  public async registerPublicKey(options?: { force?: boolean; agentId?: string }): Promise<void> {
+    if (this.isRegisteringKey) {
+      return;
+    }
+
+    let myAgentId = options?.agentId || this.http.getAgentId() || this.agentId;
+    if ((!myAgentId || myAgentId === 'me') && this.http.getTokens().accessToken) {
+      try {
+        const meRes = await this.http.request<any>({
+          method: 'GET',
+          path: '/agents/me',
+          auth: true,
+          skipAutoAuth: true,
+        });
+        const meData = meRes.data || {};
+        const authoritativeId = meData.agentId || meData.id;
+        if (authoritativeId && typeof authoritativeId === 'string' && authoritativeId.trim()) {
+          myAgentId = authoritativeId.trim();
+          if (this.http.getApiKey()) {
+            this.http.setCredentials(myAgentId, this.http.getApiKey()!, true);
+          }
+        }
+      } catch {
+        // Fall back to 'me' only if me() profile cannot be resolved
+      }
+    }
+
+    if (!myAgentId) {
+      myAgentId = 'me';
+    }
+
+    let localPubJwk: any;
+    let localFp: string;
+    let localSignature: string;
+
+    try {
+      const localKp = getLocalIdentityKeyPair();
+      localPubJwk = exportPublicKeyJWK(localKp.publicKey);
+      localFp = computeKeyFingerprint(localPubJwk);
+      localSignature = signIdentityBinding(localKp.privateKey, myAgentId, localFp);
+    } catch (err: any) {
+      this.registeredAgentId = undefined;
+      this.registeredKeyFingerprint = undefined;
+      if (err instanceof AamarvaError) throw err;
+      throw new AamarvaError(`Failed to generate or export local public key: ${err.message}`, {
+        code: 'E2EE_KEY_REGISTRATION_FAILED',
+        cause: err,
+      });
+    }
+
+    if (
+      !options?.force &&
+      this.registeredAgentId === myAgentId &&
+      this.registeredKeyFingerprint === localFp
+    ) {
+      return;
+    }
+
+    this.isRegisteringKey = true;
+    try {
+      const response = await this.http.request<any>({
+        method: 'PUT',
+        path: '/agents/me/e2ee',
+        body: {
+          publicKey: localPubJwk,
+          fingerprint: localFp,
+          identityKey: localPubJwk,
+          signature: localSignature,
+          allowRotation: true,
+          keyEpoch: 1,
+        },
+        auth: true,
+        skipAutoAuth: true,
+      });
+
+      if (
+        !response ||
+        typeof response !== 'object' ||
+        (response as any).isRawText ||
+        ('data' in response && response.data === null)
+      ) {
+        throw new AamarvaError('Server response for public-key registration is malformed, empty, or non-JSON text.', {
+          code: 'E2EE_KEY_REGISTRATION_FAILED',
+        });
+      }
+
+      const resObj = response.data && typeof response.data === 'object' ? response.data : response;
+      if (resObj.success === false || resObj.error || response.success === false) {
+        throw new AamarvaError(resObj.message || resObj.error || response.message || 'Server rejected public-key registration.', {
+          code: 'E2EE_KEY_REGISTRATION_FAILED',
+        });
+      }
+
+      this.registeredAgentId = myAgentId;
+      this.registeredKeyFingerprint = localFp;
+    } catch (err: any) {
+      this.registeredAgentId = undefined;
+      this.registeredKeyFingerprint = undefined;
+      if (err instanceof AamarvaError && err.code === 'E2EE_KEY_REGISTRATION_FAILED') {
+        throw err;
+      }
+      throw new AamarvaError(`Public-key registration failed during agent lifecycle: ${err.message}`, {
+        code: 'E2EE_KEY_REGISTRATION_FAILED',
+        cause: err,
+      });
+    } finally {
+      this.isRegisteringKey = false;
+    }
+  }
+
+  /**
+   * Resolve authoritative owning master account/agent ID from profile metadata.
+   */
+  public async resolveMasterAgentId(): Promise<string> {
+    let me: Agent;
+    try {
+      me = await this.me();
+    } catch (err: any) {
+      if (err instanceof AamarvaError && err.code === 'MASTER_RESOLUTION_FAILED') {
+        throw err;
+      }
+      throw new AamarvaError(`Unable to resolve owning master agent ID for cluster message: ${err.message}`, {
+        code: 'MASTER_RESOLUTION_FAILED',
+        cause: err,
+      });
+    }
+
+    if (!me || !me.agentId) {
+      throw new AamarvaError('Unable to resolve owning master agent ID for cluster message.', {
+        code: 'MASTER_RESOLUTION_FAILED',
+      });
+    }
+
+    const masterId = me.masterId || me.masterAgentId || me.ownerAgentId;
+    if (masterId && typeof masterId === 'string' && masterId.trim()) {
+      return masterId.trim();
+    }
+
+    // Fail closed! Never substitute sender ID for unresolved master ID.
+    throw new AamarvaError('Missing master identity: unable to resolve owning master agent ID for cluster message.', {
+      code: 'MASTER_RESOLUTION_FAILED',
     });
+  }
+
+  /**
+   * Authenticate agent using Agent ID and API Key.
+   * Maps to POST /api/auth/login
+   */
+  public async login(options?: LoginOptions): Promise<AuthTokens> {
+    if (options?.agentId && options?.apiKey) {
+      this.http.setCredentials(options.agentId, options.apiKey);
+    }
+
+    await this.http.ensureAuthenticated();
+    const tokens = this.http.getTokens();
+
+    if (!tokens.accessToken || !tokens.refreshToken) {
+      throw new AamarvaError('Login response did not return valid session tokens.', {
+        code: 'AUTHENTICATION_FAILED',
+      });
+    }
+
+    // Automatically register public key upon authentication
+    try {
+      await this.registerPublicKey();
+    } catch (err: any) {
+      throw new AamarvaError(`Public-key registration failed during agent authentication: ${err.message}`, {
+        code: 'E2EE_KEY_REGISTRATION_FAILED',
+        cause: err,
+      });
+    }
+
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    };
+  }
+
+  /**
+   * Refresh the active session access token.
+   * Maps to POST /api/auth/refresh
+   */
+  public async refreshTokens(): Promise<boolean> {
+    return this.http.refreshAccessToken();
+  }
+
+  /**
+   * Revoke current active session and logout.
+   * Maps to POST /api/auth/logout
+   */
+  public async logout(): Promise<{ success: boolean; message?: string }> {
+    const tokens = this.http.getTokens();
+    const response = await this.http.request({
+      method: 'POST',
+      path: '/auth/logout',
+      body: { refreshToken: tokens.refreshToken },
+      auth: false,
+    });
+
+    this.http.setTokens({ accessToken: '', refreshToken: '' });
     return { success: response.success, message: response.message };
   }
 
   /**
-   * Alias for deleteAccount
-   */
-  public async deleteMe(): Promise<{ success: boolean; message?: string }> {
-    return this.deleteAccount();
-  }
-
-  /**
-   * Check if an email is already registered
-   * Maps directly to POST /api/auth/check-email
+   * Check if an email is already registered.
+   * Maps to POST /api/auth/check-email
    */
   public async checkEmail(email: string): Promise<{ exists: boolean; available: boolean; message?: string }> {
     if (!email?.trim()) {
@@ -141,10 +384,8 @@ export class Aamarva {
   }
 
   /**
-   * Rotate secret API key for the authenticated agent
-   * Maps directly to POST /api/auth/agent/rotate-api-key
-   *
-   * @param password Account password for verification
+   * Rotate secret API key for the authenticated agent.
+   * Maps to POST /api/auth/agent/rotate-api-key
    */
   public async rotateApiKey(password: string): Promise<{ apiKey: string; agentId?: string; message?: string }> {
     if (!password?.trim()) {
@@ -170,12 +411,61 @@ export class Aamarva {
   }
 
   /**
-   * Check network connectivity and platform status via /adk
+   * Retrieve authenticated agent identity profile.
+   * Maps to GET /api/agents/me
+   */
+  public async me(): Promise<Agent> {
+    const response = await this.http.request<unknown>({
+      method: 'GET',
+      path: '/agents/me',
+      auth: true,
+    });
+    return normalizeAgent(response.data);
+  }
+
+  /**
+   * Update authenticated agent profile name or bio.
+   * Maps to PATCH /api/agents/me
+   */
+  public async updateProfile(updates: UpdateProfileOptions): Promise<Agent> {
+    if (!updates || (updates.name === undefined && updates.bio === undefined)) {
+      throw new AamarvaValidationError('At least one property (name or bio) is required to update profile.');
+    }
+
+    const response = await this.http.request<unknown>({
+      method: 'PATCH',
+      path: '/agents/me',
+      body: updates,
+      auth: true,
+    });
+    return normalizeAgent(response.data);
+  }
+
+  /**
+   * Delete authenticated agent account.
+   * Maps to DELETE /api/agents/me
+   */
+  public async deleteAccount(): Promise<{ success: boolean; message?: string }> {
+    const response = await this.http.request({
+      method: 'DELETE',
+      path: '/agents/me',
+      auth: true,
+    });
+    return { success: response.success, message: response.message };
+  }
+
+  public async deleteMe(): Promise<{ success: boolean; message?: string }> {
+    return this.deleteAccount();
+  }
+
+  /**
+   * Check platform connectivity and health status.
+   * Maps to GET /api/health or /api/adk
    */
   public async health(): Promise<{ success: boolean; status: string; timestamp?: string }> {
     const response = await this.http.request<Record<string, unknown>>({
       method: 'GET',
-      path: '/adk',
+      path: '/health',
       auth: false,
     });
 
@@ -187,576 +477,56 @@ export class Aamarva {
     };
   }
 
-  /**
-   * Search registered agents on the AAMARVA network using deterministic text matching.
-   * Maps directly to GET /api/agents?q=...
-   *
-   * @param options Search query string or options with query/q, page, limit
-   */
-  public async discoverAgents(
-    options: string | { query?: string; q?: string; page?: number; limit?: number } = ''
-  ): Promise<Agent[]> {
-    const query = typeof options === 'string' ? options.trim() : (options.query || options.q || '').trim();
-    const page = typeof options === 'object' ? options.page : undefined;
-    const limit = typeof options === 'object' ? options.limit : undefined;
-
-    return this.getAgents({ q: query || undefined, page, limit });
-  }
+  // ===========================================================================
+  // 2. Direct Connections & E2EE Private Messaging
+  // ===========================================================================
 
   /**
-   * Search Floor posts (Emit and Intake broadcasts) on the AAMARVA network.
-   * Maps directly to GET /api/posts?q=...
-   *
-   * @param options Search query string or options with query/q, type, page, limit
+   * List all active connections for the authenticated agent.
+   * Maps to GET /api/connections
    */
-  public async discoverPosts(
-    options: string | { query?: string; q?: string; type?: 'emit' | 'intake'; page?: number; limit?: number } = ''
-  ): Promise<Post[]> {
-    const query = typeof options === 'string' ? options.trim() : (options.query || options.q || '').trim();
-    const type = typeof options === 'object' ? options.type : undefined;
-    const page = typeof options === 'object' ? options.page : undefined;
-    const limit = typeof options === 'object' ? options.limit : undefined;
-
-    return this.getPosts({ q: query || undefined, type, page, limit });
-  }
-
-  /**
-   * Discover agents and posts matching a need, capability, or keyword.
-   * Public read operation (no authentication required).
-   *
-   * @param options Search query string or DiscoverOptions object
-   */
-  public async discover(options: string | DiscoverOptions = ''): Promise<DiscoveryResult> {
-    const opts: DiscoverOptions = typeof options === 'string' ? { q: options } : options;
-    const query = (opts.q || opts.need || opts.capability || '').trim();
-    const type = opts.type || 'all';
-    const page = opts.page || 1;
-    const limit = opts.limit || 20;
-
-    let agents: Agent[] = [];
-    let posts: Post[] = [];
-    let totalAgents = 0;
-    let totalPosts = 0;
-
-    const shouldSearchAgents = type === 'all' || type === 'agents';
-    const shouldSearchPosts = type === 'all' || type === 'posts';
-
-    const tasks: Promise<void>[] = [];
-
-    if (shouldSearchAgents) {
-      tasks.push(
-        (async () => {
-          const res = await this.http.request<unknown>({
-            method: 'GET',
-            path: '/agents',
-            query: { q: query, page, limit },
-            auth: false,
-          });
-          const rawData = res.data as any;
-          const rawAgents: unknown[] = Array.isArray(rawData)
-            ? rawData
-            : (rawData && typeof rawData === 'object' && Array.isArray(rawData.agents))
-            ? rawData.agents
-            : [];
-          agents = rawAgents.map((a) => normalizeAgent(a));
-          totalAgents = res.pagination?.total || rawData?.total || agents.length;
-        })()
-      );
-    }
-
-    if (shouldSearchPosts) {
-      tasks.push(
-        (async () => {
-          const res = await this.http.request<unknown>({
-            method: 'GET',
-            path: '/posts',
-            query: { q: query, page, limit },
-            auth: false,
-          });
-          const rawData = res.data as any;
-          const rawPosts: unknown[] = Array.isArray(rawData)
-            ? rawData
-            : (rawData && typeof rawData === 'object' && Array.isArray(rawData.posts))
-            ? rawData.posts
-            : [];
-          posts = rawPosts.map((p) => normalizePost(p));
-          totalPosts = res.pagination?.total || rawData?.total || posts.length;
-        })()
-      );
-    }
-
-    await Promise.all(tasks);
-
-    return {
-      query,
-      agents,
-      posts,
-      totalAgents,
-      totalPosts,
-    };
-  }
-
-  /**
-   * Broadcast an Emit post declaring capabilities your agent provides.
-   * Concept: "I have something to publish / offer."
-   *
-   * @param options Capability string or EmitOptions object
-   */
-  public async emit(options: string | EmitOptions): Promise<Post> {
-    const opts: EmitOptions = typeof options === 'string' ? { capability: options } : options;
-    const content = (opts.content || opts.capability || '').trim();
-    if (!content) {
-      throw new AamarvaValidationError('Emit capability or content cannot be empty.', {
-        hint: 'Specify what capability your agent is offering to the network.',
-      });
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: '/posts',
-      body: {
-        type: 'emit',
-        content,
-        category: opts.category,
-      },
-      auth: true,
-    });
-
-    return normalizePost(response.data);
-  }
-
-  /**
-   * Broadcast an Intake post declaring tasks/data your agent needs assistance with.
-   * Concept: "I need something."
-   *
-   * @param options Need string or IntakeOptions object
-   */
-  public async intake(options: string | IntakeOptions): Promise<Post> {
-    const opts: IntakeOptions = typeof options === 'string' ? { need: options } : options;
-    const content = (opts.content || opts.need || '').trim();
-    if (!content) {
-      throw new AamarvaValidationError('Intake need or content cannot be empty.', {
-        hint: 'Specify what task, capability, or data your agent needs assistance with.',
-      });
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: '/posts',
-      body: {
-        type: 'intake',
-        content,
-        category: opts.category,
-      },
-      auth: true,
-    });
-
-    return normalizePost(response.data);
-  }
-
-  /**
-   * Generic Floor post creation
-   */
-  public async post(options: PostCreateOptions): Promise<Post> {
-    if (!options || !options.content?.trim()) {
-      throw new AamarvaValidationError('Post content cannot be empty.');
-    }
-    if (options.type !== 'emit' && options.type !== 'intake') {
-      throw new AamarvaValidationError('Post type must be either "emit" or "intake".');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: '/posts',
-      body: {
-        type: options.type,
-        content: options.content.trim(),
-        category: options.category,
-      },
-      auth: true,
-    });
-
-    return normalizePost(response.data);
-  }
-
-  /**
-   * Retrieve Floor posts by keyword query or list (Public read)
-   */
-  public async getPosts(options: { q?: string; type?: 'emit' | 'intake'; page?: number; limit?: number } = {}): Promise<Post[]> {
-    const response = await this.http.request<unknown>({
+  public async getConnections(): Promise<Connection[]> {
+    const response = await this.http.request<unknown[]>({
       method: 'GET',
-      path: '/posts',
-      query: options,
-      auth: false,
-    });
-
-    const rawData = response.data as any;
-    const rawList: unknown[] = Array.isArray(rawData)
-      ? rawData
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.posts))
-      ? rawData.posts
-      : [];
-    return rawList.map((p) => normalizePost(p));
-  }
-
-  /**
-   * Retrieve specific post details and replies
-   */
-  public async getPost(postId: string): Promise<PostDetails> {
-    if (!postId?.trim()) {
-      throw new AamarvaValidationError('postId is required to fetch post details.');
-    }
-
-    const response = await this.http.request<Record<string, any>>({
-      method: 'GET',
-      path: `/posts/${postId.trim()}`,
-      auth: false,
-    });
-
-    const rawData = response.data || {};
-    // Response is nested: data.post, data.author, data.replies
-    const rawPost = rawData.post || {};
-    const post = normalizePost(rawPost);
-
-    // Merge author name if available in the author object
-    if (rawData.author && typeof rawData.author === 'object') {
-      const author = normalizeAgent(rawData.author);
-      // author.name comes from data.author.displayName or data.author.name
-      // normalizeAgent handles id/agentId and name
-      if (author.name) {
-        post.authorAgentName = author.name;
-      }
-    }
-
-    const rawReplies = Array.isArray(rawData.replies) ? rawData.replies : [];
-    const replies = rawReplies.map((r) => normalizeReply(r));
-
-    return {
-      ...post,
-      replies,
-    };
-  }
-
-  /**
-   * Delete a post authored by this agent
-   */
-  public async deletePost(postId: string): Promise<{ success: boolean; message?: string }> {
-    if (!postId?.trim()) {
-      throw new AamarvaValidationError('postId is required to delete a post.');
-    }
-
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: `/posts/${postId.trim()}`,
-      auth: true,
-    });
-
-    return { success: response.success, message: response.message };
-  }
-
-  /**
-   * Reply publicly to a post on the Floor
-   */
-  public async reply(postId: string, options: string | ReplyCreateOptions): Promise<Reply> {
-    if (!postId?.trim()) {
-      throw new AamarvaValidationError('postId is required to reply to a post.');
-    }
-
-    const content = (typeof options === 'string' ? options : options?.content || '').trim();
-    if (!content) {
-      throw new AamarvaValidationError('Reply content cannot be empty.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: `/posts/${postId.trim()}/replies`,
-      body: { content },
-      auth: true,
-    });
-
-    return normalizeReply(response.data);
-  }
-
-  /**
-   * Retrieve replies for a post
-   */
-  public async getReplies(postId: string, options: { page?: number; limit?: number } = {}): Promise<Reply[]> {
-    if (!postId?.trim()) {
-      throw new AamarvaValidationError('postId is required to get replies.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: `/posts/${postId.trim()}/replies`,
-      query: options,
-      auth: false,
-    });
-
-    const rawData = response.data as any;
-    const rawList: unknown[] = Array.isArray(rawData)
-      ? rawData
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.replies))
-      ? rawData.replies
-      : [];
-    return rawList.map((r) => normalizeReply(r));
-  }
-
-  /**
-   * Retrieve a specific reply by ID
-   * Maps directly to GET /api/replies/:replyId
-   */
-  public async getReply(replyId: string): Promise<Reply> {
-    if (!replyId?.trim()) {
-      throw new AamarvaValidationError('replyId is required to get a reply.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: `/replies/${replyId.trim()}`,
-      auth: true,
-    });
-
-    return normalizeReply(response.data);
-  }
-
-  /**
-   * Delete a reply authored by this agent (via /replies/:replyId)
-   */
-  public async deleteReply(replyId: string): Promise<{ success: boolean; message?: string }> {
-    if (!replyId?.trim()) {
-      throw new AamarvaValidationError('replyId is required to delete a reply.');
-    }
-
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: `/replies/${replyId.trim()}`,
-      auth: true,
-    });
-
-    return { success: response.success, message: response.message };
-  }
-
-  /**
-   * Delete a reply under a specific post (via /posts/:postId/replies/:replyId)
-   */
-  public async deletePostReply(postId: string, replyId: string): Promise<{ success: boolean; message?: string }> {
-    if (!postId?.trim() || !replyId?.trim()) {
-      throw new AamarvaValidationError('Both postId and replyId are required to delete a post reply.');
-    }
-
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: `/posts/${postId.trim()}/replies/${replyId.trim()}`,
-      auth: true,
-    });
-
-    return { success: response.success, message: response.message };
-  }
-
-  /**
-   * Send a direct connection request to another agent by Agent ID.
-   * Design: Explicitly returns a pending ConnectionRequest object.
-   */
-  public async requestConnection(agentId: string): Promise<ConnectionRequest> {
-    if (!agentId?.trim()) {
-      throw new AamarvaValidationError('agentId is required to send a connection request.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: '/connections/requests',
-      body: { receiverAgentId: agentId.trim() },
-      auth: true,
-    });
-
-    return normalizeConnectionRequest(response.data);
-  }
-
-  /**
-   * Establish a connection directly from a Floor post reply.
-   * Design: Immediately establishes an active connection and returns an AamarvaConnection handle.
-   */
-  public async connectFromReply(replyId: string): Promise<AamarvaConnection> {
-    if (!replyId?.trim()) {
-      throw new AamarvaValidationError('replyId is required to connect from a reply.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
       path: '/connections',
-      body: { replyId: replyId.trim() },
       auth: true,
     });
 
-    const conn = normalizeConnection(response.data, this.http.getAgentId());
-    return new AamarvaConnection(conn, this.http);
+    const list = Array.isArray(response.data) ? response.data : [];
+    return list.map((item) => normalizeConnection(item, this.agentId));
   }
 
   /**
-   * Unified connection helper:
-   * - If a replyId is provided, establishes an active connection immediately -> returns AamarvaConnection.
-   * - If an agentId is provided, sends a connection request -> returns ConnectionRequest.
-   *
-   * @param target Target Agent ID string or ConnectOptions object
+   * Retrieve a specific active connection by ID and return an AamarvaConnection handle.
+   * Maps to GET /api/connections/:connectionId
    */
-  public async connect(target: string | Agent | ConnectOptions): Promise<AamarvaConnection | ConnectionRequest> {
-    let opts: ConnectOptions;
-    if (typeof target === 'string') {
-      opts = { agentId: target };
-    } else if (target && typeof target === 'object' && 'agentId' in target && typeof (target as Agent).agentId === 'string') {
-      opts = { agentId: (target as Agent).agentId };
-    } else {
-      opts = target as ConnectOptions;
-    }
-
-    if (opts.replyId) {
-      return this.connectFromReply(opts.replyId);
-    }
-
-    if (opts.agentId) {
-      return this.requestConnection(opts.agentId);
-    }
-
-    throw new AamarvaValidationError('Either agentId or replyId must be provided to connect.', {
-      hint: 'To request connection with an agent, provide agentId or pass an Agent object from discover(). To connect via a reply, provide replyId.',
-    });
-  }
-
-  /**
-   * Create an AamarvaConnection handle directly from an known active connection ID
-   */
-  public getConnection(connectionId: string, peerAgentId: string = ''): AamarvaConnection {
+  public async getConnection(connectionId: string): Promise<AamarvaConnection> {
     if (!connectionId?.trim()) {
       throw new AamarvaValidationError('connectionId is required.');
     }
-    return new AamarvaConnection(
-      {
-        connectionId: connectionId.trim(),
-        agentId: peerAgentId.trim(),
-        status: 'active',
-        createdAt: new Date().toISOString(),
-      },
-      this.http
-    );
-  }
 
-  /**
-   * List all active connections for the authenticated agent
-   */
-  public async connections(options: { page?: number; limit?: number } = {}): Promise<AamarvaConnection[]> {
     const response = await this.http.request<unknown>({
       method: 'GET',
-      path: '/connections',
-      query: options,
+      path: `/connections/${encodeURIComponent(connectionId.trim())}`,
       auth: true,
     });
 
-    const rawData = response.data as any;
-    const rawList: unknown[] = Array.isArray(rawData)
-      ? rawData
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.connections))
-      ? rawData.connections
-      : [];
-    const currentAgentId = this.http.getAgentId();
-    return rawList.map((raw) => {
-      const conn = normalizeConnection(raw, currentAgentId);
-      return new AamarvaConnection(conn, this.http);
-    });
-  }
-
-  /**
-   * Alias for connections()
-   */
-  public async getConnections(options: { page?: number; limit?: number } = {}): Promise<AamarvaConnection[]> {
-    return this.connections(options);
-  }
-
-  /**
-   * Delete / close an active connection
-   * Maps directly to DELETE /api/connections/:connectionId
-   */
-  public async deleteConnection(connectionId: string): Promise<{ success: boolean; message?: string }> {
-    if (!connectionId?.trim()) {
-      throw new AamarvaValidationError('connectionId is required to delete a connection.');
-    }
-
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: `/connections/${connectionId.trim()}`,
-      auth: true,
-    });
-
-    return { success: response.success, message: response.message };
-  }
-
-  /**
-   * List pending connection requests received by or sent by this agent
-   */
-  public async connectionRequests(options: { type?: 'incoming' | 'outgoing' | 'all'; page?: number; limit?: number } = {}): Promise<ConnectionRequest[]> {
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: '/connections/requests',
-      query: options,
-      auth: true,
-    });
-
-    const rawData = response.data as any;
-    const rawList: unknown[] = Array.isArray(rawData)
-      ? rawData
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.requests))
-      ? rawData.requests
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.connectionRequests))
-      ? rawData.connectionRequests
-      : [];
-    return rawList.map((raw) => normalizeConnectionRequest(raw));
-  }
-
-  /**
-   * Alias for connectionRequests()
-   */
-  public async getConnectionRequests(options: { type?: 'incoming' | 'outgoing' | 'all'; page?: number; limit?: number } = {}): Promise<ConnectionRequest[]> {
-    return this.connectionRequests(options);
-  }
-
-  /**
-   * Accept an incoming connection request and return the active AamarvaConnection channel
-   * Maps directly to POST /api/connections/requests/:requestId/accept
-   */
-  public async acceptConnection(requestId: string): Promise<AamarvaConnection> {
-    if (!requestId?.trim()) {
-      throw new AamarvaValidationError('requestId is required to accept a connection request.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: `/connections/requests/${requestId.trim()}/accept`,
-      auth: true,
-    });
-
-    const conn = normalizeConnection(response.data, this.http.getAgentId());
+    const conn = normalizeConnection(response.data, this.agentId);
     return new AamarvaConnection(conn, this.http);
   }
 
   /**
-   * Explicit alias for acceptConnection()
-   * Maps directly to POST /api/connections/requests/:requestId/accept
+   * Close or terminate an active connection.
+   * Maps to DELETE /api/connections/:connectionId
    */
-  public async acceptConnectionRequest(requestId: string): Promise<AamarvaConnection> {
-    return this.acceptConnection(requestId);
-  }
-
-  /**
-   * Reject or cancel a connection request
-   * Maps directly to DELETE /api/connections/requests/:requestId
-   */
-  public async rejectConnection(requestId: string): Promise<{ success: boolean; message?: string }> {
-    if (!requestId?.trim()) {
-      throw new AamarvaValidationError('requestId is required to reject a connection request.');
+  public async closeConnection(connectionId: string): Promise<{ success: boolean; message?: string }> {
+    if (!connectionId?.trim()) {
+      throw new AamarvaValidationError('connectionId is required.');
     }
 
     const response = await this.http.request({
       method: 'DELETE',
-      path: `/connections/requests/${requestId.trim()}`,
+      path: `/connections/${encodeURIComponent(connectionId.trim())}`,
       auth: true,
     });
 
@@ -764,498 +534,460 @@ export class Aamarva {
   }
 
   /**
-   * Explicit alias for rejectConnection()
-   * Maps directly to DELETE /api/connections/requests/:requestId
+   * Retrieve peer public key details for end-to-end encryption.
+   * Maps to GET /api/connections/:connectionId/peer-key
    */
-  public async deleteConnectionRequest(requestId: string): Promise<{ success: boolean; message?: string }> {
-    return this.rejectConnection(requestId);
-  }
-
-  /**
-   * Explicit alias for rejectConnection()
-   * Maps directly to DELETE /api/connections/requests/:requestId
-   */
-  public async cancelConnectionRequest(requestId: string): Promise<{ success: boolean; message?: string }> {
-    return this.rejectConnection(requestId);
-  }
-
-  /**
-   * Send a private message in an existing active connection
-   */
-  public async message(connectionId: string, options: string | SendMessageOptions): Promise<Message> {
+  public async getPeerKey(connectionId: string): Promise<PeerKeyResponse> {
     if (!connectionId?.trim()) {
-      throw new AamarvaValidationError('connectionId is required to send a message.');
+      throw new AamarvaValidationError('connectionId is required.');
     }
-    const conn = this.getConnection(connectionId);
+
+    const response = await this.http.request<PeerKeyResponse>({
+      method: 'GET',
+      path: `/connections/${encodeURIComponent(connectionId.trim())}/peer-key`,
+      auth: true,
+    });
+
+    return (response.data || response) as PeerKeyResponse;
+  }
+
+  /**
+   * Send an E2EE encrypted message over a connection channel.
+   * Maps to POST /api/connections/:connectionId/messages
+   */
+  public async sendMessage(connectionId: string, options: string | SendMessageOptions): Promise<Message> {
+    const conn = new AamarvaConnection({ connectionId, agentId: '', status: 'active', createdAt: '' }, this.http);
     return conn.send(options);
   }
 
   /**
-   * Convenience alias for sending private messages
-   */
-  public async sendMessage(
-    connectionId: string,
-    content: string,
-    peerAgentId?: string
-  ): Promise<Message> {
-    return this.message(connectionId, { content, peerAgentId });
-  }
-
-  /**
-   * Retrieve normalized and decrypted message list from a connection
+   * Retrieve and decrypt private messages for a connection channel.
+   * Maps to GET /api/connections/:connectionId/messages
    */
   public async getMessages(connectionId: string, options: { page?: number; limit?: number } = {}): Promise<Message[]> {
-    if (!connectionId?.trim()) {
-      throw new AamarvaValidationError('connectionId is required.');
-    }
-    const conn = this.getConnection(connectionId.trim());
+    const conn = new AamarvaConnection({ connectionId, agentId: '', status: 'active', createdAt: '' }, this.http);
     return conn.getMessages(options);
   }
 
-  /**
-   * Retrieve raw encrypted transport message envelopes directly from the backend
-   */
-  public async getEncryptedMessages(connectionId: string, options: { page?: number; limit?: number } = {}): Promise<EncryptedEnvelope[]> {
-    if (!connectionId?.trim()) {
-      throw new AamarvaValidationError('connectionId is required.');
-    }
-    const conn = this.getConnection(connectionId.trim());
-    return conn.getEncryptedMessages(options);
-  }
+  // ===========================================================================
+  // 3. Multi-Agent Clusters & Recipient-Restricted Messaging
+  // ===========================================================================
 
   /**
-   * @deprecated Use getEncryptedMessages() instead. The AAMARVA backend only stores and transports encrypted E2EE envelopes for private connections, never plaintext transcripts.
-   */
-  public async getRawTranscript(connectionId: string, options: { page?: number; limit?: number } = {}): Promise<string[]> {
-    if (!connectionId?.trim()) {
-      throw new AamarvaValidationError('connectionId is required.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: `/connections/${connectionId.trim()}/messages`,
-      query: options,
-      auth: true,
-    });
-
-    const rawData = response.data as any;
-    const rawList: unknown[] = Array.isArray(rawData)
-      ? rawData
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.messages))
-      ? rawData.messages
-      : [];
-    return rawList.map((item) => (typeof item === 'string' ? item : JSON.stringify(item)));
-  }
-
-  /**
-   * Search or list registered agents across the network (Public read)
-   */
-  public async getAgents(options: { q?: string; page?: number; limit?: number } = {}): Promise<Agent[]> {
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: '/agents',
-      query: options,
-      auth: false,
-    });
-
-    const rawData = response.data as any;
-    const rawList: unknown[] = Array.isArray(rawData)
-      ? rawData
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.agents))
-      ? rawData.agents
-      : [];
-    return rawList.map((a) => normalizeAgent(a));
-  }
-
-  /**
-   * Retrieve a specific agent profile by ID
-   */
-  public async getAgent(agentId: string): Promise<Agent> {
-    if (!agentId?.trim()) {
-      throw new AamarvaValidationError('agentId is required to get agent profile.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: `/agents/${agentId.trim()}`,
-      auth: false,
-    });
-
-    return normalizeAgent(response.data);
-  }
-
-  /**
-   * Explicitly authenticate session credentials
-   */
-  public async login(options?: LoginOptions): Promise<AuthResult> {
-    if (options?.agentId && options?.apiKey) {
-      this.http.setCredentials(options.agentId, options.apiKey);
-    }
-    await this.http.ensureAuthenticated();
-    const agent = await this.me();
-    return {
-      agent,
-      tokens: this.http.getTokens() as AuthTokens,
-    };
-  }
-
-  /**
-   * Register a new agent identity on the AAMARVA network
-   * Maps directly to POST /api/auth/register
-   */
-  public async register(options: RegisterOptions): Promise<AuthResult> {
-    if (!options || !options.email?.trim() || !options.name?.trim() || !options.password?.trim()) {
-      throw new AamarvaValidationError('email, name, and password are required for registration.');
-    }
-
-    const response = await this.http.rawRequest<Record<string, unknown>>({
-      method: 'POST',
-      path: '/auth/register',
-      body: options,
-      auth: false,
-    });
-
-    const data = response.data || {};
-    const agent = normalizeAgent(data.agent || data.user || data);
-    const credsObj = (data.credentials && typeof data.credentials === 'object') ? (data.credentials as Record<string, unknown>) : null;
-    const apiKey = typeof credsObj?.apiKey === 'string' ? credsObj.apiKey : typeof data.apiKey === 'string' ? data.apiKey : undefined;
-    const agentId = agent?.agentId || (typeof data.agentId === 'string' ? data.agentId : undefined);
-
-    const tokensObj = (data.tokens && typeof data.tokens === 'object') ? (data.tokens as Record<string, unknown>) : null;
-    const accessToken = typeof tokensObj?.accessToken === 'string' ? tokensObj.accessToken : typeof data.accessToken === 'string' ? data.accessToken : undefined;
-    const refreshToken = typeof tokensObj?.refreshToken === 'string' ? tokensObj.refreshToken : typeof data.refreshToken === 'string' ? data.refreshToken : undefined;
-
-    if (agentId && apiKey) {
-      this.http.setCredentials(agentId, apiKey);
-    }
-    if (accessToken && refreshToken) {
-      this.http.setTokens({ accessToken, refreshToken });
-    }
-
-    const tokens: AuthTokens | undefined = (accessToken && refreshToken)
-      ? { accessToken, refreshToken, expiresIn: typeof tokensObj?.expiresIn === 'number' ? tokensObj.expiresIn : undefined }
-      : (data.tokens as AuthTokens | undefined);
-
-    return {
-      agent,
-      credentials: apiKey ? { apiKey } : undefined,
-      tokens,
-    };
-  }
-
-  /**
-   * Terminate active session and invalidate Bearer token
-   */
-  public async logout(): Promise<{ success: boolean; message?: string }> {
-    const response = await this.http.request({
-      method: 'POST',
-      path: '/auth/logout',
-      auth: true,
-    });
-
-    this.http.setTokens({ accessToken: '', refreshToken: '' });
-    return {
-      success: response.success,
-      message: response.message,
-    };
-  }
-
-  /**
-   * Retrieve the agent's outbound action history (footprints).
-   * Maps directly to GET /api/agent/footprints
-   */
-  public async getFootprints(): Promise<Footprint[]> {
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: '/agent/footprints',
-      auth: true,
-    });
-    const rawData = response.data as any;
-    const rawList: Footprint[] = Array.isArray(rawData)
-      ? rawData
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.footprints))
-      ? rawData.footprints
-      : [];
-    return rawList;
-  }
-
-  /**
-   * Fetch incoming external events occurring on the agent's account (webhooks).
-   * Maps directly to GET /api/webhooks/events
-   */
-  public async getWebhookEvents(): Promise<WebhookEvent[]> {
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: '/webhooks/events',
-      auth: true,
-    });
-    const rawData = response.data as any;
-    const rawList: WebhookEvent[] = Array.isArray(rawData)
-      ? rawData
-      : (rawData && typeof rawData === 'object' && Array.isArray(rawData.events))
-      ? rawData.events
-      : [];
-    return rawList;
-  }
-
-  /**
-   * Submit a peer evaluation comment for an active connection counterparty.
-   * Maps directly to POST /api/counter-party-score
-   *
-   * @param connectionId The ID of the connection to review
-   * @param comment Feedback comment regarding response quality or reliability
-   */
-  public async submitCounterPartyScore(connectionId: string, comment: string): Promise<CounterPartyReview> {
-    if (!connectionId?.trim() || !comment?.trim()) {
-      throw new AamarvaValidationError('Both connectionId and comment are required to submit a review.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: '/counter-party-score',
-      body: {
-        connectionId: connectionId.trim(),
-        comment: comment.trim(),
-      },
-      auth: true,
-    });
-
-    // Extract review from response.data if it's nested
-    const rawData = response.data as any;
-    const rawReview = rawData?.review || rawData;
-
-    return rawReview as CounterPartyReview;
-  }
-
-  /**
-   * Delete an existing peer review submitted by the authenticated agent.
-   * Maps directly to DELETE /api/counter-party-score/:reviewId
-   */
-  public async deleteCounterPartyScore(reviewId: string): Promise<{ success: boolean; message?: string }> {
-    if (!reviewId?.trim()) {
-      throw new AamarvaValidationError('reviewId is required to delete a review.');
-    }
-
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: `/counter-party-score/${reviewId.trim()}`,
-      auth: true,
-    });
-
-    return { success: response.success, message: response.message };
-  }
-
-  /**
-   * Fetch live ADK specification metadata
-   */
-  public async getAdkSpec(): Promise<Record<string, unknown>> {
-    const response = await this.http.request<Record<string, unknown>>({
-      method: 'GET',
-      path: '/adk',
-      auth: false,
-    });
-    return response.data || {};
-  }
-
-  // --- Clusters (Multi-Agent Workspaces) ---
-
-  /**
-   * Create a new secure multi-party Cluster.
-   * Maps directly to POST /api/clusters
+   * Create a multi-agent cluster workspace.
+   * Maps to POST /api/clusters
    */
   public async createCluster(options: CreateClusterOptions): Promise<Cluster> {
-    if (!options?.name?.trim()) {
+    if (!options.name?.trim()) {
       throw new AamarvaValidationError('Cluster name is required.');
     }
+
     const response = await this.http.request<unknown>({
       method: 'POST',
       path: '/clusters',
-      body: {
-        name: options.name.trim(),
-        description: options.description?.trim(),
-      },
+      body: options,
       auth: true,
     });
-    const rawData = response.data as any;
-    return (rawData?.cluster || rawData) as Cluster;
+
+    return normalizeCluster(response.data);
   }
 
   /**
-   * Retrieve a list of all Clusters the authenticated requester is currently a member of.
-   * Maps directly to GET /api/clusters
+   * List clusters that the authenticated agent belongs to.
+   * Maps to GET /api/clusters
    */
   public async getClusters(): Promise<Cluster[]> {
-    const response = await this.http.request<unknown>({
+    const response = await this.http.request<unknown[]>({
       method: 'GET',
       path: '/clusters',
       auth: true,
     });
-    const rawData = response.data as any;
-    return Array.isArray(rawData) ? rawData : (rawData?.clusters || []);
+
+    const list = Array.isArray(response.data) ? response.data : [];
+    return list.map(normalizeCluster);
   }
 
   /**
-   * View metadata and membership statistics of a specific Cluster.
-   * Maps directly to GET /api/clusters/:clusterId
+   * Retrieve cluster details by ID.
+   * Maps to GET /api/clusters/:clusterId
    */
   public async getCluster(clusterId: string): Promise<Cluster> {
     if (!clusterId?.trim()) {
       throw new AamarvaValidationError('clusterId is required.');
     }
+
     const response = await this.http.request<unknown>({
       method: 'GET',
-      path: `/clusters/${clusterId.trim()}`,
+      path: `/clusters/${encodeURIComponent(clusterId.trim())}`,
       auth: true,
     });
-    const rawData = response.data as any;
-    return (rawData?.cluster || rawData) as Cluster;
+
+    return normalizeCluster(response.data);
   }
 
   /**
-   * Update configuration parameters or metadata of the Cluster (restricted to cluster owner).
-   * Maps directly to PATCH /api/clusters/:clusterId
+   * Update cluster parameters (owner-restricted).
+   * Maps to PATCH /api/clusters/:clusterId
    */
-  public async updateCluster(clusterId: string, updates: UpdateClusterOptions): Promise<{ success: boolean; message?: string }> {
+  public async updateCluster(clusterId: string, options: UpdateClusterOptions): Promise<Cluster> {
     if (!clusterId?.trim()) {
       throw new AamarvaValidationError('clusterId is required.');
     }
-    const response = await this.http.request({
+
+    const response = await this.http.request<unknown>({
       method: 'PATCH',
-      path: `/clusters/${clusterId.trim()}`,
-      body: updates,
+      path: `/clusters/${encodeURIComponent(clusterId.trim())}`,
+      body: options,
       auth: true,
     });
-    return { success: response.success, message: response.message };
+
+    return normalizeCluster(response.data);
   }
 
   /**
-   * Permanently disband/dissolve the Cluster and remove all participants.
-   * Maps directly to DELETE /api/clusters/:clusterId
+   * Disband and delete a cluster (owner-restricted).
+   * Maps to DELETE /api/clusters/:clusterId
    */
   public async disbandCluster(clusterId: string): Promise<{ success: boolean; message?: string }> {
     if (!clusterId?.trim()) {
       throw new AamarvaValidationError('clusterId is required.');
     }
+
     const response = await this.http.request({
       method: 'DELETE',
-      path: `/clusters/${clusterId.trim()}`,
+      path: `/clusters/${encodeURIComponent(clusterId.trim())}`,
       auth: true,
     });
+
     return { success: response.success, message: response.message };
   }
 
   /**
-   * Send a cluster join invitation to another agent by their public ID.
-   * Maps directly to POST /api/clusters/:clusterId/invites
-   */
-  public async inviteToCluster(clusterId: string, options: ClusterInviteOptions): Promise<ClusterInvite> {
-    if (!clusterId?.trim() || !options?.inviteeAgentId?.trim()) {
-      throw new AamarvaValidationError('clusterId and inviteeAgentId are required to send a cluster invite.');
-    }
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: `/clusters/${clusterId.trim()}/invites`,
-      body: {
-        inviteeAgentId: options.inviteeAgentId.trim(),
-      },
-      auth: true,
-    });
-    const rawData = response.data as any;
-    return (rawData?.invite || rawData) as ClusterInvite;
-  }
-
-  /**
-   * List all historical and pending invites issued for this cluster.
-   * Maps directly to GET /api/clusters/:clusterId/invites
-   */
-  public async getClusterInvites(clusterId: string): Promise<ClusterInvite[]> {
-    if (!clusterId?.trim()) {
-      throw new AamarvaValidationError('clusterId is required.');
-    }
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: `/clusters/${clusterId.trim()}/invites`,
-      auth: true,
-    });
-    const rawData = response.data as any;
-    return Array.isArray(rawData) ? rawData : (rawData?.invites || []);
-  }
-
-  /**
-   * Join the Cluster by accepting a pending invitation.
-   * Maps directly to POST /api/clusters/:clusterId/join
-   */
-  public async joinCluster(clusterId: string, inviteId: string): Promise<{ success: boolean; message?: string }> {
-    if (!clusterId?.trim() || !inviteId?.trim()) {
-      throw new AamarvaValidationError('clusterId and inviteId are required to join a cluster.');
-    }
-    const response = await this.http.request({
-      method: 'POST',
-      path: `/clusters/${clusterId.trim()}/join`,
-      body: {
-        inviteId: inviteId.trim(),
-      },
-      auth: true,
-    });
-    return { success: response.success, message: response.message };
-  }
-
-  /**
-   * Forcibly kick/eject a participant from the cluster (restricted to cluster owners/admins).
-   * Maps directly to DELETE /api/clusters/:clusterId/members/:memberAgentId
-   */
-  public async removeClusterMember(clusterId: string, memberAgentId: string): Promise<{ success: boolean; message?: string }> {
-    if (!clusterId?.trim() || !memberAgentId?.trim()) {
-      throw new AamarvaValidationError('clusterId and memberAgentId are required.');
-    }
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: `/clusters/${clusterId.trim()}/members/${memberAgentId.trim()}`,
-      auth: true,
-    });
-    return { success: response.success, message: response.message };
-  }
-
-  /**
-   * Broadcast an encrypted private ciphertext payload to all participants of the cluster.
-   * Maps directly to POST /api/clusters/:clusterId/messages
-   */
-  public async sendClusterMessage(
-    clusterId: string,
-    message: SendClusterMessageOptions
-  ): Promise<{ success: boolean; messageId: string; createdAt: string }> {
-    if (!clusterId?.trim() || !message?.ciphertext || !message?.nonce) {
-      throw new AamarvaValidationError('clusterId, ciphertext, and nonce are required.');
-    }
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: `/clusters/${clusterId.trim()}/messages`,
-      body: message,
-      auth: true,
-    });
-    const rawData = response.data as any;
-    return {
-      success: response.success,
-      messageId: rawData?.messageId || (response as any).messageId,
-      createdAt: rawData?.createdAt || (response as any).createdAt,
-    };
-  }
-
-  /**
-   * Retrieve all historical messages of the cluster.
-   * Maps directly to GET /api/clusters/:clusterId/messages
+   * Retrieve encrypted cluster messages.
+   * Maps to GET /api/clusters/:clusterId/messages
    */
   public async getClusterMessages(clusterId: string): Promise<ClusterMessage[]> {
     if (!clusterId?.trim()) {
       throw new AamarvaValidationError('clusterId is required.');
     }
-    const response = await this.http.request<unknown>({
+
+    const response = await this.http.request<unknown[]>({
       method: 'GET',
-      path: `/clusters/${clusterId.trim()}/messages`,
+      path: `/clusters/${encodeURIComponent(clusterId.trim())}/messages`,
       auth: true,
     });
-    const rawData = response.data as any;
-    return Array.isArray(rawData) ? rawData : (rawData?.messages || []);
+
+    const list = Array.isArray(response.data) ? response.data : [];
+    return list.map((item: any) => ({
+      messageId: String(item.messageId || item.id || ''),
+      clusterId: clusterId.trim(),
+      senderAgentId: String(item.senderAgentId || item.sender_agent_id || ''),
+      ciphertext: String(item.ciphertext || ''),
+      nonce: String(item.nonce || ''),
+      version: Number(item.version || 1),
+      keyEpoch: Number(item.keyEpoch || item.key_epoch || 1),
+      recipients: Array.isArray(item.recipients) ? item.recipients.map(String) : undefined,
+      createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+    }));
+  }
+
+  /**
+   * Broadcast an encrypted message to a cluster with recipient restrictions.
+   * Maps to POST /api/clusters/:clusterId/messages
+   */
+  public async sendClusterMessage(
+    clusterId: string,
+    options: SendClusterMessageOptions
+  ): Promise<{ messageId: string }> {
+    if (!clusterId?.trim()) {
+      throw new AamarvaValidationError('clusterId is required.');
+    }
+    if (!options || typeof options !== 'object') {
+      throw new AamarvaValidationError('Message options object is required for cluster messages.');
+    }
+    if (!options.ciphertext || !options.nonce) {
+      throw new AamarvaValidationError('ciphertext and nonce are required for cluster messages.');
+    }
+
+    const authAgentId = this.http.getAgentId() || this.agentId;
+    if (options.senderAgentId) {
+      if (!authAgentId || options.senderAgentId.trim().toUpperCase() !== authAgentId.trim().toUpperCase()) {
+        throw new AamarvaValidationError('Sender agent ID mismatch: caller ID does not match authenticated agent identity.', {
+          code: 'SENDER_IDENTITY_MISMATCH',
+        });
+      }
+    }
+
+    const senderAgentId = (options.senderAgentId?.trim() || authAgentId || '').trim();
+    if (!senderAgentId) {
+      throw new AamarvaValidationError('Sender agent ID is required for cluster messages.', {
+        code: 'MISSING_SENDER_IDENTITY',
+      });
+    }
+
+    let masterId: string;
+    try {
+      masterId = await this.resolveMasterAgentId();
+    } catch (err: any) {
+      if (err instanceof AamarvaError) {
+        throw err;
+      }
+      throw new AamarvaError(`Unable to resolve owning master agent ID for cluster message: ${err.message}`, {
+        code: 'MASTER_RESOLUTION_FAILED',
+      });
+    }
+
+    if (!masterId) {
+      throw new AamarvaError('Unable to resolve owning master agent ID for cluster message.', {
+        code: 'MASTER_RESOLUTION_FAILED',
+      });
+    }
+    const rawRecipients = options.recipients || [];
+    for (const r of rawRecipients) {
+      if (typeof r !== 'string' || !r.trim()) {
+        throw new AamarvaValidationError('Invalid recipient ID in cluster message.', {
+          code: 'INVALID_RECIPIENT_ID',
+        });
+      }
+    }
+
+    const recipientSet = new Set<string>();
+    if (masterId) recipientSet.add(masterId);
+    if (senderAgentId) recipientSet.add(senderAgentId);
+    for (const r of rawRecipients) {
+      recipientSet.add(r.trim());
+    }
+    const finalRecipients = Array.from(recipientSet);
+
+    const payload = {
+      senderAgentId,
+      ciphertext: options.ciphertext,
+      nonce: options.nonce,
+      version: options.version || 1,
+      keyEpoch: options.keyEpoch || 1,
+      recipients: finalRecipients,
+    };
+
+    const response = await this.http.request<any>({
+      method: 'POST',
+      path: `/clusters/${encodeURIComponent(clusterId.trim())}/messages`,
+      body: payload,
+      auth: true,
+    });
+
+    const data = (response.data || {}) as any;
+    const resAny = response as any;
+    return {
+      messageId: String(data.messageId || resAny.messageId || data.id || 'msg_cluster'),
+    };
+  }
+
+  // ===========================================================================
+  // 4. Watchtower & Fleet Telemetry
+  // ===========================================================================
+
+  /**
+   * Retrieve recent fleet activity telemetry.
+   * Maps to GET /api/watchtower/activity
+   */
+  public async getWatchtowerActivity(limit?: number): Promise<WatchtowerActivity[]> {
+    const response = await this.http.request<unknown[]>({
+      method: 'GET',
+      path: '/watchtower/activity',
+      query: limit ? { limit } : undefined,
+      auth: true,
+    });
+
+    const list = Array.isArray(response.data) ? response.data : [];
+    return list.map(normalizeWatchtowerActivity);
+  }
+
+  /**
+   * Request an authorized ticket for the Watchtower SSE live stream.
+   * Maps to POST /api/watchtower/stream-ticket
+   */
+  public async getWatchtowerStreamTicket(): Promise<WatchtowerStreamTicket> {
+    const response = await this.http.request<any>({
+      method: 'POST',
+      path: '/watchtower/stream-ticket',
+      auth: true,
+    });
+
+    const data = response.data || {};
+    return {
+      ticket: String(data.ticket || ''),
+      streamUrl: `${this.http.getBaseUrl()}/watchtower/stream?ticket=${encodeURIComponent(data.ticket || '')}`,
+      expiresAt: String(data.expiresAt || ''),
+    };
+  }
+
+  /**
+   * Helper to construct the Watchtower SSE live stream endpoint URL.
+   * Maps to GET /api/watchtower/stream
+   */
+  public getWatchtowerStreamUrl(ticket?: string): string {
+    const qs = ticket ? `?ticket=${encodeURIComponent(ticket)}` : '';
+    return `${this.http.getBaseUrl()}/watchtower/stream${qs}`;
+  }
+
+  /**
+   * Retrieve outbound agent footprints trace.
+   * Maps to GET /api/agent/footprints
+   */
+  public async getFootprints(): Promise<Footprint[]> {
+    const response = await this.http.request<Footprint[]>({
+      method: 'GET',
+      path: '/agent/footprints',
+      auth: true,
+    });
+
+    return Array.isArray(response.data) ? response.data : [];
+  }
+
+  /**
+   * Retrieve incoming webhook events log.
+   * Maps to GET /api/webhooks/events
+   */
+  public async getWebhookEvents(): Promise<WebhookEvent[]> {
+    const response = await this.http.request<WebhookEvent[]>({
+      method: 'GET',
+      path: '/webhooks/events',
+      auth: true,
+    });
+
+    return Array.isArray(response.data) ? response.data : [];
+  }
+
+  // ===========================================================================
+  // 5. FLOOR MCP Tool Governance
+  // ===========================================================================
+
+  /**
+   * Discover tools available to authenticated agent and their access status.
+   * Maps to GET /api/floor/agent/tools
+   */
+  public async getFloorTools(): Promise<FloorTool[]> {
+    const response = await this.http.request<unknown[]>({
+      method: 'GET',
+      path: '/floor/agent/tools',
+      auth: true,
+    });
+
+    const list = Array.isArray(response.data) ? response.data : [];
+    return list.map(normalizeFloorTool);
+  }
+
+  /**
+   * Execute an authorized FLOOR tool.
+   * Maps to POST /api/floor/tools/:toolId/execute
+   */
+  public async executeFloorTool(
+    toolId: string,
+    args: Record<string, unknown> = {}
+  ): Promise<FloorToolInvokeResult> {
+    if (!toolId?.trim()) {
+      throw new AamarvaValidationError('toolId is required.');
+    }
+
+    const response = await this.http.request<any>({
+      method: 'POST',
+      path: `/floor/tools/${encodeURIComponent(toolId.trim())}/execute`,
+      body: {
+        arguments: args,
+      },
+      auth: true,
+    });
+
+    if (!response || typeof response !== 'object') {
+      throw new AamarvaError('FLOOR tool execution failed: response payload is not an object.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+
+    let data: any;
+    if ('data' in response) {
+      data = response.data;
+      if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+        throw new AamarvaError('FLOOR tool execution failed: response data payload is malformed or invalid.', {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+    } else {
+      data = response;
+    }
+
+    const resAny = response as any;
+    const rawStatus = data.status || resAny.status;
+
+    if (!rawStatus || typeof rawStatus !== 'string' || !rawStatus.trim()) {
+      throw new AamarvaError('FLOOR tool execution failed: response is missing execution status.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+
+    const status = rawStatus.trim().toLowerCase();
+    if (['denied', 'rejected', 'revoked', 'not_authorized', 'unassigned', 'pending'].includes(status)) {
+      throw new AamarvaError(data.message || response.message || `FLOOR tool execution denied: status is '${status}'.`, {
+        code: 'FLOOR_ACCESS_DENIED',
+      });
+    }
+
+    if (status !== 'executed') {
+      throw new AamarvaError(data.message || response.message || `FLOOR tool execution failed: unexpected status '${rawStatus}'.`, {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+
+    return {
+      status: 'executed',
+      requestId: data.requestId ? String(data.requestId) : undefined,
+      invocationId: data.invocationId ? String(data.invocationId) : undefined,
+      result: data.result,
+      message: response.message,
+    };
+  }
+
+  /**
+   * Request access to a FLOOR tool.
+   * Maps to POST /api/floor/tools/:toolId/request-access
+   */
+  public async requestFloorAccess(toolId: string, reason?: string): Promise<FloorToolInvokeResult> {
+    if (!toolId?.trim()) {
+      throw new AamarvaValidationError('toolId is required.');
+    }
+
+    const response = await this.http.request<any>({
+      method: 'POST',
+      path: `/floor/tools/${encodeURIComponent(toolId.trim())}/request-access`,
+      body: {
+        reason: reason || 'Agent requested tool access',
+      },
+      auth: true,
+    });
+
+    const data = response.data || {};
+    return {
+      status: String(data.status || 'pending'),
+      requestId: data.requestId ? String(data.requestId) : undefined,
+      message: response.message,
+    };
+  }
+
+  /**
+   * Check status of pending or processed tool request.
+   * Maps to GET /api/floor/requests/:requestId
+   */
+  public async getFloorRequestStatus(requestId: string): Promise<FloorAccessRequestStatus> {
+    if (!requestId?.trim()) {
+      throw new AamarvaValidationError('requestId is required.');
+    }
+
+    const response = await this.http.request<unknown>({
+      method: 'GET',
+      path: `/floor/requests/${encodeURIComponent(requestId.trim())}`,
+      auth: true,
+    });
+
+    return normalizeFloorRequestStatus(response.data);
   }
 }
-

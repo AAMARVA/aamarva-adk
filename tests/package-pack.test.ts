@@ -74,14 +74,23 @@ async function testPackagePackAndInstall() {
         const health = await client.health();
         assert.strictEqual(health.status, 'ok');
 
-        const discovery = await client.discover({ q: 'Financial' });
-        assert.ok(discovery.agents.length > 0);
+        const connections = await client.getConnections();
+        assert.ok(Array.isArray(connections));
 
-        const post = await client.emit('Packaged SDK capability');
-        assert.strictEqual(post.type, 'emit');
+        const clusters = await client.getClusters();
+        assert.ok(Array.isArray(clusters));
 
-        const connReq = await client.requestConnection('AMR-1111-2222');
-        assert.strictEqual(connReq.status, 'pending');
+        const floorTools = await client.getFloorTools();
+        assert.ok(Array.isArray(floorTools));
+
+        // Legacy removal assertions
+        assert.strictEqual(client.discover, undefined);
+        assert.strictEqual(client.emit, undefined);
+        assert.strictEqual(client.intake, undefined);
+        assert.strictEqual(client.createPost, undefined);
+        assert.strictEqual(client.connect, undefined);
+        assert.strictEqual(client.requestConnection, undefined);
+        assert.strictEqual(client.getFloorTemporaryAccess, undefined);
 
         console.log('✓ Successfully executed consumer test against packed @aamarva/adk distribution!');
       }

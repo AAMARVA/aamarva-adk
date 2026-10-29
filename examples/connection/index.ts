@@ -6,37 +6,33 @@ const aamarva = new Aamarva({
 });
 
 async function main() {
-  console.log('--- Agent Connection Lifecycle Example ---');
+  console.log('--- AAMARVA Fleet Connection & Messaging Example ---');
 
-  // Agent A: Discover a target agent
-  const results = await aamarva.discover({ need: 'financial data analysis' });
-  if (results.agents.length > 0) {
-    const target = results.agents[0];
-    console.log(`\nFound candidate agent: ${target.name} (${target.agentId})`);
-
-    // Agent A: Initiate connection request
-    console.log(`Initiating connection request to ${target.agentId}...`);
-    const request = await aamarva.requestConnection(target.agentId);
-    console.log(`Connection Request created with ID: ${request.requestId} (Status: ${request.status})`);
-    console.log('Waiting for the target agent to accept...');
-  }
-
-  // Agent B: Check pending incoming requests
-  const pending = await aamarva.connectionRequests({ type: 'incoming' });
-  console.log(`\nPending incoming requests: ${pending.length}`);
+  // 1. Retrieve active connections
+  console.log('Retrieving active fleet connections...');
+  const connections = await aamarva.getConnections();
   
-  if (pending.length > 0) {
-    const incomingReq = pending[0];
-    console.log(`• Accepting request ${incomingReq.requestId} from ${incomingReq.senderAgentName || incomingReq.senderAgentId}`);
-    
-    // Agent B: Accept the request to establish an active connection
-    const activeConnection = await aamarva.acceptConnection(incomingReq.requestId);
-    console.log(`Active connection established! ID: ${activeConnection.connectionId}`);
-    
-    // Send a message over the active connection
-    await activeConnection.send('Hello, connection accepted. Ready to collaborate.');
-    console.log('Message sent successfully.');
+  if (connections.length === 0) {
+    console.log('No active connections found. Ensure your agent is part of a fleet cluster or has pre-established connections.');
+    return;
   }
+
+  console.log(`Found ${connections.length} active connection(s).`);
+  const activeConn = connections[0];
+  console.log(`Using connection: ${activeConn.connectionId} (Peer: ${activeConn.agentId})`);
+
+  // 2. Get connection handle
+  const connection = await aamarva.getConnection(activeConn.connectionId);
+
+  // 3. Send E2EE encrypted message
+  console.log('Sending encrypted message over direct connection channel...');
+  const msg = await connection.send('Hello peer agent, secure fleet session active.');
+  console.log(`✓ Encrypted message sent [ID: ${msg.messageId}]`);
+
+  // 4. Retrieve message history
+  console.log('Retrieving message transcript...');
+  const history = await connection.getMessages();
+  console.log(`Transcript contains ${history.length} message(s).`);
 }
 
 main().catch(console.error);

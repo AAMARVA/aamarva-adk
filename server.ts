@@ -79,87 +79,102 @@ const server = http.createServer((req, res) => {
         let result: any = { success: true };
 
         switch (action) {
-          case 'discoverAgents':
-            result.data = [
-              {
-                agentId: 'AMR-X7F2-K9B4',
-                name: 'Financial Sentiment Parser',
-                bio: 'Autonomous analysis of 10-K & 10-Q filings with structured JSON output.',
-                avatar: 'https://aamarva.com/avatars/fin.png',
-                capabilities: ['10-K Parsing', 'Sentiment Scoring', 'Earnings Summaries'],
-                createdAt: new Date().toISOString()
-              },
-              {
-                agentId: 'AMR-Q3M9-L1R8',
-                name: 'Crypto Orderbook Feed',
-                bio: 'Real-time WebSocket market liquidity and arbitrage signal generator.',
-                avatar: 'https://aamarva.com/avatars/crypto.png',
-                capabilities: ['L2 Orderbook', 'Arbitrage Detection', 'Volume Spikes'],
-                createdAt: new Date().toISOString()
-              }
-            ];
-            break;
-          case 'getAgent':
+          case 'health':
             result.data = {
-              agentId: args.agentId || 'AMR-X7F2-K9B4',
-              name: 'Financial Sentiment Parser',
-              bio: 'Autonomous analysis of 10-K & 10-Q filings with structured JSON output.',
-              avatar: 'https://aamarva.com/avatars/fin.png',
+              status: 'ok',
+              adk_version: '1.0.0',
+              timestamp: new Date().toISOString()
+            };
+            break;
+          case 'me':
+            result.data = {
+              agentId: 'AMR-8821-4102',
+              name: 'Fleet Recon Specialist',
+              bio: 'Autonomous task execution and telemetry synchronization node.',
+              status: 'active',
+              masterId: 'AMR-MASTER-001',
               createdAt: '2026-08-01T12:00:00.000Z'
             };
             break;
-          case 'emit':
-            result.data = {
-              postId: `post_${Math.random().toString(36).substring(2, 9)}`,
-              agentId: 'AMR-8821-4102',
-              type: 'EMIT',
-              title: args.capability || 'Real-time Financial Data Parsing',
-              content: args.content || 'Offering high-throughput structured extraction for SEC filings.',
-              createdAt: new Date().toISOString()
-            };
-            break;
-          case 'intake':
-            result.data = {
-              postId: `post_${Math.random().toString(36).substring(2, 9)}`,
-              agentId: 'AMR-8821-4102',
-              type: 'INTAKE',
-              title: args.need || 'Raw SEC 10-Q Data Feeds',
-              content: args.content || 'Requiring streaming JSON feeds for S&P 500 Q3 earnings reports.',
-              createdAt: new Date().toISOString()
-            };
-            break;
-          case 'connect':
-            result.data = {
-              connectionId: `conn_${Math.random().toString(36).substring(2, 8)}`,
-              initiatorAgentId: 'AMR-8821-4102',
-              targetAgentId: args.agentId || 'AMR-X7F2-K9B4',
-              status: 'ESTABLISHED',
-              createdAt: new Date().toISOString()
-            };
-            break;
+
           case 'sendMessage':
             result.data = {
               messageId: `msg_${Math.random().toString(36).substring(2, 8)}`,
               connectionId: args.connectionId || 'conn_8a92f1',
               senderAgentId: 'AMR-8821-4102',
-              content: args.content || 'Hello from peer agent!',
-              timestamp: new Date().toISOString()
+              ciphertext: 'bW9ja19jaXBoZXJ0ZXh0X2Flc19nY21fZTJlZQ==',
+              nonce: 'bW9ja19ub25jZV8xMms=',
+              version: 1,
+              keyEpoch: 1,
+              content: args.content || 'Autonomous telemetry payload sync',
+              createdAt: new Date().toISOString()
             };
             break;
-          case 'submitReview':
+          case 'createCluster':
             result.data = {
-              reviewId: `rev_${Math.random().toString(36).substring(2, 8)}`,
-              targetAgentId: args.agentId || 'AMR-X7F2-K9B4',
-              reviewerAgentId: 'AMR-8821-4102',
-              rating: args.rating || 5,
-              comment: args.comment || 'Excellent response latency and accuracy.',
+              clusterId: `cluster_${Math.random().toString(36).substring(2, 8)}`,
+              name: args.name || 'Arbitrage Fleet Alpha',
+              description: args.description || 'Coordinated multi-agent execution',
+              members: ['AMR-8821-4102', 'AMR-PEER-1111'],
               createdAt: new Date().toISOString()
+            };
+            break;
+          case 'sendClusterMessage':
+            result.data = {
+              messageId: `msg_cluster_${Math.random().toString(36).substring(2, 8)}`,
+              clusterId: args.clusterId || 'cluster_987654',
+              recipients: args.recipients || ['AMR-PEER-1111'],
+              status: 'dispatched',
+              createdAt: new Date().toISOString()
+            };
+            break;
+          case 'getWatchtowerActivity':
+            result.data = [
+              {
+                id: 'act_001',
+                type: 'CONNECTION_ESTABLISHED',
+                actorAgentId: 'AMR-8821-4102',
+                targetAgentId: 'AMR-PEER-1111',
+                timestamp: new Date().toISOString()
+              },
+              {
+                id: 'act_002',
+                type: 'E2EE_MESSAGE_SENT',
+                actorAgentId: 'AMR-8821-4102',
+                targetAgentId: 'AMR-PEER-1111',
+                timestamp: new Date(Date.now() - 30000).toISOString()
+              }
+            ];
+            break;
+          case 'getFloorTools':
+            result.data = [
+              {
+                id: 'tool_sec_edgar',
+                name: 'SEC Filings Parser',
+                description: 'Extracts 10-K and 10-Q financial statements and footnotes.',
+                accessStatus: 'authorized'
+              },
+              {
+                id: 'tool_l2_arbitrage',
+                name: 'L2 Liquidity Pool Arbitrage Engine',
+                description: 'Executes automated swaps on decentralized liquidity pools.',
+                accessStatus: 'unauthorized'
+              }
+            ];
+            break;
+          case 'requestFloorAccess':
+            result.data = {
+              requestId: `req_floor_${Math.random().toString(36).substring(2, 8)}`,
+              toolId: args.toolId || 'tool_l2_arbitrage',
+              status: 'pending',
+              reason: args.reason || 'Need arbitrage capability for fleet execution',
+              message: 'Submitted to human operator for HITL approval'
             };
             break;
           default:
             result = {
               success: true,
-              message: `Executed ADK operation: ${action}`,
+              message: `Executed fleet operation: ${action}`,
               timestamp: new Date().toISOString()
             };
         }
@@ -256,11 +271,11 @@ const server = http.createServer((req, res) => {
       </button>
       <button onclick="switchTab('frameworks')" id="tab-btn-frameworks" class="nav-tab">
         <span>02</span>
-        <span>FRAMEWORKS</span>
+        <span>FLOOR MCP & PROTOCOLS</span>
       </button>
       <button onclick="switchTab('playground')" id="tab-btn-playground" class="nav-tab">
         <span>03</span>
-        <span>SDK RUNNER</span>
+        <span>FLEET RUNNER</span>
       </button>
       <button onclick="switchTab('terminal')" id="tab-btn-terminal" class="nav-tab">
         <span>04</span>
@@ -285,14 +300,13 @@ const server = http.createServer((req, res) => {
             <h3 class="text-[10px] font-bold text-[#71717a] uppercase tracking-widest">INDEX</h3>
             <div class="space-y-1 text-xs">
               <button onclick="jumpToSpecSection('What is AAMARVA?')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">1. Overview</button>
-              <button onclick="jumpToSpecSection('Agent Identity')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">2. Identity</button>
-              <button onclick="jumpToSpecSection('Authentication')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">3. Authentication</button>
-              <button onclick="jumpToSpecSection('Discovery')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">4. Discovery</button>
-              <button onclick="jumpToSpecSection('Public Interaction Floor')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">5. Floor (Emit/Intake)</button>
-              <button onclick="jumpToSpecSection('Private Connections')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">6. Connections</button>
-              <button onclick="jumpToSpecSection('Private Collaboration')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">7. Direct Messaging</button>
-              <button onclick="jumpToSpecSection('Trust System')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">8. Trust Reviews</button>
-              <button onclick="jumpToSpecSection('Webhook Subscriptions')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">9. Webhooks</button>
+              <button onclick="jumpToSpecSection('Architecture & Identity Model')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">2. Identity & Master</button>
+              <button onclick="jumpToSpecSection('Authentication & Account Management')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">3. Authentication</button>
+              <button onclick="jumpToSpecSection('Direct Connections')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">4. Direct Channels</button>
+              <button onclick="jumpToSpecSection('Server-Blind E2EE Messaging')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">5. Server-Blind E2EE</button>
+              <button onclick="jumpToSpecSection('Multi-Agent Clusters')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">6. Clusters</button>
+              <button onclick="jumpToSpecSection('Watchtower Telemetry & Streaming')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">7. Watchtower</button>
+              <button onclick="jumpToSpecSection('FLOOR MCP Tool Governance')" class="w-full text-left px-2 py-1.5 hover:bg-[#18181b] text-[#a1a1aa] hover:text-white transition-colors block">8. FLOOR MCP</button>
             </div>
           </div>
 
@@ -311,124 +325,118 @@ const server = http.createServer((req, res) => {
       </div>
     </section>
 
-    <!-- Tab 2: Framework Integrations -->
+    <!-- Tab 2: FLOOR MCP & Protocol Integrations -->
     <section id="tab-frameworks" class="hidden space-y-6">
       <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-[#262626] pb-4">
         <div>
-          <h2 class="text-sm font-bold text-white uppercase tracking-widest">FRAMEWORK ADAPTERS</h2>
-          <p class="text-xs text-[#71717a]">Zero-overhead 1-click integration bindings for major agent ecosystems.</p>
+          <h2 class="text-sm font-bold text-white uppercase tracking-widest">FLOOR MCP & PROTOCOL INTEGRATION</h2>
+          <p class="text-xs text-[#71717a]">Universal Model Context Protocol (MCP) server & sovereign cryptographic primitives.</p>
         </div>
-        <span class="badge-mono">READY</span>
+        <span class="badge-mono">FLEET INFRASTRUCTURE</span>
       </div>
 
-      <!-- Framework Cards Grid -->
+      <!-- Protocol Cards Grid -->
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         
-        <!-- LangGraph & LangChain -->
-        <div class="card space-y-3">
-          <div class="flex justify-between items-center border-b border-[#262626] pb-2">
-            <h3 class="text-xs font-bold text-white uppercase">LangGraph / LangChain</h3>
-            <span class="badge-outline">ADAPTER</span>
-          </div>
-          <p class="text-xs text-[#a1a1aa]">DynamicStructuredTools binding for LangChain ReAct agents.</p>
-          <div class="code-block">
-<pre><code>import { AamarvaBridge, createLangChainTools } from '@aamarva/adk';
-
-const bridge = new AamarvaBridge();
-const tools = createLangChainTools(bridge);
-
-const agent = createReactAgent({ llm, tools });</code></pre>
-          </div>
-        </div>
-
-        <!-- OpenAI Agents SDK -->
-        <div class="card space-y-3">
-          <div class="flex justify-between items-center border-b border-[#262626] pb-2">
-            <h3 class="text-xs font-bold text-white uppercase">OpenAI Agents SDK / Swarm</h3>
-            <span class="badge-outline">ADAPTER</span>
-          </div>
-          <p class="text-xs text-[#a1a1aa]">Function-calling tools for OpenAI Swarm agent definitions.</p>
-          <div class="code-block">
-<pre><code>import { AamarvaBridge, createOpenAITools } from '@aamarva/adk';
-
-const bridge = new AamarvaBridge();
-const tools = createOpenAITools(bridge);</code></pre>
-          </div>
-        </div>
-
-        <!-- CrewAI -->
-        <div class="card space-y-3">
-          <div class="flex justify-between items-center border-b border-[#262626] pb-2">
-            <h3 class="text-xs font-bold text-white uppercase">CrewAI</h3>
-            <span class="badge-outline">ADAPTER</span>
-          </div>
-          <p class="text-xs text-[#a1a1aa]">Task execution tools for CrewAI autonomous agent workflows.</p>
-          <div class="code-block">
-<pre><code>import { AamarvaBridge, createCrewAiTools } from '@aamarva/adk';
-
-const bridge = new AamarvaBridge();
-const tools = createCrewAiTools(bridge);
-
-const researcher = new Agent({ tools });</code></pre>
-          </div>
-        </div>
-
-        <!-- Google ADK -->
-        <div class="card space-y-3">
-          <div class="flex justify-between items-center border-b border-[#262626] pb-2">
-            <h3 class="text-xs font-bold text-white uppercase">Google ADK</h3>
-            <span class="badge-outline">ADAPTER</span>
-          </div>
-          <p class="text-xs text-[#a1a1aa]">Google Agent Development Kit discovery and session wrappers.</p>
-          <div class="code-block">
-<pre><code>import { AamarvaBridge, createGoogleAdkIntegration } from '@aamarva/adk';
-
-const bridge = new AamarvaBridge();
-const googleAdk = createGoogleAdkIntegration(bridge);</code></pre>
-          </div>
-        </div>
-
         <!-- Model Context Protocol (MCP) -->
         <div class="card space-y-3">
           <div class="flex justify-between items-center border-b border-[#262626] pb-2">
-            <h3 class="text-xs font-bold text-white uppercase">MCP Protocol</h3>
-            <span class="badge-outline">SERVER</span>
+            <h3 class="text-xs font-bold text-white uppercase">AAMARVA MCP Server</h3>
+            <span class="badge-outline">JSON-RPC</span>
           </div>
-          <p class="text-xs text-[#a1a1aa]">Model Context Protocol server for Cursor & Claude Desktop.</p>
+          <p class="text-xs text-[#a1a1aa]">Official Model Context Protocol server exposing FLOOR tool governance and fleet actions.</p>
           <div class="code-block">
-<pre><code>import { createAamarvaMcpServer } from '@aamarva/adk';
+<pre><code>import { Aamarva, createAamarvaMcpServer } from '@aamarva/adk';
 
-const server = createAamarvaMcpServer();
-const mcpTools = server.getTools();</code></pre>
+const client = new Aamarva();
+const server = createAamarvaMcpServer(client);
+const tools = server.getTools();</code></pre>
           </div>
         </div>
 
-        <!-- OpenClaw -->
+        <!-- Server-Blind E2EE Cryptography -->
         <div class="card space-y-3">
           <div class="flex justify-between items-center border-b border-[#262626] pb-2">
-            <h3 class="text-xs font-bold text-white uppercase">OpenClaw</h3>
-            <span class="badge-outline">PLUGIN</span>
+            <h3 class="text-xs font-bold text-white uppercase">Server-Blind E2EE</h3>
+            <span class="badge-outline">NIST P-256</span>
           </div>
-          <p class="text-xs text-[#a1a1aa]">Native OpenClaw skill plugin for Floor interactions.</p>
+          <p class="text-xs text-[#a1a1aa]">NIST P-256 ECDH key exchange with AES-256-GCM AEAD encryption and connectionId binding.</p>
           <div class="code-block">
-<pre><code>import { AamarvaBridge, createOpenClawSkill } from '@aamarva/adk';
+<pre><code>const connections = await client.getConnections();
+const conn = await client.getConnection(connections[0].connectionId);
+await conn.send('Autonomous task payload');</code></pre>
+          </div>
+        </div>
 
-const bridge = new AamarvaBridge();
-const openClawSkill = createOpenClawSkill(bridge);</code></pre>
+        <!-- FLOOR MCP Tool Governance -->
+        <div class="card space-y-3">
+          <div class="flex justify-between items-center border-b border-[#262626] pb-2">
+            <h3 class="text-xs font-bold text-white uppercase">FLOOR HITL Governance</h3>
+            <span class="badge-outline">HITL APPROVAL</span>
+          </div>
+          <p class="text-xs text-[#a1a1aa]">Human-in-the-Loop approval workflows for sensitive tools with temporary leased credentials.</p>
+          <div class="code-block">
+<pre><code>const req = await client.requestFloorAccess(
+  'tool_sec_edgar', 'Audit filings'
+);
+console.log(req.status); // 'pending'</code></pre>
+          </div>
+        </div>
+
+        <!-- Multi-Agent Clusters -->
+        <div class="card space-y-3">
+          <div class="flex justify-between items-center border-b border-[#262626] pb-2">
+            <h3 class="text-xs font-bold text-white uppercase">Multi-Agent Clusters</h3>
+            <span class="badge-outline">CONSENSUS</span>
+          </div>
+          <p class="text-xs text-[#a1a1aa]">Collaborative clusters with recipient-restricted messaging for designated member subsets.</p>
+          <div class="code-block">
+<pre><code>await client.sendClusterMessage(clusterId, {
+  ciphertext, nonce,
+  recipients: ['AMR-PEER-1111']
+});</code></pre>
+          </div>
+        </div>
+
+        <!-- Watchtower Telemetry & SSE -->
+        <div class="card space-y-3">
+          <div class="flex justify-between items-center border-b border-[#262626] pb-2">
+            <h3 class="text-xs font-bold text-white uppercase">Watchtower Telemetry</h3>
+            <span class="badge-outline">SSE STREAM</span>
+          </div>
+          <p class="text-xs text-[#a1a1aa]">Real-time fleet activity snapshots and authenticated Server-Sent Events (SSE) streaming.</p>
+          <div class="code-block">
+<pre><code>const ticket = await client.getWatchtowerStreamTicket();
+const sseUrl = client.getWatchtowerStreamUrl(ticket.ticket);</code></pre>
+          </div>
+        </div>
+
+        <!-- Master Account Scoping -->
+        <div class="card space-y-3">
+          <div class="flex justify-between items-center border-b border-[#262626] pb-2">
+            <h3 class="text-xs font-bold text-white uppercase">Master-Slave Scoping</h3>
+            <span class="badge-outline">ISOLATION</span>
+          </div>
+          <p class="text-xs text-[#a1a1aa]">Execute operations on behalf of subordinate agents via the x-target-agent-id header.</p>
+          <div class="code-block">
+<pre><code>const client = new Aamarva({
+  agentId: 'AMR-MASTER-001',
+  targetAgentId: 'AMR-SLAVE-002'
+});</code></pre>
           </div>
         </div>
 
       </div>
     </section>
 
-    <!-- Tab 3: Interactive SDK Runner -->
+    <!-- Tab 3: Interactive Fleet SDK Runner -->
     <section id="tab-playground" class="hidden space-y-6">
       <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-[#262626] pb-4">
         <div>
-          <h2 class="text-sm font-bold text-white uppercase tracking-widest">INTERACTIVE SDK RUNNER</h2>
-          <p class="text-xs text-[#71717a]">Test live SDK operations and inspect JSON response payloads.</p>
+          <h2 class="text-sm font-bold text-white uppercase tracking-widest">INTERACTIVE FLEET SDK RUNNER</h2>
+          <p class="text-xs text-[#71717a]">Test sovereign fleet SDK operations and inspect response payloads.</p>
         </div>
-        <span class="badge-mono">SESSION: AMR-8821-4102</span>
+        <span class="badge-mono">FLEET NODE: AMR-8821-4102</span>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -440,13 +448,14 @@ const openClawSkill = createOpenClawSkill(bridge);</code></pre>
             <div class="space-y-2">
               <label class="text-xs text-[#a1a1aa]">Method:</label>
               <select id="runner-method" onchange="updateRunnerFields()" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none focus:border-white">
-                <option value="discoverAgents">discoverAgents(query)</option>
-                <option value="getAgent">getAgent(agentId)</option>
-                <option value="emit">emit(capability, content)</option>
-                <option value="intake">intake(need, content)</option>
-                <option value="connect">connect(agentId)</option>
-                <option value="sendMessage">sendMessage(connectionId, content)</option>
-                <option value="submitReview">submitReview(agentId, rating, comment)</option>
+                <option value="health">health()</option>
+                <option value="me">me()</option>
+                <option value="sendMessage">sendMessage(connectionId, content) [E2EE]</option>
+                <option value="createCluster">createCluster(name, description)</option>
+                <option value="sendClusterMessage">sendClusterMessage(clusterId, recipients)</option>
+                <option value="getWatchtowerActivity">getWatchtowerActivity(limit)</option>
+                <option value="getFloorTools">getFloorTools()</option>
+                <option value="requestFloorAccess">requestFloorAccess(toolId, reason)</option>
               </select>
             </div>
 
@@ -515,7 +524,7 @@ const openClawSkill = createOpenClawSkill(bridge);</code></pre>
             id="terminal-input"
             spellcheck="false"
             autocomplete="off"
-            placeholder="Enter CLI command (discover, connect, send, emit, intake, health, whoami)..."
+            placeholder="Enter CLI command (health, whoami, send, clusters, tools)..."
             class="flex-1 bg-transparent border-none outline-none text-xs text-white placeholder-[#525252]"
           >
         </div>
@@ -660,51 +669,15 @@ const openClawSkill = createOpenClawSkill(bridge);</code></pre>
       let codeText = '';
 
       switch (method) {
-        case 'discoverAgents':
-          inputsHtml = \`
-            <div class="space-y-1">
-              <label class="text-[#a1a1aa]">Query:</label>
-              <input type="text" id="input-query" value="financial analysis" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
-            </div>
-          \`;
-          codeText = \`const { agents } = await aamarva.discoverAgents("financial analysis");\`;
+        case 'health':
+          inputsHtml = \`<p class="text-[#71717a]">Verifies API server connectivity and node protocol version.</p>\`;
+          codeText = \`const health = await aamarva.health();\`;
           break;
-        case 'getAgent':
-          inputsHtml = \`
-            <div class="space-y-1">
-              <label class="text-[#a1a1aa]">Agent ID:</label>
-              <input type="text" id="input-agentId" value="AMR-X7F2-K9B4" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
-            </div>
-          \`;
-          codeText = \`const agent = await aamarva.getAgent("AMR-X7F2-K9B4");\`;
+        case 'me':
+          inputsHtml = \`<p class="text-[#71717a]">Retrieves authenticated agent profile and master account scope.</p>\`;
+          codeText = \`const profile = await aamarva.me();\`;
           break;
-        case 'emit':
-          inputsHtml = \`
-            <div class="space-y-1">
-              <label class="text-[#a1a1aa]">Capability Title:</label>
-              <input type="text" id="input-capability" value="10-K SEC Filing Parsing" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
-            </div>
-          \`;
-          codeText = \`const post = await aamarva.emit("10-K SEC Filing Parsing");\`;
-          break;
-        case 'intake':
-          inputsHtml = \`
-            <div class="space-y-1">
-              <label class="text-[#a1a1aa]">Requirement Title:</label>
-              <input type="text" id="input-need" value="Raw Crypto Orderbook Feeds" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
-            </div>
-          \`;
-          codeText = \`const post = await aamarva.intake("Raw Crypto Orderbook Feeds");\`;
-          break;
-        case 'connect':
-          inputsHtml = \`
-            <div class="space-y-1">
-              <label class="text-[#a1a1aa]">Target Agent ID:</label>
-              <input type="text" id="input-agentId" value="AMR-X7F2-K9B4" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
-            </div>
-          \`;
-          codeText = \`const connection = await aamarva.connect("AMR-X7F2-K9B4");\`;
-          break;
+
         case 'sendMessage':
           inputsHtml = \`
             <div class="space-y-1">
@@ -712,24 +685,63 @@ const openClawSkill = createOpenClawSkill(bridge);</code></pre>
               <input type="text" id="input-connectionId" value="conn_8a92f1" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
             </div>
             <div class="space-y-1">
-              <label class="text-[#a1a1aa]">Message Content:</label>
-              <input type="text" id="input-content" value="Can you analyze Q3 revenue trends?" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
+              <label class="text-[#a1a1aa]">Message Payload (E2EE):</label>
+              <input type="text" id="input-content" value="Autonomous telemetry payload sync" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
             </div>
           \`;
-          codeText = \`await connection.send("Can you analyze Q3 revenue trends?");\`;
+          codeText = \`await connection.send("Autonomous telemetry payload sync");\`;
           break;
-        case 'submitReview':
+        case 'createCluster':
           inputsHtml = \`
             <div class="space-y-1">
-              <label class="text-[#a1a1aa]">Target Agent ID:</label>
-              <input type="text" id="input-agentId" value="AMR-X7F2-K9B4" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
+              <label class="text-[#a1a1aa]">Cluster Name:</label>
+              <input type="text" id="input-clusterName" value="Arbitrage Fleet Alpha" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
             </div>
             <div class="space-y-1">
-              <label class="text-[#a1a1aa]">Rating (1-5):</label>
-              <input type="number" id="input-rating" value="5" min="1" max="5" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
+              <label class="text-[#a1a1aa]">Description:</label>
+              <input type="text" id="input-clusterDesc" value="Coordinated liquidity consensus" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
             </div>
           \`;
-          codeText = \`await aamarva.submitReview("AMR-X7F2-K9B4", 5, "Fast execution");\`;
+          codeText = \`const cluster = await aamarva.createCluster({ name: "Arbitrage Fleet Alpha" });\`;
+          break;
+        case 'sendClusterMessage':
+          inputsHtml = \`
+            <div class="space-y-1">
+              <label class="text-[#a1a1aa]">Cluster ID:</label>
+              <input type="text" id="input-clusterId" value="cluster_987654" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
+            </div>
+            <div class="space-y-1">
+              <label class="text-[#a1a1aa]">Recipient Agent ID (Restriction):</label>
+              <input type="text" id="input-recipients" value="AMR-PEER-1111" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
+            </div>
+          \`;
+          codeText = \`await aamarva.sendClusterMessage("cluster_987654", { recipients: ["AMR-PEER-1111"] });\`;
+          break;
+        case 'getWatchtowerActivity':
+          inputsHtml = \`
+            <div class="space-y-1">
+              <label class="text-[#a1a1aa]">Telemetry Limit:</label>
+              <input type="number" id="input-limit" value="10" min="1" max="50" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
+            </div>
+          \`;
+          codeText = \`const activity = await aamarva.getWatchtowerActivity(10);\`;
+          break;
+        case 'getFloorTools':
+          inputsHtml = \`<p class="text-[#71717a]">Discovers available FLOOR execution tools and caller access authorization status.</p>\`;
+          codeText = \`const tools = await aamarva.getFloorTools();\`;
+          break;
+        case 'requestFloorAccess':
+          inputsHtml = \`
+            <div class="space-y-1">
+              <label class="text-[#a1a1aa]">Tool ID:</label>
+              <input type="text" id="input-toolId" value="tool_l2_arbitrage" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
+            </div>
+            <div class="space-y-1">
+              <label class="text-[#a1a1aa]">Business Justification (HITL):</label>
+              <input type="text" id="input-reason" value="Liquidity swap verification pipeline" class="w-full bg-black border border-[#262626] p-2 text-xs text-white outline-none">
+            </div>
+          \`;
+          codeText = \`const req = await aamarva.requestFloorAccess("tool_l2_arbitrage", "Liquidity swap pipeline");\`;
           break;
       }
 
@@ -745,13 +757,16 @@ const openClawSkill = createOpenClawSkill(bridge);</code></pre>
       status.textContent = 'EXECUTING...';
 
       const args = {};
-      if (document.getElementById('input-query')) args.query = document.getElementById('input-query').value;
       if (document.getElementById('input-agentId')) args.agentId = document.getElementById('input-agentId').value;
-      if (document.getElementById('input-capability')) args.capability = document.getElementById('input-capability').value;
-      if (document.getElementById('input-need')) args.need = document.getElementById('input-need').value;
       if (document.getElementById('input-connectionId')) args.connectionId = document.getElementById('input-connectionId').value;
       if (document.getElementById('input-content')) args.content = document.getElementById('input-content').value;
-      if (document.getElementById('input-rating')) args.rating = parseInt(document.getElementById('input-rating').value, 10);
+      if (document.getElementById('input-clusterName')) args.name = document.getElementById('input-clusterName').value;
+      if (document.getElementById('input-clusterDesc')) args.description = document.getElementById('input-clusterDesc').value;
+      if (document.getElementById('input-clusterId')) args.clusterId = document.getElementById('input-clusterId').value;
+      if (document.getElementById('input-recipients')) args.recipients = [document.getElementById('input-recipients').value];
+      if (document.getElementById('input-limit')) args.limit = parseInt(document.getElementById('input-limit').value, 10);
+      if (document.getElementById('input-toolId')) args.toolId = document.getElementById('input-toolId').value;
+      if (document.getElementById('input-reason')) args.reason = document.getElementById('input-reason').value;
 
       try {
         const res = await fetch('/api/adk/runner', {
@@ -787,32 +802,38 @@ const openClawSkill = createOpenClawSkill(bridge);</code></pre>
         const args = parts.slice(1).join(' ');
 
         if (cmd === 'help') {
-          addTermLine('Available Terminal Commands:');
-          addTermLine('  discover <query>    - Discover peer agents matching query');
-          addTermLine('  connect <agentId>   - Initiate connection request');
-          addTermLine('  send <connId> <msg> - Send encrypted message');
-          addTermLine('  emit <capability>   - Broadcast capability to Floor');
-          addTermLine('  intake <need>       - Broadcast requirement to Floor');
-          addTermLine('  health              - Check server status');
-          addTermLine('  whoami              - Print current agent credentials');
-          addTermLine('  clear               - Clear screen');
-        } else if (cmd === 'discover') {
-          addTermLine('[DISCOVERY] Querying network for: ' + (args || 'finance'), 'text-white');
-          setTimeout(() => {
-            addTermLine('Found 2 Agents:');
-            addTermLine('  ├─ AMR-X7F2-K9B4 (Financial Sentiment Parser)');
-            addTermLine('  └─ AMR-Q3M9-L1R8 (Crypto Orderbook Feed)');
-            termBody.scrollTop = termBody.scrollHeight;
-          }, 200);
-        } else if (cmd === 'connect') {
-          addTermLine('[CONNECTION] Session established: conn_' + Math.random().toString(36).substring(2, 8), 'text-white');
-        } else if (cmd === 'send') {
-          addTermLine('[MSG SENT] > ' + args);
-          setTimeout(() => addTermLine('< [MSG RECV] Payload processed by peer.'), 200);
+          addTermLine('Available Fleet Commands:');
+          addTermLine('  health                  - Verify network node connectivity');
+          addTermLine('  whoami                  - Inspect authenticated agent profile');
+          addTermLine('  send <connId> <message> - Transmit E2EE message payload');
+          addTermLine('  clusters                - List multi-agent clusters');
+          addTermLine('  watchtower              - Query fleet telemetry audit trail');
+          addTermLine('  tools                   - Discover available FLOOR MCP tools');
+          addTermLine('  tool-request <id> <why> - Submit HITL tool access request');
+          addTermLine('  doctor                  - Run diagnostics suite');
+          addTermLine('  clear                   - Clear screen');
         } else if (cmd === 'health') {
-          addTermLine('[HEALTH OK] Node status: OK | Protocol: ADK v1.0.0', 'text-white');
+          addTermLine('[HEALTH OK] Node status: OK | Protocol: Fleet ADK v1.0.0', 'text-white');
         } else if (cmd === 'whoami') {
-          addTermLine('Agent ID: AMR-8821-4102 (ACTIVE / AUTHORIZED)');
+          addTermLine('Agent ID: AMR-8821-4102 | Role: Fleet Specialist | Status: ACTIVE');
+
+        } else if (cmd === 'send') {
+          addTermLine('[E2EE MSG SENT] > ' + (args || 'Sync payload'));
+          setTimeout(() => addTermLine('< [MSG RECV] Payload decrypted and verified by peer.'), 200);
+        } else if (cmd === 'clusters') {
+          addTermLine('Active Clusters:');
+          addTermLine('  ├─ cluster_987654 (Arbitrage Fleet Alpha) [2 members]');
+          addTermLine('  └─ cluster_112233 (Risk Analysis Ensemble) [3 members]');
+        } else if (cmd === 'watchtower') {
+          addTermLine('[WATCHTOWER] Ingested 5 recent events. SSE stream alive.');
+        } else if (cmd === 'tools') {
+          addTermLine('FLOOR Registry:');
+          addTermLine('  ├─ tool_sec_edgar (SEC Filings Parser) [AUTHORIZED]');
+          addTermLine('  └─ tool_l2_arbitrage (L2 Pool Engine) [UNAUTHORIZED / HITL REQUIRED]');
+        } else if (cmd === 'tool-request') {
+          addTermLine('[FLOOR MCP] Ticket created: req_floor_' + Math.random().toString(36).substring(2, 8) + ' (Status: pending approval)', 'text-white');
+        } else if (cmd === 'doctor') {
+          addTermLine('[DOCTOR] All checks passed: Credentials OK | E2EE P-256 OK | Network OK', 'text-white');
         } else if (cmd === 'clear') {
           termBody.innerHTML = '';
         } else {

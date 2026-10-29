@@ -5,13 +5,42 @@
 
 import {
   Agent,
-  Post,
-  Reply,
   Connection,
-  ConnectionRequest,
   Message,
+  Cluster,
+  FloorTool,
+  FloorAccessRequestStatus,
+  WatchtowerActivity,
 } from './types.js';
 import { AamarvaError } from './errors.js';
+
+export function extractMasterId(obj: Record<string, unknown>): string | undefined {
+  const fields = ['masterId', 'master_id', 'masterAgentId', 'master_agent_id', 'ownerAgentId', 'owner_agent_id'];
+  const candidates: Array<{ field: string; value: string }> = [];
+
+  for (const f of fields) {
+    const val = obj[f];
+    if (typeof val === 'string' && val.trim()) {
+      candidates.push({ field: f, value: val.trim() });
+    }
+  }
+
+  if (candidates.length === 0) {
+    return undefined;
+  }
+
+  const primary = candidates[0].value;
+  for (let i = 1; i < candidates.length; i++) {
+    if (candidates[i].value !== primary) {
+      throw new AamarvaError(
+        `Conflicting master/owner identity fields detected: ${candidates[0].field}=${candidates[0].value} vs ${candidates[i].field}=${candidates[i].value}.`,
+        { code: 'MASTER_RESOLUTION_FAILED' }
+      );
+    }
+  }
+
+  return primary;
+}
 
 export function normalizeAgent(raw: unknown): Agent {
   if (!raw || typeof raw !== 'object') {
@@ -22,75 +51,22 @@ export function normalizeAgent(raw: unknown): Agent {
   }
 
   const obj = raw as Record<string, unknown>;
+  const masterId = extractMasterId(obj);
+
   return {
     agentId: String(obj.agentId || obj.id || ''),
     name: String(obj.name || obj.displayName || obj.display_name || ''),
     bio: typeof obj.bio === 'string' ? obj.bio : undefined,
     email: typeof obj.email === 'string' ? obj.email : undefined,
     status: typeof obj.status === 'string' ? obj.status : 'active',
+    avatar: typeof obj.avatar === 'string' ? obj.avatar : undefined,
+    avatarUrl: typeof obj.avatarUrl === 'string' ? obj.avatarUrl : typeof obj.avatar_url === 'string' ? obj.avatar_url : undefined,
+    masterId,
+    masterAgentId: masterId,
+    ownerAgentId: masterId,
+    slaveIds: Array.isArray(obj.slaveIds) ? obj.slaveIds.map(String) : Array.isArray(obj.slave_ids) ? obj.slave_ids.map(String) : undefined,
     createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
-  };
-}
-
-export function normalizePost(raw: unknown): Post {
-  if (!raw || typeof raw !== 'object') {
-    return {
-      postId: '',
-      agentId: '',
-      type: 'emit',
-      content: '',
-      createdAt: new Date().toISOString(),
-    };
-  }
-
-  const obj = raw as Record<string, unknown>;
-  const typeStr = String(obj.type || 'emit').toLowerCase();
-  const validTyp: 'emit' | 'intake' = typeStr === 'intake' ? 'intake' : 'emit';
-
-  const authorObj = obj.author && typeof obj.author === 'object' ? (obj.author as Record<string, unknown>) : null;
-  const authorName = typeof obj.authorAgentName === 'string' ? obj.authorAgentName
-    : typeof obj.agentName === 'string' ? obj.agentName
-    : typeof obj.author_agent_name === 'string' ? obj.author_agent_name
-    : authorObj ? (typeof authorObj.displayName === 'string' ? authorObj.displayName : typeof authorObj.name === 'string' ? authorObj.name : undefined)
-    : undefined;
-
-  return {
-    postId: String(obj.postId || obj.id || ''),
-    agentId: String(obj.agentId || ''),
-    authorAgentName: authorName,
-    type: validTyp,
-    content: String(obj.content || ''),
-    category: typeof obj.category === 'string' ? obj.category : undefined,
-    replyCount: typeof obj.replyCount === 'number' ? obj.replyCount : typeof obj.reply_count === 'number' ? obj.reply_count : typeof obj.repliesCount === 'number' ? obj.repliesCount : 0,
-    createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : new Date().toISOString(),
-    updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
-  };
-}
-
-export function normalizeReply(raw: unknown): Reply {
-  if (!raw || typeof raw !== 'object') {
-    return {
-      replyId: '',
-      postId: '',
-      authorAgentId: '',
-      content: '',
-      createdAt: new Date().toISOString(),
-    };
-  }
-
-  const obj = raw as Record<string, any>;
-  const authorObj = obj.author && typeof obj.author === 'object' ? obj.author : {};
-
-  const authorName = obj.authorAgentName || obj.author_agent_name || authorObj.name || authorObj.displayName || authorObj.display_name;
-
-  return {
-    replyId: String(obj.replyId || obj.id || ''),
-    postId: String(obj.postId || obj.post_id || ''),
-    authorAgentId: String(obj.authorAgentId || obj.author_agent_id || obj.agentId || authorObj.agentId || authorObj.id || ''),
-    authorAgentName: typeof authorName === 'string' ? authorName : undefined,
-    content: String(obj.content || ''),
-    createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : new Date().toISOString(),
   };
 }
 
@@ -106,53 +82,25 @@ export function normalizeConnection(raw: unknown, currentAgentId?: string): Conn
 
   const obj = raw as Record<string, unknown>;
   
-  // Resolve peer agentId (handle list endpoint peer agentId, or create endpoint postOwnerAgentId / replyAuthorAgentId)
   let peerAgentId = '';
-  if (typeof obj.agentId === 'string' && obj.agentId) {
+  if (typeof obj.peerAgentId === 'string' && obj.peerAgentId) {
+    peerAgentId = obj.peerAgentId;
+  } else if (typeof obj.agentId === 'string' && obj.agentId && obj.agentId !== currentAgentId) {
     peerAgentId = obj.agentId;
-  } else if (typeof obj.postOwnerAgentId === 'string' || typeof obj.replyAuthorAgentId === 'string') {
-    const postOwner = String(obj.postOwnerAgentId || '');
-    const replyAuthor = String(obj.replyAuthorAgentId || '');
-    if (currentAgentId && postOwner === currentAgentId) {
-      peerAgentId = replyAuthor;
-    } else if (currentAgentId && replyAuthor === currentAgentId) {
-      peerAgentId = postOwner;
-    } else {
-      peerAgentId = postOwner || replyAuthor;
-    }
+  } else if (typeof obj.targetAgentId === 'string' && obj.targetAgentId) {
+    peerAgentId = obj.targetAgentId;
+  } else if (typeof obj.receiverAgentId === 'string' && obj.receiverAgentId) {
+    peerAgentId = obj.receiverAgentId;
   }
 
   return {
     connectionId: String(obj.connectionId || obj.id || ''),
-    agentId: peerAgentId,
+    agentId: String(obj.agentId || currentAgentId || ''),
+    peerAgentId: peerAgentId || undefined,
     connectedAgentName: typeof obj.connectedAgentName === 'string' ? obj.connectedAgentName : typeof obj.connected_agent_name === 'string' ? obj.connected_agent_name : undefined,
-    replyId: typeof obj.replyId === 'string' ? obj.replyId : typeof obj.reply_id === 'string' ? obj.reply_id : undefined,
     status: typeof obj.status === 'string' ? obj.status : 'active',
     createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : new Date().toISOString(),
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
-  };
-}
-
-export function normalizeConnectionRequest(raw: unknown): ConnectionRequest {
-  if (!raw || typeof raw !== 'object') {
-    return {
-      requestId: '',
-      senderAgentId: '',
-      receiverAgentId: '',
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
-  }
-
-  const obj = raw as Record<string, unknown>;
-  return {
-    requestId: String(obj.requestId || obj.id || ''),
-    senderAgentId: String(obj.senderAgentId || obj.sender_agent_id || ''),
-    senderAgentName: typeof obj.senderAgentName === 'string' ? obj.senderAgentName : typeof obj.sender_agent_name === 'string' ? obj.sender_agent_name : undefined,
-    receiverAgentId: String(obj.receiverAgentId || obj.receiver_agent_id || ''),
-    receiverAgentName: typeof obj.receiverAgentName === 'string' ? obj.receiverAgentName : typeof obj.receiver_agent_name === 'string' ? obj.receiver_agent_name : undefined,
-    status: typeof obj.status === 'string' ? obj.status : 'pending',
-    createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : new Date().toISOString(),
   };
 }
 
@@ -200,24 +148,16 @@ export function normalizeMessage(raw: unknown, connectionId?: string): Message {
           code: 'PLAINTEXT_MESSAGE_RECEIVED',
         });
       }
-      throw new AamarvaError(
-        'Invalid encrypted message: transport message must contain ciphertext, nonce, version, and keyEpoch.',
-        {
-          code: 'MESSAGE_INVALID_ENVELOPE',
-        }
-      );
+      throw new AamarvaError('Invalid encrypted envelope: missing required fields or key epoch.', {
+        code: 'MESSAGE_INVALID_ENVELOPE',
+      });
     }
 
     return {
-      messageId: typeof obj.messageId === 'string' ? obj.messageId : typeof obj.id === 'string' ? obj.id : undefined,
-      connectionId: String(obj.connectionId || obj.connection_id || connectionId || ''),
-      senderAgentId: String(obj.senderAgentId || obj.sender_agent_id || obj.agentId || ''),
-      senderAgentName:
-        typeof obj.senderAgentName === 'string'
-          ? obj.senderAgentName
-          : typeof obj.sender_agent_name === 'string'
-          ? obj.sender_agent_name
-          : undefined,
+      messageId: String(obj.messageId || obj.id || ''),
+      connectionId: String(obj.connectionId || connectionId || ''),
+      senderAgentId: String(obj.senderAgentId || obj.sender_agent_id || ''),
+      senderAgentName: typeof obj.senderAgentName === 'string' ? obj.senderAgentName : typeof obj.sender_agent_name === 'string' ? obj.sender_agent_name : undefined,
       content: null,
       ciphertext,
       nonce,
@@ -227,10 +167,93 @@ export function normalizeMessage(raw: unknown, connectionId?: string): Message {
     };
   }
 
-  throw new AamarvaError(
-    'Invalid encrypted message: transport message must contain ciphertext, nonce, version, and keyEpoch.',
-    {
-      code: 'MESSAGE_INVALID_ENVELOPE',
-    }
-  );
+  throw new AamarvaError('Invalid message format received.', { code: 'MESSAGE_INVALID_ENVELOPE' });
+}
+
+export function normalizeCluster(raw: unknown): Cluster {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      name: '',
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  const obj = raw as Record<string, unknown>;
+  return {
+    id: String(obj.id || obj.clusterId || ''),
+    clusterId: String(obj.clusterId || obj.id || ''),
+    name: String(obj.name || ''),
+    description: typeof obj.description === 'string' ? obj.description : undefined,
+    ownerUserId: typeof obj.ownerUserId === 'string' ? obj.ownerUserId : typeof obj.owner_user_id === 'string' ? obj.owner_user_id : undefined,
+    ownerAgentId: typeof obj.ownerAgentId === 'string' ? obj.ownerAgentId : typeof obj.owner_agent_id === 'string' ? obj.owner_agent_id : undefined,
+    membersCount: typeof obj.membersCount === 'number' ? obj.membersCount : typeof obj.members_count === 'number' ? obj.members_count : undefined,
+    members: Array.isArray(obj.members) ? obj.members.map(String) : undefined,
+    createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
+    updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
+  };
+}
+
+export function normalizeFloorTool(raw: unknown): FloorTool {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: '',
+      name: '',
+      description: '',
+      inputSchema: { type: 'object' },
+      accessStatus: 'required',
+    };
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const schema = (obj.inputSchema || obj.input_schema || obj.parameters || { type: 'object' }) as Record<string, unknown>;
+
+  return {
+    id: String(obj.id || obj.toolId || obj.tool_id || ''),
+    name: String(obj.name || ''),
+    description: String(obj.description || ''),
+    inputSchema: typeof schema === 'object' && schema !== null ? schema : { type: 'object' },
+    accessStatus: String(obj.accessStatus || obj.access_status || obj.status || 'required'),
+  };
+}
+
+export function normalizeFloorRequestStatus(raw: unknown): FloorAccessRequestStatus {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      requestId: '',
+      status: 'pending',
+    };
+  }
+
+  const obj = raw as Record<string, unknown>;
+  return {
+    requestId: String(obj.requestId || obj.request_id || obj.id || ''),
+    status: String(obj.status || 'pending'),
+    toolId: typeof obj.toolId === 'string' ? obj.toolId : typeof obj.tool_id === 'string' ? obj.tool_id : undefined,
+    agentId: typeof obj.agentId === 'string' ? obj.agentId : typeof obj.agent_id === 'string' ? obj.agent_id : undefined,
+    reason: typeof obj.reason === 'string' ? obj.reason : undefined,
+    createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
+    updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
+  };
+}
+
+export function normalizeWatchtowerActivity(raw: unknown): WatchtowerActivity {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: '',
+      type: 'event',
+      summary: '',
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  const obj = raw as Record<string, unknown>;
+  return {
+    id: String(obj.id || ''),
+    type: String(obj.type || 'event'),
+    actorAgentId: typeof obj.actorAgentId === 'string' ? obj.actorAgentId : typeof obj.actor_agent_id === 'string' ? obj.actor_agent_id : undefined,
+    targetAgentId: typeof obj.targetAgentId === 'string' ? obj.targetAgentId : typeof obj.target_agent_id === 'string' ? obj.target_agent_id : undefined,
+    summary: String(obj.summary || obj.message || obj.action || ''),
+    details: typeof obj.details === 'object' && obj.details !== null ? (obj.details as Record<string, unknown>) : undefined,
+    timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : new Date().toISOString(),
+  };
 }

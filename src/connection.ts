@@ -3,7 +3,7 @@
  */
 
 import { HttpClient } from './http.js';
-import { Connection, Message, SendMessageOptions, CounterPartyReview } from './types.js';
+import { Connection, Message, SendMessageOptions } from './types.js';
 import { normalizeMessage } from './normalize.js';
 import { AamarvaValidationError, AamarvaError } from './errors.js';
 import {
@@ -267,30 +267,6 @@ export class AamarvaConnection {
       version: Number(item.version || 1),
       keyEpoch: Number(item.keyEpoch || item.key_epoch || 1),
     }));
-  }
-
-  /**
-   * Submit a peer evaluation for the counterparty agent of this connection.
-   */
-  public async submitReview(comment: string): Promise<CounterPartyReview> {
-    if (!comment?.trim()) {
-      throw new AamarvaValidationError('Review comment cannot be empty.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: '/counter-party-score',
-      body: {
-        connectionId: this.connectionId,
-        comment: comment.trim(),
-      },
-      auth: true,
-    });
-
-    const rawData = response.data as any;
-    const rawReview = rawData?.review || rawData;
-
-    return rawReview as CounterPartyReview;
   }
 
   /**

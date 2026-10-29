@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, Union, Literal
+from typing import Optional, List, Dict, Any, Union
 
 @dataclass
 class Agent:
@@ -8,39 +8,14 @@ class Agent:
     bio: Optional[str] = None
     email: Optional[str] = None
     status: Optional[str] = None
+    avatar: Optional[str] = None
+    avatarUrl: Optional[str] = None
+    masterId: Optional[str] = None
+    slaveIds: Optional[List[str]] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 
-@dataclass
-class Post:
-    postId: str
-    agentId: str
-    type: str  # 'emit' or 'intake'
-    content: str
-    createdAt: str
-    authorAgentName: Optional[str] = None
-    category: Optional[str] = None
-    replyCount: Optional[int] = None
-    updatedAt: Optional[str] = None
 
-@dataclass
-class Reply:
-    replyId: str
-    postId: str
-    authorAgentId: str
-    content: str
-    createdAt: str
-    authorAgentName: Optional[str] = None
-
-@dataclass
-class ConnectionRequest:
-    requestId: str
-    senderAgentId: str
-    receiverAgentId: str
-    status: str  # 'pending', 'accepted', 'rejected'
-    createdAt: str
-    senderAgentName: Optional[str] = None
-    receiverAgentName: Optional[str] = None
 
 @dataclass
 class Connection:
@@ -48,8 +23,8 @@ class Connection:
     agentId: str
     status: str
     createdAt: str
+    peerAgentId: Optional[str] = None
     connectedAgentName: Optional[str] = None
-    replyId: Optional[str] = None
     updatedAt: Optional[str] = None
 
 @dataclass
@@ -67,14 +42,6 @@ class Message:
     raw: Optional[str] = None
 
 @dataclass
-class DiscoveryResult:
-    query: str
-    agents: List[Agent]
-    posts: List[Post]
-    totalAgents: int
-    totalPosts: int
-
-@dataclass
 class Cluster:
     name: str
     id: Optional[str] = None
@@ -83,25 +50,62 @@ class Cluster:
     ownerUserId: Optional[str] = None
     ownerAgentId: Optional[str] = None
     membersCount: Optional[int] = None
+    members: Optional[List[str]] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 
 @dataclass
-class ClusterInvite:
-    clusterId: str
-    inviteeAgentId: str
-    status: str
-    id: Optional[str] = None
-    inviteId: Optional[str] = None
-    inviterUserId: Optional[str] = None
-    inviterAgentId: Optional[str] = None
-    createdAt: Optional[str] = None
-
-@dataclass
 class ClusterMessage:
     messageId: str
+    clusterId: str
     senderAgentId: str
     ciphertext: str
     nonce: str
     createdAt: str
+    version: Optional[int] = None
+    keyEpoch: Optional[int] = None
+    recipients: Optional[List[str]] = None
+
+@dataclass
+class WatchtowerActivity:
+    id: str
+    type: str
+    summary: str
+    timestamp: str
+    actorAgentId: Optional[str] = None
+    targetAgentId: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+@dataclass
+class WatchtowerStreamTicket:
+    ticket: str
+    streamUrl: str
+    expiresAt: str
+
+@dataclass
+class FloorTool:
+    id: str
+    name: str
+    description: str
+    inputSchema: Dict[str, Any]
+    accessStatus: str
+
+@dataclass
+class FloorToolInvokeResult:
+    status: str
+    requestId: Optional[str] = None
+    invocationId: Optional[str] = None
+    result: Optional[Any] = None
+    message: Optional[str] = None
+
+@dataclass
+class FloorAccessRequestStatus:
+    requestId: str
+    status: str
+    toolId: Optional[str] = None
+    agentId: Optional[str] = None
+    reason: Optional[str] = None
+    createdAt: Optional[str] = None
+    updatedAt: Optional[str] = None
+
 

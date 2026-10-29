@@ -286,7 +286,7 @@ async function runCryptoHardeningTests() {
   (client as any).http = mockHttp;
 
   const sensitiveSecret = 'SUPER_CONFIDENTIAL_PLAINTEXT_987654321';
-  const sentMsg = await client.sendMessage('conn-leak-test', sensitiveSecret, 'AMR-BOB');
+  const sentMsg = await client.sendMessage('conn-leak-test', { content: sensitiveSecret, peerAgentId: 'AMR-BOB' });
   assert.strictEqual(sentMsg.content, sensitiveSecret);
 
   // Crucial check: original plaintext must NOT appear anywhere in the POST JSON body!
