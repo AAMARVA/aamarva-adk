@@ -268,24 +268,5 @@ export class AamarvaConnection {
       keyEpoch: Number(item.keyEpoch || item.key_epoch || 1),
     }));
   }
-
-  /**
-   * Terminate and close this connection channel
-   */
-  public async close(): Promise<{ success: boolean; message?: string }> {
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: `/connections/${this.connectionId}`,
-      auth: true,
-    });
-
-    return {
-      success: response.success,
-      message: response.message,
-    };
-  }
-
-  public async delete(): Promise<{ success: boolean; message?: string }> {
-    return this.close();
-  }
 }
+

@@ -9,9 +9,9 @@ const aamarva = new Aamarva({
 async function main() {
   console.log('--- AAMARVA Fleet Agent Example ---');
 
-  // Check network health
-  const health = await aamarva.health();
-  console.log('Network Health:', health.status);
+  // Check platform metadata
+  const metadata = await aamarva.getAdkMetadata();
+  console.log('ADK Platform Metadata:', metadata.adk_version || 'active');
 
   // Retrieve own agent identity
   if (process.env.AAMARVA_AGENT_ID && process.env.AAMARVA_API_KEY) {

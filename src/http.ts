@@ -3,7 +3,44 @@
  */
 
 import { AamarvaConfig, ApiResponse, AuthTokens } from './types.js';
-import { normalizeError, AamarvaAuthError, AamarvaTimeoutError } from './errors.js';
+import { normalizeError, AamarvaAuthError, AamarvaTimeoutError, AamarvaError } from './errors.js';
+
+const APPROVED_ENDPOINT_PATTERNS: Array<{ method: string; regex: RegExp }> = [
+  { method: 'POST', regex: /^\/auth\/login$/ },
+  { method: 'POST', regex: /^\/auth\/refresh$/ },
+  { method: 'GET', regex: /^\/agents$/ },
+  { method: 'GET', regex: /^\/agents\/me$/ },
+  { method: 'PATCH', regex: /^\/agents\/me$/ },
+  { method: 'GET', regex: /^\/agents\/me\/e2ee$/ },
+  { method: 'PUT', regex: /^\/agents\/me\/e2ee$/ },
+  { method: 'GET', regex: /^\/connections$/ },
+  { method: 'GET', regex: /^\/connections\/[^/]+\/peer-key$/ },
+  { method: 'GET', regex: /^\/connections\/[^/]+\/messages$/ },
+  { method: 'POST', regex: /^\/connections\/[^/]+\/messages$/ },
+  { method: 'GET', regex: /^\/clusters$/ },
+  { method: 'GET', regex: /^\/clusters\/[^/]+$/ },
+  { method: 'GET', regex: /^\/clusters\/[^/]+\/messages$/ },
+  { method: 'POST', regex: /^\/clusters\/[^/]+\/messages$/ },
+  { method: 'GET', regex: /^\/clusters\/[^/]+\/key-distribution$/ },
+  { method: 'GET', regex: /^\/floor\/agent\/tools$/ },
+  { method: 'POST', regex: /^\/floor\/tools\/[^/]+\/execute$/ },
+  { method: 'POST', regex: /^\/floor\/tools\/[^/]+\/request-access$/ },
+  { method: 'GET', regex: /^\/floor\/requests\/[^/]+$/ },
+  { method: 'GET', regex: /^\/adk$/ },
+  { method: 'GET', regex: /^\/watchtower\/activity$/ },
+  { method: 'POST', regex: /^\/watchtower\/stream-ticket$/ },
+  { method: 'GET', regex: /^\/watchtower\/stream$/ },
+  { method: 'GET', regex: /^\/agent\/footprints$/ },
+  { method: 'GET', regex: /^\/webhooks\/events$/ },
+];
+
+
+export function isApprovedEndpoint(method: string, path: string): boolean {
+  const normMethod = method.toUpperCase();
+  const normPath = path.startsWith('/') ? path : '/' + path;
+  const cleanPath = normPath.split('?')[0];
+  return APPROVED_ENDPOINT_PATTERNS.some((p) => p.method === normMethod && p.regex.test(cleanPath));
+}
 
 export interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'PUT' | 'HEAD';
@@ -289,7 +326,15 @@ export class HttpClient {
 
   public async rawRequest<T = unknown>(options: RequestOptions): Promise<ApiResponse<T>> {
     const method = options.method || 'GET';
-    let url = `${this.baseUrl}${options.path.startsWith('/') ? options.path : '/' + options.path}`;
+    const cleanPath = options.path.startsWith('/') ? options.path : '/' + options.path;
+
+    if (!isApprovedEndpoint(method, cleanPath)) {
+      throw new AamarvaError(`Endpoint not allowed by specification: ${method} ${cleanPath}`, {
+        code: 'ENDPOINT_NOT_ALLOWED',
+      });
+    }
+
+    let url = `${this.baseUrl}${cleanPath}`;
 
     if (options.query) {
       const searchParams = new URLSearchParams();

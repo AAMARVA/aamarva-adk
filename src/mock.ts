@@ -277,11 +277,44 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       }
     }
 
-    // Register local E2EE key
-    if (pathname === '/agents/me/e2ee' && (method === 'PUT' || method === 'POST')) {
-      const agentId = store.agents[0]?.agentId || 'AMR-1111-2222';
-      store.e2eeKeys[agentId] = body;
-      return json(200, { success: true, message: 'E2EE key registered' });
+    // Agents List
+    if (pathname === '/agents' && method === 'GET') {
+      let result = [...store.agents];
+      const q = url.searchParams.get('q');
+      if (q) {
+        result = result.filter(a => a.name?.toLowerCase().includes(q.toLowerCase()) || a.agentId?.toLowerCase().includes(q.toLowerCase()));
+      }
+      const page = parseInt(url.searchParams.get('page') || '1', 10);
+      const limit = parseInt(url.searchParams.get('limit') || '50', 10);
+      return json(200, {
+        success: true,
+        data: {
+          agents: result,
+          total: result.length,
+          page,
+          limit,
+        },
+      });
+    }
+
+    // Register or Get local E2EE key
+    if (pathname === '/agents/me/e2ee') {
+      if (method === 'GET') {
+        const agentId = store.agents[0]?.agentId || 'AMR-1111-2222';
+        const keyData = store.e2eeKeys[agentId] || {
+          publicKey: { kty: 'EC', crv: 'P-256', x: 'mock_x', y: 'mock_y' },
+          fingerprint: 'SHA256:mock_fp_123',
+          identityKey: { kty: 'EC', crv: 'P-256', x: 'mock_x', y: 'mock_y' },
+          keyVersion: 1,
+          keyEpoch: 1,
+        };
+        return json(200, { success: true, data: keyData });
+      }
+      if (method === 'PUT' || method === 'POST') {
+        const agentId = store.agents[0]?.agentId || 'AMR-1111-2222';
+        store.e2eeKeys[agentId] = body;
+        return json(200, { success: true, message: 'E2EE key registered' });
+      }
     }
 
     // Watchtower Activity
@@ -532,6 +565,26 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
         store.clusterMessages[clusterId].push(msg);
         return json(201, { success: true, messageId: msg.messageId, data: msg });
       }
+    }
+
+    // Cluster Key Distribution
+    const clusterKeyDistMatch = pathname.match(/^\/clusters\/([^/]+)\/key-distribution$/);
+    if (clusterKeyDistMatch && method === 'GET') {
+      const clusterId = clusterKeyDistMatch[1];
+      const epochStr = url.searchParams.get('epoch');
+      const epoch = epochStr ? parseInt(epochStr, 10) : 1;
+      return json(200, {
+        success: true,
+        data: {
+          clusterId,
+          epoch,
+          keyFingerprint: 'SHA256:mock_group_key_fp',
+          senderAgentId: 'AMR-0000-MASTER',
+          recipientAgentId: 'AMR-1111-2222',
+          wrappingParams: { alg: 'ECDH-ES+A256KW' },
+          encryptedKeyPackage: 'mock_wrapped_group_key_base64',
+        },
+      });
     }
 
     return json(404, { success: false, error: `Mock endpoint not found: ${method} ${pathname}` });

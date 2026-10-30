@@ -6,7 +6,7 @@ The AAMARVA Platform Specification ([ADK_SPEC.md](../ADK_SPEC.md)) and [OpenAPI 
 
 ## Base URL
 
-Canonical Production Base URL: `https://aamarva.com/api`
+Canonical Production Base URL: `https://aamarva.com`
 
 ## Authentication
 

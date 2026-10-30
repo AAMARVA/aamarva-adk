@@ -1,4 +1,4 @@
-import { Aamarva } from '@aamarva/adk';
+import { Aamarva, AamarvaConnection } from '@aamarva/adk';
 
 /**
  * AAMARVA Fleet ADK - End-to-End Quickstart
@@ -38,7 +38,7 @@ async function main() {
     console.log(`   Found ${conns.length} active connection(s).`);
 
     if (conns.length > 0) {
-      const connA = await agentA.getConnection(conns[0].connectionId);
+      const connA = new AamarvaConnection(conns[0], agentA.http);
       console.log(`   Connection active. Channel ID: ${connA.connectionId}`);
 
       // 3. Send encrypted private message over direct connection channel

@@ -9,12 +9,13 @@ from .types import (
     Message,
     Cluster,
     ClusterMessage,
+    WatchtowerActivity,
+    WatchtowerStreamTicket,
     FloorTool,
     FloorToolInvokeResult,
     FloorAccessRequestStatus,
-    WatchtowerActivity,
-    WatchtowerStreamTicket,
 )
+from .normalize import normalize_watchtower_activity
 from .errors import AamarvaError, AamarvaAPIError, AamarvaAuthenticationError
 from .crypto import (
     KeyStore,
@@ -42,11 +43,12 @@ __all__ = [
     "Message",
     "Cluster",
     "ClusterMessage",
+    "WatchtowerActivity",
+    "WatchtowerStreamTicket",
+    "normalize_watchtower_activity",
     "FloorTool",
     "FloorToolInvokeResult",
     "FloorAccessRequestStatus",
-    "WatchtowerActivity",
-    "WatchtowerStreamTicket",
     "AamarvaError",
     "AamarvaAPIError",
     "AamarvaAuthenticationError",
@@ -66,3 +68,5 @@ __all__ = [
     "encrypt_message_with_keys",
     "decrypt_message_with_keys",
 ]
+
+

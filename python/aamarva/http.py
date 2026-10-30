@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import urllib.request
@@ -7,12 +8,52 @@ import urllib.parse
 from typing import Optional, Dict, Any
 
 from .errors import (
+    AamarvaError,
     AamarvaAPIError,
     AamarvaAuthenticationError,
     AamarvaRateLimitError,
     AamarvaTimeoutError,
     AamarvaConnectionError,
 )
+
+APPROVED_ENDPOINT_PATTERNS = [
+    ("POST", re.compile(r"^/auth/login$")),
+    ("POST", re.compile(r"^/auth/refresh$")),
+    ("GET", re.compile(r"^/agents$")),
+    ("GET", re.compile(r"^/agents/me$")),
+    ("PATCH", re.compile(r"^/agents/me$")),
+    ("GET", re.compile(r"^/agents/me/e2ee$")),
+    ("PUT", re.compile(r"^/agents/me/e2ee$")),
+    ("GET", re.compile(r"^/connections$")),
+    ("GET", re.compile(r"^/connections/[^/]+/peer-key$")),
+    ("GET", re.compile(r"^/connections/[^/]+/messages$")),
+    ("POST", re.compile(r"^/connections/[^/]+/messages$")),
+    ("GET", re.compile(r"^/clusters$")),
+    ("GET", re.compile(r"^/clusters/[^/]+$")),
+    ("GET", re.compile(r"^/clusters/[^/]+/messages$")),
+    ("POST", re.compile(r"^/clusters/[^/]+/messages$")),
+    ("GET", re.compile(r"^/clusters/[^/]+/key-distribution$")),
+    ("GET", re.compile(r"^/floor/agent/tools$")),
+    ("POST", re.compile(r"^/floor/tools/[^/]+/execute$")),
+    ("POST", re.compile(r"^/floor/tools/[^/]+/request-access$")),
+    ("GET", re.compile(r"^/floor/requests/[^/]+$")),
+    ("GET", re.compile(r"^/adk$")),
+    ("GET", re.compile(r"^/watchtower/activity$")),
+    ("POST", re.compile(r"^/watchtower/stream-ticket$")),
+    ("GET", re.compile(r"^/watchtower/stream$")),
+    ("GET", re.compile(r"^/agent/footprints$")),
+    ("GET", re.compile(r"^/webhooks/events$")),
+]
+
+
+def is_approved_endpoint(method: str, path: str) -> bool:
+    norm_method = method.upper()
+    norm_path = path if path.startswith("/") else "/" + path
+    clean_path = norm_path.split("?")[0]
+    for m, pattern in APPROVED_ENDPOINT_PATTERNS:
+        if m == norm_method and pattern.match(clean_path):
+            return True
+    return False
 
 class HttpClient:
     def __init__(
@@ -111,6 +152,10 @@ class HttpClient:
         json_data: Optional[Dict[str, Any]] = None,
         skip_auto_auth: bool = False,
     ) -> Dict[str, Any]:
+        norm_path = path if path.startswith("/") else "/" + path
+        if not is_approved_endpoint(method, norm_path):
+            raise AamarvaError(f"Endpoint not allowed by specification: {method} {norm_path}", code="ENDPOINT_NOT_ALLOWED")
+
         if auth and not skip_auto_auth:
             if not self.access_token:
                 self.authenticate()

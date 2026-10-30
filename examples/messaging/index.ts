@@ -1,4 +1,4 @@
-import { Aamarva } from '@aamarva/adk';
+import { Aamarva, AamarvaConnection } from '@aamarva/adk';
 
 const aamarva = new Aamarva({
   agentId: process.env.AAMARVA_AGENT_ID,
@@ -15,7 +15,7 @@ async function main() {
     return;
   }
 
-  const activeConnection = await aamarva.getConnection(connections[0].connectionId);
+  const activeConnection = new AamarvaConnection(connections[0], aamarva.http);
   console.log(`Using connection ID: ${activeConnection.connectionId} with peer ${activeConnection.agentId}`);
 
   // Send message via Connection abstraction (E2EE encrypted)

@@ -9,6 +9,7 @@ from .types import (
     FloorAccessRequestStatus,
     WatchtowerActivity,
 )
+
 from .errors import AamarvaError
 
 def extract_master_id(raw: dict) -> Optional[str]:
@@ -170,14 +171,16 @@ def normalize_floor_request_status(raw: Any) -> FloorAccessRequestStatus:
 
 def normalize_watchtower_activity(raw: Any) -> WatchtowerActivity:
     if not isinstance(raw, dict):
-        return WatchtowerActivity(id="", type="event", summary="", timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        return WatchtowerActivity(id="", type="unknown", summary="", timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
 
     return WatchtowerActivity(
-        id=str(raw.get("id") or ""),
-        type=str(raw.get("type") or "event"),
-        summary=str(raw.get("summary") or raw.get("message") or raw.get("action") or ""),
-        timestamp=str(raw.get("timestamp") or datetime.datetime.now(datetime.timezone.utc).isoformat()),
+        id=str(raw.get("id") or raw.get("activityId") or raw.get("activity_id") or ""),
+        type=str(raw.get("type") or raw.get("eventType") or "unknown"),
+        summary=str(raw.get("summary") or raw.get("description") or ""),
+        timestamp=str(raw.get("timestamp") or raw.get("createdAt") or datetime.datetime.now(datetime.timezone.utc).isoformat()),
         actorAgentId=raw.get("actorAgentId") or raw.get("actor_agent_id"),
         targetAgentId=raw.get("targetAgentId") or raw.get("target_agent_id"),
-        details=raw.get("details"),
+        details=raw.get("details") if isinstance(raw.get("details"), dict) else None,
     )
+
+

@@ -101,7 +101,7 @@ export async function runCli(args: string[] = process.argv.slice(2)): Promise<vo
 export async function handleHealth(): Promise<void> {
   const client = getClient();
   try {
-    const res = await client.health();
+    const res = await client.getAdkMetadata();
     console.log(JSON.stringify(res, null, 2));
   } catch (err: any) {
     console.error('Health check failed:', err.message);
@@ -251,8 +251,8 @@ export async function handleDoctor(): Promise<void> {
   const client = new Aamarva({ agentId, apiKey, baseUrl });
 
   try {
-    const health = await client.health();
-    console.log(`✓ Network Connectivity:   Connected to ${baseUrl} [Status: ${health.status}]`);
+    const meta = await client.getAdkMetadata();
+    console.log(`✓ Network Connectivity:   Connected to ${baseUrl} [Status: active]`);
   } catch (err: any) {
     console.log(`✖ Network Connectivity:   Failed to reach ${baseUrl}: ${err.message}`);
   }

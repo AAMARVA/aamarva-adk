@@ -54,8 +54,8 @@ async function testPackagePackAndInstall() {
         // 1. Test live production API using a harmless public endpoint
         const prodClient = new Aamarva(); // Without credentials, public endpoints only
         try {
-          const prodHealth = await prodClient.health();
-          assert.strictEqual(prodHealth.status, 'ok', 'Live production health check failed');
+          const prodMeta = await prodClient.getAdkMetadata();
+          assert.ok(prodMeta, 'Live production metadata retrieval failed');
           console.log('✓ Verified live production API access via installed package');
         } catch (e) {
           console.log('⚠ Could not reach live production API, but continuing with mock tests (expected if offline)', e.message);
@@ -71,8 +71,8 @@ async function testPackagePackAndInstall() {
           fetch: mockFetch
         });
 
-        const health = await client.health();
-        assert.strictEqual(health.status, 'ok');
+        const meta = await client.getAdkMetadata();
+        assert.ok(meta);
 
         const connections = await client.getConnections();
         assert.ok(Array.isArray(connections));

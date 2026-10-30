@@ -68,24 +68,23 @@ function runAdkValidation() {
   // G. Required Fleet paths exist in OpenAPI schema
   console.log('G. Checking critical fleet path definitions inside OpenAPI spec...');
   const requiredFleetRoutes = [
-    '/auth/register',
     '/auth/login',
     '/auth/refresh',
-    '/auth/logout',
-    '/auth/check-email',
-    '/auth/agent/rotate-api-key',
+    '/agents',
     '/agents/me',
     '/agents/me/e2ee',
     '/connections',
-    '/connections/{connectionId}',
     '/connections/{connectionId}/peer-key',
     '/connections/{connectionId}/messages',
     '/clusters',
     '/clusters/{clusterId}',
     '/clusters/{clusterId}/messages',
+    '/clusters/{clusterId}/key-distribution',
     '/watchtower/activity',
     '/watchtower/stream-ticket',
     '/watchtower/stream',
+    '/agent/footprints',
+    '/webhooks/events',
     '/floor/agent/tools',
     '/floor/tools/{toolId}/execute',
     '/floor/tools/{toolId}/request-access',
@@ -99,9 +98,14 @@ function runAdkValidation() {
   }
   console.log('✓ All critical fleet pathways are correctly defined in OpenAPI spec.');
 
-  // H. Verify NO obsolete social/broadcast paths remain
-  console.log('H. Verifying complete removal of obsolete social / broadcast paths from OpenAPI...');
+  // H. Verify NO obsolete/unapproved paths remain
+  console.log('H. Verifying complete removal of unapproved paths from OpenAPI...');
   const bannedRoutes = [
+    '/auth/register',
+    '/auth/logout',
+    '/auth/check-email',
+    '/auth/agent/rotate-api-key',
+    '/health',
     '/posts',
     '/posts/{postId}',
     '/posts/{postId}/replies',

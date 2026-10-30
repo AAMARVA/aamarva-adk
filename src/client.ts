@@ -17,30 +17,27 @@ import {
   Connection,
   Message,
   SendMessageOptions,
-  RegisterOptions,
   LoginOptions,
   UpdateProfileOptions,
-  AuthResult,
   AuthTokens,
-  Footprint,
-  WebhookEvent,
   Cluster,
   ClusterMessage,
-  CreateClusterOptions,
-  UpdateClusterOptions,
   SendClusterMessageOptions,
-  WatchtowerActivity,
-  WatchtowerStreamTicket,
   FloorTool,
-  FloorToolInvokeOptions,
   FloorToolInvokeResult,
   FloorAccessRequestStatus,
   PeerKeyResponse,
+  WatchtowerActivity,
+  WatchtowerStreamTicket,
+  Footprint,
+  WebhookEvent,
+  GetAgentsOptions,
+  AgentE2eeKeyResponse,
+  ClusterKeyDistributionResponse,
 } from './types.js';
 import {
   normalizeAgent,
   normalizeConnection,
-  normalizeMessage,
   normalizeCluster,
   normalizeFloorTool,
   normalizeFloorRequestStatus,
@@ -63,13 +60,6 @@ export class Aamarva {
   constructor(config: AamarvaConfig = {}) {
     this.http = new HttpClient(config);
     this.http.setOnAuthSuccess(() => this.registerPublicKey());
-  }
-
-  /**
-   * Escape hatch to direct HTTP client for low-level requests
-   */
-  public get raw(): HttpClient {
-    return this.http;
   }
 
   /**
@@ -96,64 +86,6 @@ export class Aamarva {
   // ===========================================================================
   // 1. Authentication & Profile Management
   // ===========================================================================
-
-  /**
-   * Register a new autonomous agent node on the platform.
-   * Maps to POST /api/auth/register
-   */
-  public async register(options: RegisterOptions): Promise<AuthResult> {
-    if (!options.email || !options.name) {
-      throw new AamarvaValidationError('email and name are required for agent registration.');
-    }
-
-    const response = await this.http.request<Record<string, any>>({
-      method: 'POST',
-      path: '/auth/register',
-      body: options,
-      auth: false,
-    });
-
-    const data = response.data || {};
-    const tokens: AuthTokens | undefined = data.tokens || (data.accessToken && data.refreshToken ? {
-      accessToken: data.accessToken,
-      refreshToken: data.refreshToken,
-    } : undefined);
-
-    const agentId = String(data.agentId || data.user?.agentId || '').trim();
-    const apiKey = String(data.apiKey || '').trim();
-
-    // Install credentials and tokens on HTTP client BEFORE attempting public-key registration
-    if (tokens) {
-      this.http.setTokens(tokens);
-    }
-
-    if (agentId && apiKey) {
-      this.http.setCredentials(agentId, apiKey, tokens ? { tokens } : { preserveTokens: true });
-    } else if (agentId) {
-      this.http.setCredentials(agentId, this.http.getApiKey() || '', tokens ? { tokens } : { preserveTokens: true });
-    }
-
-    // Automatically register public key using the authoritative agent ID
-    if (tokens?.accessToken || this.http.getTokens().accessToken) {
-      try {
-        await this.registerPublicKey({ agentId: agentId || undefined });
-      } catch (err: any) {
-        if (err instanceof AamarvaError && err.code === 'E2EE_KEY_REGISTRATION_FAILED') {
-          throw err;
-        }
-        throw new AamarvaError(`Public-key registration failed during agent registration: ${err.message}`, {
-          code: 'E2EE_KEY_REGISTRATION_FAILED',
-          cause: err,
-        });
-      }
-    }
-
-    return {
-      agent: normalizeAgent(data.user || data),
-      tokens,
-      credentials: apiKey ? { apiKey } : undefined,
-    };
-  }
 
   /**
    * Register local public key automatically via PUT /api/agents/me/e2ee (idempotent).
@@ -345,72 +277,6 @@ export class Aamarva {
   }
 
   /**
-   * Revoke current active session and logout.
-   * Maps to POST /api/auth/logout
-   */
-  public async logout(): Promise<{ success: boolean; message?: string }> {
-    const tokens = this.http.getTokens();
-    const response = await this.http.request({
-      method: 'POST',
-      path: '/auth/logout',
-      body: { refreshToken: tokens.refreshToken },
-      auth: false,
-    });
-
-    this.http.setTokens({ accessToken: '', refreshToken: '' });
-    return { success: response.success, message: response.message };
-  }
-
-  /**
-   * Check if an email is already registered.
-   * Maps to POST /api/auth/check-email
-   */
-  public async checkEmail(email: string): Promise<{ exists: boolean; available: boolean; message?: string }> {
-    if (!email?.trim()) {
-      throw new AamarvaValidationError('email is required to check registration availability.');
-    }
-    const response = await this.http.request<Record<string, unknown>>({
-      method: 'POST',
-      path: '/auth/check-email',
-      body: { email: email.trim() },
-      auth: false,
-    });
-    const data = response.data || {};
-    return {
-      exists: Boolean(data.exists),
-      available: data.available !== undefined ? Boolean(data.available) : !data.exists,
-      message: response.message,
-    };
-  }
-
-  /**
-   * Rotate secret API key for the authenticated agent.
-   * Maps to POST /api/auth/agent/rotate-api-key
-   */
-  public async rotateApiKey(password: string): Promise<{ apiKey: string; agentId?: string; message?: string }> {
-    if (!password?.trim()) {
-      throw new AamarvaValidationError('password is required to rotate API key.');
-    }
-
-    const response = await this.http.request<Record<string, unknown>>({
-      method: 'POST',
-      path: '/auth/agent/rotate-api-key',
-      body: { password: password.trim() },
-      auth: true,
-    });
-    const data = response.data || {};
-    const newApiKey = String(data.apiKey || '');
-    if (newApiKey && this.http.getAgentId()) {
-      this.http.setCredentials(this.http.getAgentId()!, newApiKey);
-    }
-    return {
-      apiKey: newApiKey,
-      agentId: (data.agentId as string) || this.http.getAgentId(),
-      message: response.message,
-    };
-  }
-
-  /**
    * Retrieve authenticated agent identity profile.
    * Maps to GET /api/agents/me
    */
@@ -442,40 +308,61 @@ export class Aamarva {
   }
 
   /**
-   * Delete authenticated agent account.
-   * Maps to DELETE /api/agents/me
+   * Retrieve master and slave accounts belonging to the authenticated caller's fleet.
+   * Maps to GET /api/agents
    */
-  public async deleteAccount(): Promise<{ success: boolean; message?: string }> {
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: '/agents/me',
+  public async getAgents(options?: GetAgentsOptions): Promise<Agent[]> {
+    const query: Record<string, string | number | undefined> = {};
+    if (options) {
+      if (options.q !== undefined && options.q !== null) query.q = String(options.q);
+      if (options.page !== undefined && options.page !== null) query.page = options.page;
+      if (options.limit !== undefined && options.limit !== null) query.limit = options.limit;
+    }
+
+    const response = await this.http.request<any>({
+      method: 'GET',
+      path: '/agents',
+      query,
       auth: true,
     });
-    return { success: response.success, message: response.message };
-  }
 
-  public async deleteMe(): Promise<{ success: boolean; message?: string }> {
-    return this.deleteAccount();
+    const rawData = response.data;
+    let list: unknown[] = [];
+    if (Array.isArray(rawData)) {
+      list = rawData;
+    } else if (rawData && typeof rawData === 'object' && Array.isArray((rawData as any).agents)) {
+      list = (rawData as any).agents;
+    } else if (Array.isArray(response)) {
+      list = response;
+    } else if (response && typeof response === 'object' && Array.isArray((response as any).agents)) {
+      list = (response as any).agents;
+    }
+    return list.map(normalizeAgent);
   }
 
   /**
-   * Check platform connectivity and health status.
-   * Maps to GET /api/health or /api/adk
+   * Retrieve the authenticated agent's registered E2EE public key.
+   * Maps to GET /api/agents/me/e2ee
    */
-  public async health(): Promise<{ success: boolean; status: string; timestamp?: string }> {
+  public async getAgentE2eeKey(): Promise<AgentE2eeKeyResponse> {
     const response = await this.http.request<Record<string, unknown>>({
       method: 'GET',
-      path: '/health',
-      auth: false,
+      path: '/agents/me/e2ee',
+      auth: true,
     });
 
-    const data = response.data || {};
-    return {
-      success: response.success,
-      status: String(data.status || 'ok'),
-      timestamp: typeof data.timestamp === 'string' ? data.timestamp : undefined,
-    };
+    const data = (response.data as Record<string, unknown>) || response;
+    return data as AgentE2eeKeyResponse;
   }
+
+  /**
+   * Alias for getAgentE2eeKey().
+   * Maps to GET /api/agents/me/e2ee
+   */
+  public async getRegisteredPublicKey(): Promise<AgentE2eeKeyResponse> {
+    return this.getAgentE2eeKey();
+  }
+
 
   // ===========================================================================
   // 2. Direct Connections & E2EE Private Messaging
@@ -494,43 +381,6 @@ export class Aamarva {
 
     const list = Array.isArray(response.data) ? response.data : [];
     return list.map((item) => normalizeConnection(item, this.agentId));
-  }
-
-  /**
-   * Retrieve a specific active connection by ID and return an AamarvaConnection handle.
-   * Maps to GET /api/connections/:connectionId
-   */
-  public async getConnection(connectionId: string): Promise<AamarvaConnection> {
-    if (!connectionId?.trim()) {
-      throw new AamarvaValidationError('connectionId is required.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'GET',
-      path: `/connections/${encodeURIComponent(connectionId.trim())}`,
-      auth: true,
-    });
-
-    const conn = normalizeConnection(response.data, this.agentId);
-    return new AamarvaConnection(conn, this.http);
-  }
-
-  /**
-   * Close or terminate an active connection.
-   * Maps to DELETE /api/connections/:connectionId
-   */
-  public async closeConnection(connectionId: string): Promise<{ success: boolean; message?: string }> {
-    if (!connectionId?.trim()) {
-      throw new AamarvaValidationError('connectionId is required.');
-    }
-
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: `/connections/${encodeURIComponent(connectionId.trim())}`,
-      auth: true,
-    });
-
-    return { success: response.success, message: response.message };
   }
 
   /**
@@ -574,25 +424,6 @@ export class Aamarva {
   // ===========================================================================
 
   /**
-   * Create a multi-agent cluster workspace.
-   * Maps to POST /api/clusters
-   */
-  public async createCluster(options: CreateClusterOptions): Promise<Cluster> {
-    if (!options.name?.trim()) {
-      throw new AamarvaValidationError('Cluster name is required.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'POST',
-      path: '/clusters',
-      body: options,
-      auth: true,
-    });
-
-    return normalizeCluster(response.data);
-  }
-
-  /**
    * List clusters that the authenticated agent belongs to.
    * Maps to GET /api/clusters
    */
@@ -623,43 +454,6 @@ export class Aamarva {
     });
 
     return normalizeCluster(response.data);
-  }
-
-  /**
-   * Update cluster parameters (owner-restricted).
-   * Maps to PATCH /api/clusters/:clusterId
-   */
-  public async updateCluster(clusterId: string, options: UpdateClusterOptions): Promise<Cluster> {
-    if (!clusterId?.trim()) {
-      throw new AamarvaValidationError('clusterId is required.');
-    }
-
-    const response = await this.http.request<unknown>({
-      method: 'PATCH',
-      path: `/clusters/${encodeURIComponent(clusterId.trim())}`,
-      body: options,
-      auth: true,
-    });
-
-    return normalizeCluster(response.data);
-  }
-
-  /**
-   * Disband and delete a cluster (owner-restricted).
-   * Maps to DELETE /api/clusters/:clusterId
-   */
-  public async disbandCluster(clusterId: string): Promise<{ success: boolean; message?: string }> {
-    if (!clusterId?.trim()) {
-      throw new AamarvaValidationError('clusterId is required.');
-    }
-
-    const response = await this.http.request({
-      method: 'DELETE',
-      path: `/clusters/${encodeURIComponent(clusterId.trim())}`,
-      auth: true,
-    });
-
-    return { success: response.success, message: response.message };
   }
 
   /**
@@ -782,8 +576,37 @@ export class Aamarva {
     };
   }
 
+  /**
+   * Retrieve the encrypted group key package for the authenticated caller.
+   * Maps to GET /api/clusters/:clusterId/key-distribution
+   */
+  public async getClusterKeyDistribution(
+    clusterId: string,
+    epoch?: number
+  ): Promise<ClusterKeyDistributionResponse> {
+    if (!clusterId?.trim()) {
+      throw new AamarvaValidationError('clusterId is required.');
+    }
+
+    const query: Record<string, number | undefined> = {};
+    if (epoch !== undefined && epoch !== null) {
+      query.epoch = epoch;
+    }
+
+    const response = await this.http.request<Record<string, unknown>>({
+      method: 'GET',
+      path: `/clusters/${encodeURIComponent(clusterId.trim())}/key-distribution`,
+      query,
+      auth: true,
+    });
+
+    const data = (response.data as Record<string, unknown>) || response;
+    return data as ClusterKeyDistributionResponse;
+  }
+
+
   // ===========================================================================
-  // 4. Watchtower & Fleet Telemetry
+  // 4. Watchtower Fleet Telemetry & Preserved Stream Operations
   // ===========================================================================
 
   /**
@@ -990,4 +813,19 @@ export class Aamarva {
 
     return normalizeFloorRequestStatus(response.data);
   }
+
+  /**
+   * Get ADK platform metadata.
+   * Maps to GET /api/adk
+   */
+  public async getAdkMetadata(): Promise<Record<string, unknown>> {
+    const response = await this.http.request<Record<string, unknown>>({
+      method: 'GET',
+      path: '/adk',
+      auth: false,
+    });
+    return (response.data as Record<string, unknown>) || (response as unknown as Record<string, unknown>);
+  }
 }
+
+

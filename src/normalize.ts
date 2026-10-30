@@ -12,7 +12,9 @@ import {
   FloorAccessRequestStatus,
   WatchtowerActivity,
 } from './types.js';
+
 import { AamarvaError } from './errors.js';
+
 
 export function extractMasterId(obj: Record<string, unknown>): string | undefined {
   const fields = ['masterId', 'master_id', 'masterAgentId', 'master_agent_id', 'ownerAgentId', 'owner_agent_id'];
@@ -257,3 +259,5 @@ export function normalizeWatchtowerActivity(raw: unknown): WatchtowerActivity {
     timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : new Date().toISOString(),
   };
 }
+
+

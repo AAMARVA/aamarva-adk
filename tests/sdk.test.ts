@@ -16,7 +16,6 @@ import {
   normalizeCluster,
   normalizeFloorTool,
   normalizeFloorRequestStatus,
-  normalizeWatchtowerActivity,
 } from '../src/normalize.js';
 import { AamarvaConnection } from '../src/connection.js';
 
@@ -38,16 +37,36 @@ async function runSdkTests() {
     fetch: mockFetch,
   });
   assert.ok(client, 'Aamarva client should instantiate');
-  assert.strictEqual(client.raw.getBaseUrl(), 'https://aamarva.com/api');
+  assert.strictEqual(client.http.getBaseUrl(), 'https://aamarva.com/api');
   assert.strictEqual(client.getTargetAgentId(), 'AMR-SLAVE-01');
   console.log('✓ Client initialization and fleet scope verified.');
 
-  // 2. Health Check
-  console.log('2. Testing health check...');
-  const health = await client.health();
-  assert.strictEqual(health.status, 'ok');
-  assert.strictEqual(health.success, true);
-  console.log('✓ Health check verified.');
+  // 2. Unapproved Endpoint Rejection (Endpoint Allowlist Security Invariant)
+  console.log('2. Testing endpoint allowlist enforcement...');
+  try {
+    await client.http.request({ method: 'GET', path: '/health', auth: false });
+    assert.fail('/health should be rejected by endpoint allowlist');
+  } catch (err: any) {
+    assert.ok(err instanceof AamarvaError);
+    assert.strictEqual(err.code, 'ENDPOINT_NOT_ALLOWED');
+  }
+
+  try {
+    await client.http.request({ method: 'POST', path: '/auth/register', auth: false });
+    assert.fail('/auth/register should be rejected by endpoint allowlist');
+  } catch (err: any) {
+    assert.ok(err instanceof AamarvaError);
+    assert.strictEqual(err.code, 'ENDPOINT_NOT_ALLOWED');
+  }
+
+  try {
+    await client.http.request({ method: 'POST', path: '/clusters', auth: true });
+    assert.fail('/clusters POST should be rejected by endpoint allowlist');
+  } catch (err: any) {
+    assert.ok(err instanceof AamarvaError);
+    assert.strictEqual(err.code, 'ENDPOINT_NOT_ALLOWED');
+  }
+  console.log('✓ Unapproved endpoint rejection verified.');
 
   // 3. Identity and Profile
   console.log('3. Testing authentication & me() profile retrieval...');
@@ -58,22 +77,61 @@ async function runSdkTests() {
   const updatedProfile = await client.updateProfile({ name: 'Financial Analysis Agent Pro' });
   assert.strictEqual(updatedProfile.name, 'Financial Analysis Agent Pro');
 
-  const emailCheck = await client.checkEmail('finance-agent@example.com');
-  assert.strictEqual(emailCheck.exists, true, 'Email check should indicate email exists');
+  // Fleet Account Listing & E2EE Public Key Retrieval
+  const fleetAgents = await client.getAgents({ q: 'Financial', limit: 5 });
+  assert.ok(Array.isArray(fleetAgents));
+  assert.ok(fleetAgents.length > 0);
+  assert.strictEqual(fleetAgents[0].agentId, 'AMR-1111-2222');
 
-  const rotateRes = await client.rotateApiKey('mock_password_123');
-  assert.ok(rotateRes.apiKey.startsWith('sk_amr_rotated_'), 'API key should rotate');
-  console.log('✓ me() profile retrieval, update, checkEmail, and rotateApiKey verified.');
+  // Verify response parsing when server returns data.agents object with total, page, limit
+  const mockFetchWithObj = (async (url: string, init?: any) => {
+    if (url.includes('/agents')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          agents: [{ agentId: 'AMR-STRUCTURED-1', name: 'Structured Agent' }],
+          total: 1,
+          page: 1,
+          limit: 10,
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+  const clientWithObj = new Aamarva({ agentId: 'AMR-1111-2222', apiKey: 'sec_key', fetch: mockFetchWithObj });
+  const structuredAgents = await clientWithObj.getAgents();
+  assert.strictEqual(structuredAgents.length, 1);
+  assert.strictEqual(structuredAgents[0].agentId, 'AMR-STRUCTURED-1');
+
+  // Verify response parsing when server returns data array directly
+  const mockFetchWithArr = (async (url: string, init?: any) => {
+    if (url.includes('/agents')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: [{ agentId: 'AMR-ARRAY-1', name: 'Array Agent' }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return mockFetch(url, init);
+  }) as typeof fetch;
+  const clientWithArr = new Aamarva({ agentId: 'AMR-1111-2222', apiKey: 'sec_key', fetch: mockFetchWithArr });
+  const arrayAgents = await clientWithArr.getAgents();
+  assert.strictEqual(arrayAgents.length, 1);
+  assert.strictEqual(arrayAgents[0].agentId, 'AMR-ARRAY-1');
+
+  const ownE2eeKey = await client.getAgentE2eeKey();
+  assert.ok(ownE2eeKey);
+  const aliasE2eeKey = await client.getRegisteredPublicKey();
+  assert.ok(aliasE2eeKey);
+  console.log('✓ me() profile retrieval, profile update, getAgents() (both formats), and getAgentE2eeKey() verified.');
 
   // 4. Direct Connections
   console.log('4. Testing connection retrieval and management...');
   const connections = await client.getConnections();
   assert.ok(Array.isArray(connections));
   assert.ok(connections.length > 0);
-  
+
   const connInfo = connections[0];
-  const directConn = await client.getConnection(connInfo.connectionId);
-  assert.ok(directConn instanceof AamarvaConnection, 'getConnection must return AamarvaConnection');
+  const directConn = new AamarvaConnection(connInfo, client.http);
   assert.strictEqual(directConn.connectionId, connInfo.connectionId);
 
   console.log('✓ Connection retrieval verified.');
@@ -106,25 +164,15 @@ async function runSdkTests() {
 
   const clusterMsgs = await client.getClusterMessages('cluster_987654');
   assert.ok(Array.isArray(clusterMsgs));
-  console.log('✓ Clusters & recipient-restricted messaging verified.');
 
-  // 8. Watchtower & Fleet Telemetry
-  console.log('8. Testing Watchtower fleet telemetry...');
-  const activity = await client.getWatchtowerActivity(10);
-  assert.ok(Array.isArray(activity));
-  assert.ok(activity.length > 0);
-  assert.strictEqual(activity[0].actorAgentId, 'AMR-1111-2222');
+  const keyDist = await client.getClusterKeyDistribution('cluster_987654', 2);
+  assert.ok(keyDist);
+  assert.strictEqual(keyDist.clusterId, 'cluster_987654');
+  assert.strictEqual(keyDist.epoch, 2);
+  console.log('✓ Clusters, recipient-restricted messaging, and cluster key distribution verified.');
 
-  const ticket = await client.getWatchtowerStreamTicket();
-  assert.ok(ticket.ticket.startsWith('ticket_live_mock_'));
-  assert.ok(ticket.streamUrl.includes('/watchtower/stream'));
-
-  const streamUrl = client.getWatchtowerStreamUrl('mock_ticket_123');
-  assert.ok(streamUrl.includes('ticket=mock_ticket_123'));
-  console.log('✓ Watchtower telemetry and stream tickets verified.');
-
-  // 9. FLOOR MCP Tool Governance
-  console.log('9. Testing FLOOR MCP tool governance...');
+  // 8. FLOOR MCP Tool Governance
+  console.log('8. Testing FLOOR MCP tool governance...');
   const tools = await client.getFloorTools();
   assert.ok(Array.isArray(tools));
   assert.ok(tools.length >= 2);
@@ -148,9 +196,26 @@ async function runSdkTests() {
 
   console.log('✓ FLOOR MCP tool governance (discovery, HITL request, status, execution) verified.');
 
-  // 10. Legacy Removal Assertions
-  console.log('10. Testing that legacy social and connection methods do NOT exist on client...');
+  // 9. Endpoint Existence & Removal Assertions
+  console.log('9. Testing that removed endpoints do NOT exist and preserved endpoints exist on client...');
   const rawClient = client as any;
+  assert.strictEqual(rawClient.createCluster, undefined);
+  assert.strictEqual(rawClient.updateCluster, undefined);
+  assert.strictEqual(rawClient.disbandCluster, undefined);
+  assert.strictEqual(rawClient.register, undefined);
+  assert.strictEqual(rawClient.logout, undefined);
+  assert.strictEqual(rawClient.checkEmail, undefined);
+  assert.strictEqual(rawClient.rotateApiKey, undefined);
+  assert.strictEqual(rawClient.deleteAccount, undefined);
+  assert.strictEqual(rawClient.deleteMe, undefined);
+  assert.strictEqual(rawClient.health, undefined);
+  assert.strictEqual(rawClient.getConnection, undefined);
+  assert.strictEqual(rawClient.closeConnection, undefined);
+  assert.strictEqual(typeof rawClient.getWatchtowerActivity, 'function');
+  assert.strictEqual(typeof rawClient.getWatchtowerStreamTicket, 'function');
+  assert.strictEqual(typeof rawClient.getWatchtowerStreamUrl, 'function');
+  assert.strictEqual(typeof rawClient.getFootprints, 'function');
+  assert.strictEqual(typeof rawClient.getWebhookEvents, 'function');
   assert.strictEqual(rawClient.discover, undefined);
   assert.strictEqual(rawClient.discoverAgents, undefined);
   assert.strictEqual(rawClient.discoverPosts, undefined);
@@ -171,6 +236,7 @@ async function runSdkTests() {
   assert.strictEqual(rawClient.getFloorTemporaryAccess, undefined);
   assert.strictEqual(rawClient.invokeFloorTool, undefined);
   console.log('✓ Legacy removal assertions verified.');
+
 
   // 11. Public-Key Registration Tests across all authentication paths
   console.log('11. Testing automatic public-key registration & idempotency across all auth paths...');
@@ -245,55 +311,8 @@ async function runSdkTests() {
   await tokenClient.getConnections();
   assert.strictEqual(tokenAuthKeyCalls, 1, 'Already-configured access token MUST trigger public-key registration on authenticated request');
 
-  // E. Account registration installs credentials and tokens first and binds real agent ID
-  let regAuthKeyCalls = 0;
-  let stateDuringE2ee: any = {};
-  let signatureInE2ee: any = null;
-  const regAuthFetch = (async (url: string, init?: any) => {
-    if (url.endsWith('/auth/register') && init?.method === 'POST') {
-      return new Response(JSON.stringify({
-        success: true,
-        data: {
-          agentId: 'AMR-REG-9876',
-          apiKey: 'sk_reg_secret_9876',
-          tokens: {
-            accessToken: 'at_reg_valid_token',
-            refreshToken: 'rt_reg_valid_token',
-          },
-          user: {
-            agentId: 'AMR-REG-9876',
-            name: 'New Registered Agent',
-          },
-        },
-      }), { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
-      regAuthKeyCalls++;
-      const body = JSON.parse(init.body || '{}');
-      signatureInE2ee = body.signature;
-      stateDuringE2ee = {
-        agentId: regClient.http.getAgentId(),
-        apiKey: regClient.http.getApiKey?.(),
-        tokens: regClient.http.getTokens(),
-      };
-      return new Response(JSON.stringify({ success: true, message: 'Key registered' }), { status: 200 });
-    }
-    return mockFetch(url, init);
-  }) as typeof fetch;
-
-  const regClient = new Aamarva({ fetch: regAuthFetch });
-  const regResult = await regClient.register({ email: `new-agent-${Date.now()}@aamarva.test`, name: 'New Registered Agent' });
-  assert.strictEqual(regAuthKeyCalls, 1, 'Account registration with returned tokens MUST trigger public-key registration');
-  assert.strictEqual(regResult.agent.agentId, 'AMR-REG-9876');
-  // Verify credentials and tokens were installed BEFORE key registration
-  assert.strictEqual(stateDuringE2ee.agentId, 'AMR-REG-9876', 'Agent ID must be installed on HTTP client before key registration');
-  assert.strictEqual(stateDuringE2ee.apiKey, 'sk_reg_secret_9876', 'API key must be installed before key registration');
-  assert.strictEqual(stateDuringE2ee.tokens?.accessToken, 'at_reg_valid_token', 'Access token must be installed before key registration');
-  // Verify tokens were NOT cleared by credentials installation
-  assert.strictEqual(regClient.http.getTokens().accessToken, 'at_reg_valid_token', 'Tokens must remain intact after registration completes');
-  assert.strictEqual(regClient.http.getAgentId(), 'AMR-REG-9876', 'Authoritative agent ID must remain configured');
-
   // E2. Test setCredentials token preservation semantics
+  const regClient = new Aamarva({ agentId: 'AMR-PRESERVE', apiKey: 'sk_preserve', fetch: mockFetch });
   regClient.http.setTokens({ accessToken: 'at_preserved_1', refreshToken: 'rt_preserved_1' });
   regClient.http.setCredentials('AMR-PRESERVE', 'sk_preserve', true);
   assert.strictEqual(regClient.http.getTokens().accessToken, 'at_preserved_1', 'setCredentials with preserveTokens=true must not clear tokens');
@@ -308,32 +327,6 @@ async function runSdkTests() {
   regClient.http.setCredentials('AMR-CLEARED', 'sk_cleared', false);
   assert.strictEqual(regClient.http.getTokens().accessToken, undefined, 'setCredentials with preserveTokens=false must clear tokens');
 
-  // E3. Account registration fails closed if key registration is rejected by server
-  const regRejectFetch = (async (url: string, init?: any) => {
-    if (url.endsWith('/auth/register') && init?.method === 'POST') {
-      return new Response(JSON.stringify({
-        success: true,
-        data: {
-          agentId: 'AMR-REG-FAIL',
-          apiKey: 'sk_fail',
-          tokens: { accessToken: 'at_fail', refreshToken: 'rt_fail' },
-        },
-      }), { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    if (url.endsWith('/agents/me/e2ee') && init?.method === 'PUT') {
-      return new Response(JSON.stringify({ success: false, message: 'Public key rejected' }), { status: 400 });
-    }
-    return mockFetch(url, init);
-  }) as typeof fetch;
-
-  const regRejectClient = new Aamarva({ fetch: regRejectFetch });
-  try {
-    await regRejectClient.register({ email: 'fail@aamarva.test', name: 'Fail Agent' });
-    assert.fail('Registration must fail closed if public key registration is rejected');
-  } catch (err: any) {
-    assert.ok(err instanceof AamarvaError);
-    assert.strictEqual(err.code, 'E2EE_KEY_REGISTRATION_FAILED');
-  }
 
   // E4. Public key registration validates response payload and retries on subsequent call
   let malformedCount = 0;

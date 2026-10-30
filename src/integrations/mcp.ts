@@ -1,14 +1,31 @@
 /**
  * Model Context Protocol (MCP) Integration for AAMARVA ADK
  *
- * Exposes AAMARVA fleet capabilities and FLOOR MCP tool governance:
- * 1. List tools and access status
- * 2. Request human-in-the-loop tool access approval
- * 3. Check tool request status
- * 4. Execute authorized tools protected by server-side authorization
- * 5. Secure fleet direct messaging and cluster communications
+ * Provides a genuine, standards-compliant Model Context Protocol server using
+ * the official @modelcontextprotocol/sdk, supporting:
+ * - Full MCP protocol lifecycle and initialization
+ * - Standard tools/list and tools/call JSON-RPC methods
+ * - Proper tool definitions and JSON Schema validation
+ * - Stdio transport for local agent orchestration
+ * - Streamable HTTP transport for remote microservices and web environments
+ * - Strict preservation of FLOOR permissions and endpoint allowlists
  */
 
+import type { Readable, Writable } from 'node:stream';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ErrorCode,
+  McpError,
+} from '@modelcontextprotocol/sdk/types.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  StreamableHTTPServerTransport,
+  type StreamableHTTPServerTransportOptions,
+} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Aamarva } from '../client.js';
 
 export interface McpToolDefinition {
@@ -70,7 +87,7 @@ export class AamarvaMcpServer {
       },
       {
         name: 'aamarva_floor_execute_tool',
-        description: 'Execute an authorized FLOOR tool with arguments.',
+        description: 'Execute an authorized FLOOR tool with arguments. Fails closed if unauthorized.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -143,6 +160,47 @@ export class AamarvaMcpServer {
         },
         handler: async (args: { limit?: number }) => client.getWatchtowerActivity(args.limit),
       },
+      {
+        name: 'aamarva_agent_footprints',
+        description: 'Retrieve cryptographic activity audit footprints for the current agent.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+        handler: async () => client.getFootprints(),
+      },
+      {
+        name: 'aamarva_webhook_events',
+        description: 'Retrieve recent webhook event delivery history for the agent.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+        handler: async () => client.getWebhookEvents(),
+      },
+      {
+        name: 'aamarva_get_agents',
+        description: 'List fleet peer agents within sovereign fleet boundary.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            q: { type: 'string', description: 'Search query filter.' },
+            page: { type: 'number', description: 'Page number for pagination.' },
+            limit: { type: 'number', description: 'Items per page.' },
+          },
+        },
+        handler: async (args: { q?: string; page?: number; limit?: number }) =>
+          client.getAgents(args),
+      },
+      {
+        name: 'aamarva_get_clusters',
+        description: 'Retrieve all multi-agent clusters the caller belongs to.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+        handler: async () => client.getClusters(),
+      },
     ];
   }
 
@@ -174,8 +232,174 @@ export class AamarvaMcpServer {
     }
     return tool.handler(args);
   }
+
+  /**
+   * Creates an official standards-compliant MCP Protocol Server instance.
+   */
+  public toProtocolServer(): Server {
+    const server = new Server(
+      {
+        name: 'aamarva-adk',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    // Register standard tools/list handler
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const tools = this.getTools();
+      return {
+        tools: tools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+        })),
+      };
+    });
+
+    // Register standard tools/call handler
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+      const tools = this.getTools();
+      const tool = tools.find((t) => t.name === name);
+
+      if (!tool) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `Unknown tool: ${name}`,
+            },
+          ],
+        };
+      }
+
+      try {
+        const rawResult = await tool.handler(args || {});
+        return {
+          content: [
+            {
+              type: 'text',
+              text: typeof rawResult === 'string' ? rawResult : JSON.stringify(rawResult, null, 2),
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: err?.message || String(err),
+            },
+          ],
+        };
+      }
+    });
+
+    return server;
+  }
+
+  /**
+   * Creates a high-level McpServer instance.
+   */
+  public toMcpServer(): McpServer {
+    const mcp = new McpServer({
+      name: 'aamarva-adk',
+      version: '1.0.0',
+    });
+
+    const tools = this.getTools();
+    for (const tool of tools) {
+      mcp.server.setRequestHandler(CallToolRequestSchema, async (req) => {
+        if (req.params.name === tool.name) {
+          try {
+            const res = await tool.handler(req.params.arguments || {});
+            return {
+              content: [{ type: 'text', text: typeof res === 'string' ? res : JSON.stringify(res) }],
+            };
+          } catch (e: any) {
+            return {
+              isError: true,
+              content: [{ type: 'text', text: e.message || String(e) }],
+            };
+          }
+        }
+        throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${req.params.name}`);
+      });
+    }
+
+    return mcp;
+  }
+
+  /**
+   * Connects this MCP server to standard I/O (stdio) transport.
+   */
+  public async startStdio(
+    stdin?: Readable,
+    stdout?: Writable
+  ): Promise<{ server: Server; transport: StdioServerTransport }> {
+    const server = this.toProtocolServer();
+    const transport = new StdioServerTransport(stdin, stdout);
+    await server.connect(transport);
+    return { server, transport };
+  }
+
+  /**
+   * Creates a Streamable HTTP transport and connects the MCP server to it.
+   */
+  public createStreamableHttpTransport(
+    options?: StreamableHTTPServerTransportOptions
+  ): { server: Server; transport: StreamableHTTPServerTransport } {
+    const server = this.toProtocolServer();
+    const transport = new StreamableHTTPServerTransport(options);
+    return { server, transport };
+  }
+
+  /**
+   * Creates a Node.js HTTP request handler (for Express / Connect / http.createServer)
+   * supporting Streamable HTTP and SSE transports.
+   */
+  public createHttpHandler(
+    transportOptions?: StreamableHTTPServerTransportOptions
+  ): (req: IncomingMessage, res: ServerResponse, parsedBody?: unknown) => Promise<void> {
+    const { server, transport } = this.createStreamableHttpTransport(transportOptions);
+    let connected = false;
+
+    return async (req: IncomingMessage, res: ServerResponse, parsedBody?: unknown) => {
+      if (!connected) {
+        await server.connect(transport);
+        connected = true;
+      }
+      return transport.handleRequest(req, res, parsedBody);
+    };
+  }
 }
 
 export function createAamarvaMcpServer(client?: Aamarva): AamarvaMcpServer {
   return new AamarvaMcpServer(client);
+}
+
+export function createMcpProtocolServer(client?: Aamarva): Server {
+  return new AamarvaMcpServer(client).toProtocolServer();
+}
+
+export async function startStdioMcpServer(
+  client?: Aamarva,
+  stdin?: Readable,
+  stdout?: Writable
+): Promise<{ server: Server; transport: StdioServerTransport }> {
+  return new AamarvaMcpServer(client).startStdio(stdin, stdout);
+}
+
+export function createStreamableHttpMcpHandler(
+  client?: Aamarva,
+  transportOptions?: StreamableHTTPServerTransportOptions
+): (req: IncomingMessage, res: ServerResponse, parsedBody?: unknown) => Promise<void> {
+  return new AamarvaMcpServer(client).createHttpHandler(transportOptions);
 }

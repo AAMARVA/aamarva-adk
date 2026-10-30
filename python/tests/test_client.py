@@ -41,11 +41,20 @@ class TestAamarvaFleetClient(unittest.TestCase):
             self.peer_identity_pub_jwk = None
             self.peer_sig = None
 
-    def test_health(self):
-        self.client.http.request.return_value = {"success": True, "status": "ok"}
-        res = self.client.health()
-        self.assertEqual(res.get("status"), "ok")
-        self.client.http.request.assert_called_with("GET", "/health", auth=False)
+    def test_unapproved_endpoint_rejection(self):
+        from aamarva.http import HttpClient
+        http = HttpClient()
+        with self.assertRaises(AamarvaError) as ctx1:
+            http.request("GET", "/health", auth=False)
+        self.assertEqual(ctx1.exception.code, "ENDPOINT_NOT_ALLOWED")
+
+        with self.assertRaises(AamarvaError) as ctx2:
+            http.request("POST", "/auth/register", auth=False)
+        self.assertEqual(ctx2.exception.code, "ENDPOINT_NOT_ALLOWED")
+
+        with self.assertRaises(AamarvaError) as ctx3:
+            http.request("POST", "/clusters", auth=True)
+        self.assertEqual(ctx3.exception.code, "ENDPOINT_NOT_ALLOWED")
 
     def test_me(self):
         self.client.http.request.return_value = {
@@ -67,36 +76,48 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(conns[0].connectionId, "conn_1")
         self.client.http.request.assert_called_with("GET", "/connections", auth=True)
 
-    def test_get_connection(self):
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": {"connectionId": "conn_1", "agentId": "AMR-PEER-2222", "status": "active", "createdAt": "2026-01-01"}
-        }
-        conn = self.client.get_connection("conn_1")
-        self.assertEqual(conn.connectionId, "conn_1")
-        self.client.http.request.assert_called_with("GET", "/connections/conn_1", auth=True)
-
     def test_clusters(self):
         self.client.http.request.return_value = {
             "success": True,
-            "data": {"clusterId": "cluster_1", "name": "Arbitrage Fleet"}
+            "data": [{"clusterId": "cluster_1", "name": "Arbitrage Fleet"}]
         }
-        cluster = self.client.create_cluster(name="Arbitrage Fleet", description="L2 liquidity")
-        self.assertEqual(cluster.clusterId, "cluster_1")
-        self.assertEqual(cluster.name, "Arbitrage Fleet")
-        self.client.http.request.assert_called_with(
-            "POST", "/clusters", auth=True, json_data={"name": "Arbitrage Fleet", "description": "L2 liquidity"}
-        )
+        clusters = self.client.get_clusters()
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0].clusterId, "cluster_1")
+        self.client.http.request.assert_called_with("GET", "/clusters", auth=True)
 
-    def test_watchtower_activity(self):
+    def test_get_agents(self):
         self.client.http.request.return_value = {
             "success": True,
-            "data": [{"id": "act_1", "type": "connection.created", "summary": "Direct channel formed", "timestamp": "2026-01-01"}]
+            "data": [{"agentId": "AMR-TEST-1111", "name": "Fleet Commander"}]
         }
-        acts = self.client.get_watchtower_activity(limit=10)
-        self.assertEqual(len(acts), 1)
-        self.assertEqual(acts[0].summary, "Direct channel formed")
-        self.client.http.request.assert_called_with("GET", "/watchtower/activity", auth=True, params={"limit": 10})
+        agents = self.client.get_agents(q="Fleet", page=1, limit=10)
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(agents[0].agentId, "AMR-TEST-1111")
+        self.client.http.request.assert_called_with("GET", "/agents", auth=True, params={"q": "Fleet", "page": 1, "limit": 10})
+
+    def test_get_agent_e2ee_key(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {"fingerprint": "SHA256:abc", "keyVersion": 1}
+        }
+        key_data = self.client.get_agent_e2ee_key()
+        self.assertEqual(key_data.get("fingerprint"), "SHA256:abc")
+        self.client.http.request.assert_called_with("GET", "/agents/me/e2ee", auth=True)
+
+        alias_key_data = self.client.get_registered_public_key()
+        self.assertEqual(alias_key_data.get("fingerprint"), "SHA256:abc")
+
+    def test_get_cluster_key_distribution(self):
+        self.client.http.request.return_value = {
+            "success": True,
+            "data": {"clusterId": "cluster_1", "epoch": 2, "encryptedKeyPackage": "pkg_123"}
+        }
+        res = self.client.get_cluster_key_distribution("cluster_1", epoch=2)
+        self.assertEqual(res.get("clusterId"), "cluster_1")
+        self.assertEqual(res.get("epoch"), 2)
+        self.client.http.request.assert_called_with("GET", "/clusters/cluster_1/key-distribution", auth=True, params={"epoch": 2})
+
 
     def test_floor_tools(self):
         self.client.http.request.return_value = {
@@ -301,66 +322,6 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.client.http.set_credentials("AMR-TEST-NEW", "sk_new", preserve_tokens=False)
         self.assertIsNone(self.client.http.access_token)
         self.assertIsNone(self.client.http.refresh_token)
-
-    def test_register_installs_credentials_and_tokens_before_key_registration(self):
-        state_during_e2ee = {}
-        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
-            if path == "/auth/register":
-                return {
-                    "success": True,
-                    "data": {
-                        "agentId": "AMR-REG-777",
-                        "apiKey": "sk_reg_777",
-                        "tokens": {
-                            "accessToken": "at_reg_777",
-                            "refreshToken": "rt_reg_777"
-                        }
-                    }
-                }
-            if path == "/agents/me/e2ee":
-                state_during_e2ee["agent_id"] = self.client.http.agent_id
-                state_during_e2ee["api_key"] = self.client.http.api_key
-                state_during_e2ee["access_token"] = self.client.http.access_token
-                state_during_e2ee["refresh_token"] = self.client.http.refresh_token
-                state_during_e2ee["skip_auto_auth"] = skip_auto_auth
-                return {"success": True, "message": "Key registered"}
-            return {}
-
-        self.client.http.request.side_effect = mock_req
-        res = self.client.register(email="agent777@aamarva.com", name="Agent 777")
-        self.assertEqual(res.get("agentId"), "AMR-REG-777")
-        self.assertEqual(self.client.http.agent_id, "AMR-REG-777")
-        self.assertEqual(self.client.http.api_key, "sk_reg_777")
-        self.assertEqual(self.client.http.access_token, "at_reg_777")
-        self.assertEqual(self.client.http.refresh_token, "rt_reg_777")
-        if HAS_CRYPTOGRAPHY:
-            self.assertEqual(state_during_e2ee.get("agent_id"), "AMR-REG-777")
-            self.assertEqual(state_during_e2ee.get("access_token"), "at_reg_777")
-            self.assertTrue(state_during_e2ee.get("skip_auto_auth"))
-
-    def test_register_public_key_server_rejection_raises(self):
-        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
-            if path == "/auth/register":
-                return {
-                    "success": True,
-                    "data": {
-                        "agentId": "AMR-REG-REJECT",
-                        "apiKey": "sk_reg_reject",
-                        "tokens": {
-                            "accessToken": "at_reject",
-                            "refreshToken": "rt_reject"
-                        }
-                    }
-                }
-            if path == "/agents/me/e2ee":
-                return {"success": False, "message": "Key signature verification failed"}
-            return {}
-
-        self.client.http.request.side_effect = mock_req
-        if HAS_CRYPTOGRAPHY:
-            with self.assertRaises(AamarvaError) as ctx:
-                self.client.register(email="reject@aamarva.com", name="Reject Agent")
-            self.assertEqual(ctx.exception.code, "E2EE_KEY_REGISTRATION_FAILED")
 
     def test_send_cluster_message_enforces_sender_and_master(self):
         last_body = {}

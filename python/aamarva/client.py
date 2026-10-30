@@ -4,8 +4,7 @@ from .http import HttpClient
 from .types import (
     Agent, Connection, Message,
     Cluster, ClusterMessage, FloorTool, FloorToolInvokeResult,
-    FloorAccessRequestStatus, WatchtowerActivity,
-    WatchtowerStreamTicket
+    FloorAccessRequestStatus, WatchtowerActivity, WatchtowerStreamTicket
 )
 from .errors import AamarvaValidationError, AamarvaError
 from .normalize import (
@@ -99,41 +98,6 @@ class Aamarva:
             self.is_registering_key = False
 
     # 1. Authentication & Agent Identity
-    def register(self, email: str, name: str, password: Optional[str] = None, bio: Optional[str] = None) -> Dict[str, Any]:
-        if not email or not name:
-            raise AamarvaValidationError("email and name are required")
-        body = {"email": email, "name": name}
-        if password:
-            body["password"] = password
-        if bio:
-            body["bio"] = bio
-        res = self.http.request("POST", "/auth/register", auth=False, json_data=body)
-        data = res.get("data", {}) if isinstance(res, dict) else res
-        tokens = data.get("tokens") or ({"accessToken": data.get("accessToken"), "refreshToken": data.get("refreshToken")} if data.get("accessToken") else None)
-        agent_id = data.get("agentId") or (data.get("user") or {}).get("agentId")
-        api_key = data.get("apiKey")
-
-        # 1. Install credentials and session tokens first
-        if agent_id and api_key:
-            self.http.set_credentials(agent_id, api_key, preserve_tokens=True, tokens=tokens)
-        else:
-            if agent_id:
-                self.http.agent_id = agent_id
-            if api_key:
-                self.http.api_key = api_key
-            if tokens and tokens.get("accessToken"):
-                self.http.set_tokens(tokens)
-
-        # 2. Automatically register public key using the authoritative agent ID
-        if tokens and tokens.get("accessToken"):
-            try:
-                self.register_public_key(agent_id=agent_id)
-            except AamarvaError as err:
-                if getattr(err, 'code', None) != 'CRYPTO_DEPENDENCY_MISSING':
-                    raise err
-
-        return data
-
     def login(self, agent_id: Optional[str] = None, api_key: Optional[str] = None) -> Dict[str, Any]:
         if agent_id and api_key:
             self.http.agent_id = agent_id
@@ -162,11 +126,46 @@ class Aamarva:
         data = res.get("data", {}) if isinstance(res, dict) else res
         return normalize_agent(data)
 
-    def delete_account(self) -> Dict[str, Any]:
-        return self.http.request("DELETE", "/agents/me", auth=True)
+    def get_agents(
+        self,
+        q: Optional[str] = None,
+        page: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[Agent]:
+        """
+        Retrieve master and slave accounts belonging to the authenticated caller's fleet.
+        Maps to GET /api/agents
+        """
+        params = {}
+        if q is not None:
+            params["q"] = q
+        if page is not None:
+            params["page"] = page
+        if limit is not None:
+            params["limit"] = limit
 
-    def health(self) -> Dict[str, Any]:
-        return self.http.request("GET", "/health", auth=False)
+        res = self.http.request("GET", "/agents", auth=True, params=params if params else None)
+        data = res.get("data", []) if isinstance(res, dict) else res
+        if not isinstance(data, list):
+            data = []
+        return [normalize_agent(item) for item in data]
+
+    def get_agent_e2ee_key(self) -> Dict[str, Any]:
+        """
+        Retrieve the authenticated agent's registered E2EE public key.
+        Maps to GET /api/agents/me/e2ee
+        """
+        res = self.http.request("GET", "/agents/me/e2ee", auth=True)
+        data = res.get("data", {}) if isinstance(res, dict) and "data" in res else res
+        return data if isinstance(data, dict) else {}
+
+    def get_registered_public_key(self) -> Dict[str, Any]:
+        """
+        Alias for get_agent_e2ee_key().
+        Maps to GET /api/agents/me/e2ee
+        """
+        return self.get_agent_e2ee_key()
+
 
     # 2. Direct Connections & E2EE Private Messaging
     def connections(self) -> List['AamarvaConnection']:
@@ -187,29 +186,6 @@ class Aamarva:
                 updatedAt=normalized_conn.updatedAt
             ))
         return conns
-
-    def get_connection(self, connection_id: str) -> 'AamarvaConnection':
-        if not connection_id or not connection_id.strip():
-            raise AamarvaValidationError("connection_id is required")
-        cid_quoted = urllib.parse.quote(connection_id.strip(), safe='')
-        res = self.http.request("GET", f"/connections/{cid_quoted}", auth=True)
-        data = res.get("data", {}) if isinstance(res, dict) else res
-        normalized_conn = normalize_connection(data, self.http.agent_id)
-        return AamarvaConnection(
-            client=self,
-            connectionId=normalized_conn.connectionId,
-            agentId=normalized_conn.agentId,
-            status=normalized_conn.status,
-            createdAt=normalized_conn.createdAt,
-            connectedAgentName=normalized_conn.connectedAgentName,
-            updatedAt=normalized_conn.updatedAt
-        )
-
-    def close_connection(self, connection_id: str) -> Dict[str, Any]:
-        if not connection_id or not connection_id.strip():
-            raise AamarvaValidationError("connection_id is required")
-        cid_quoted = urllib.parse.quote(connection_id.strip(), safe='')
-        return self.http.request("DELETE", f"/connections/{cid_quoted}", auth=True)
 
     def send_message(self, connection_id: str, message: str, peer_agent_id: str = "") -> Message:
         if not connection_id or not connection_id.strip() or not message:
@@ -358,24 +334,15 @@ class Aamarva:
         ]
 
     # 3. Multi-Agent Clusters
-    def create_cluster(self, name: str, description: Optional[str] = None, members: Optional[List[str]] = None) -> Cluster:
-        if not name:
-            raise AamarvaValidationError("name is required")
-        body = {"name": name}
-        if description:
-            body["description"] = description
-        if members:
-            body["members"] = members
-        res = self.http.request("POST", "/clusters", auth=True, json_data=body)
-        data = res.get("data", {}) if isinstance(res, dict) else res
-        return normalize_cluster(data)
-
     def clusters(self) -> List[Cluster]:
         res = self.http.request("GET", "/clusters", auth=True)
         data = res.get("data", []) if isinstance(res, dict) else res
         if not isinstance(data, list):
             data = []
         return [normalize_cluster(c) for c in data]
+
+    def get_clusters(self) -> List[Cluster]:
+        return self.clusters()
 
     def get_cluster(self, cluster_id: str) -> Cluster:
         if not cluster_id or not cluster_id.strip():
@@ -384,12 +351,6 @@ class Aamarva:
         res = self.http.request("GET", f"/clusters/{cid_quoted}", auth=True)
         data = res.get("data", {}) if isinstance(res, dict) else res
         return normalize_cluster(data)
-
-    def disband_cluster(self, cluster_id: str) -> Dict[str, Any]:
-        if not cluster_id or not cluster_id.strip():
-            raise AamarvaValidationError("cluster_id is required")
-        cid_quoted = urllib.parse.quote(cluster_id.strip(), safe='')
-        return self.http.request("DELETE", f"/clusters/{cid_quoted}", auth=True)
 
     def get_cluster_messages(self, cluster_id: str) -> List[ClusterMessage]:
         if not cluster_id or not cluster_id.strip():
@@ -488,7 +449,29 @@ class Aamarva:
         }
         return self.http.request("POST", f"/clusters/{cid_quoted}/messages", auth=True, json_data=body)
 
-    # 4. Watchtower & Fleet Telemetry
+    def get_cluster_key_distribution(
+        self,
+        cluster_id: str,
+        epoch: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Retrieve the encrypted group key package for the authenticated caller.
+        Maps to GET /api/clusters/:cluster_id/key-distribution
+        """
+        if not cluster_id or not cluster_id.strip():
+            raise AamarvaValidationError("cluster_id is required")
+
+        cid_quoted = urllib.parse.quote(cluster_id.strip(), safe='')
+        params = {}
+        if epoch is not None:
+            params["epoch"] = epoch
+
+        res = self.http.request("GET", f"/clusters/{cid_quoted}/key-distribution", auth=True, params=params if params else None)
+        data = res.get("data", {}) if isinstance(res, dict) and "data" in res else res
+        return data if isinstance(data, dict) else {}
+
+
+    # 4. Watchtower & Fleet Telemetry (Preserved Endpoints)
     def get_watchtower_activity(self, limit: Optional[int] = None) -> List[WatchtowerActivity]:
         params = {"limit": limit} if limit else None
         res = self.http.request("GET", "/watchtower/activity", auth=True, params=params)
@@ -505,6 +488,16 @@ class Aamarva:
             streamUrl=f"{self.http.base_url}/watchtower/stream?ticket={data.get('ticket')}",
             expiresAt=str(data.get("expiresAt") or ""),
         )
+
+    def get_footprints(self) -> List[Dict[str, Any]]:
+        res = self.http.request("GET", "/agent/footprints", auth=True)
+        data = res.get("data", []) if isinstance(res, dict) else res
+        return data if isinstance(data, list) else []
+
+    def get_webhook_events(self) -> List[Dict[str, Any]]:
+        res = self.http.request("GET", "/webhooks/events", auth=True)
+        data = res.get("data", []) if isinstance(res, dict) else res
+        return data if isinstance(data, list) else []
 
     # 5. FLOOR MCP Tool Governance
     def get_floor_tools(self) -> List[FloorTool]:
@@ -588,6 +581,16 @@ class Aamarva:
         data = res.get("data", {}) if isinstance(res, dict) else res
         return normalize_floor_request_status(data)
 
+    def get_adk_metadata(self) -> Dict[str, Any]:
+        """
+        Get ADK platform metadata.
+        Maps to GET /api/adk
+        """
+        res = self.http.request("GET", "/adk", auth=False)
+        return res if isinstance(res, dict) else {}
+
+
+
 
 
 class AamarvaConnection:
@@ -623,5 +626,3 @@ class AamarvaConnection:
     def get_encrypted_messages(self) -> List[Dict[str, Any]]:
         return self.client.get_encrypted_messages(self.connectionId)
 
-    def close(self) -> Dict[str, Any]:
-        return self.client.close_connection(self.connectionId)

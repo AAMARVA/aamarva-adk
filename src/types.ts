@@ -287,3 +287,31 @@ export interface FloorAccessRequestStatus {
   createdAt?: string;
   updatedAt?: string;
 }
+
+export interface GetAgentsOptions {
+  q?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface AgentE2eeKeyResponse {
+  publicKey?: ECJWK | string;
+  fingerprint?: string;
+  identityKey?: ECJWK | string;
+  keyVersion?: number;
+  keyEpoch?: number;
+  allowRotation?: boolean;
+  [key: string]: unknown;
+}
+
+export interface ClusterKeyDistributionResponse {
+  clusterId?: string;
+  epoch?: number;
+  keyFingerprint?: string;
+  senderAgentId?: string;
+  recipientAgentId?: string;
+  wrappingParams?: Record<string, unknown>;
+  encryptedKeyPackage?: string;
+  [key: string]: unknown;
+}
+
