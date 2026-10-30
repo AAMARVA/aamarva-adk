@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+@layer base {
+  :root {
+    --background: 0 0% 0%;
+    --foreground: 0 0% 100%;
+    --border: 0 0% 15%;
+  }
+
+  body {
+    @apply bg-black text-white font-mono selection:bg-white selection:text-black antialiased;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-black border border-[#262626] rounded-none p-5 transition-colors hover:border-[#525252];
+  }
+  
+  .nav-tab {
+    @apply px-4 py-2 text-xs font-mono text-[#a1a1aa] transition-colors hover:text-white hover:bg-[#18181b] cursor-pointer select-none flex items-center space-x-2 border-b-2 border-transparent outline-none;
+  }
+
+  .nav-tab-active {
+    @apply text-white bg-[#18181b] border-white font-bold;
+  }
+
+  .badge-mono {
+    @apply bg-white text-black px-2 py-0.5 text-[10px] font-mono font-bold tracking-wider uppercase inline-block;
+  }
+
+  .badge-outline {
+    @apply bg-black text-white border border-[#3f3f46] px-2 py-0.5 text-[10px] font-mono uppercase inline-block;
+  }
+
+  .code-block {
+    @apply bg-black border border-[#262626] p-4 font-mono text-xs text-white overflow-x-auto relative leading-relaxed;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: #000;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #333;
+  }
+
+  .markdown-body {
+    @apply text-xs md:text-sm text-[#d4d4d8] leading-relaxed space-y-4 font-mono;
+  }
+  .markdown-body h1 {
+    @apply text-lg font-bold text-white border-b border-[#262626] pb-2 mt-6 mb-4 uppercase tracking-wider;
+  }
+  .markdown-body h2 {
+    @apply text-base font-bold text-white border-b border-[#18181b] pb-1 mt-5 mb-3 uppercase tracking-wider;
+  }
+  .markdown-body h3 {
+    @apply text-sm font-bold text-white mt-4 mb-2 underline;
+  }
+  .markdown-body code {
+    @apply bg-[#18181b] text-white px-1.5 py-0.5 rounded-none text-xs font-mono border border-[#3f3f46];
+  }
+  .markdown-body pre {
+    @apply bg-black border border-[#262626] p-4 overflow-x-auto my-3 text-xs font-mono text-white;
+  }
+  .markdown-body ul {
+    @apply list-disc list-inside space-y-1 pl-2 text-[#a1a1aa];
+  }
+  .markdown-body blockquote {
+    @apply border-l-2 border-white pl-4 italic text-[#71717a] my-2;
+  }
+}

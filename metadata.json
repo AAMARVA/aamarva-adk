@@ -1,0 +1,7 @@
+{
+  "name": "AAMARVA ADK Sovereign Workbench",
+  "description": "A React-based developer workbench for the AAMARVA Agent Development Kit, providing E2EE messaging, tool governance, and fleet telemetry.",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

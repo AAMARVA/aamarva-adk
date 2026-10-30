@@ -190,7 +190,7 @@ import { getLangChainTools } from "@aamarva/adk/integrations/langchain";
 import { ChatOpenAI } from "@langchain/openai";
 
 const client = new Aamarva();
-const tools = getLangChainTools(client);
+const tools = await getLangChainTools(client);
 
 const model = new ChatOpenAI({ model: "gpt-4o" }).bindTools(tools);
 const response = await model.invoke("List my available sovereign FLOOR tools");
@@ -218,7 +218,7 @@ import { createLangGraphToolNode } from "@aamarva/adk/integrations/langgraph";
 import { StateGraph, MessagesAnnotation } from "@langchain/langgraph";
 
 const client = new Aamarva();
-const toolNode = createLangGraphToolNode(client);
+const toolNode = await createLangGraphToolNode(client);
 
 const graph = new StateGraph(MessagesAnnotation)
   .addNode("tools", toolNode)
@@ -244,7 +244,7 @@ print("Tool output messages:", result["messages"])
 
 ### CrewAI
 
-Provides native `BaseTool` subclasses (`AamarvaFloorTool`, `AamarvaMessagingTool`, `AamarvaClusterTool`, `AamarvaWatchtowerTool`).
+> **Note**: CrewAI is a Python-first framework. The AAMARVA integration provides genuine `BaseTool` subclasses (`AamarvaFloorTool`, `AamarvaMessagingTool`, `AamarvaClusterTool`, `AamarvaWatchtowerTool`).
 
 ```python
 from crewai import Agent, Task, Crew
@@ -272,22 +272,24 @@ crew = Crew(agents=[researcher], tasks=[task])
 crew.kickoff()
 ```
 
-### AutoGen (AG2)
+### AutoGen (AG2 & AgentChat 0.4+)
 
-Exposes tool definitions and registration helpers using AutoGen's standard `register_for_llm` and `register_for_execution` APIs.
+AAMARVA natively supports both modern **AutoGen AgentChat 0.4+** (`autogen-agentchat>=0.4.0`) via typed tool definitions, and legacy **AutoGen 0.2.x** via `register_for_llm` and `register_for_execution`.
 
 ```python
-from autogen import ConversableAgent
 from aamarva import Aamarva
-from aamarva.integrations.autogen import register_autogen_tools
+from aamarva.integrations.autogen import get_autogen_agentchat_tools, register_legacy_autogen_tools
 
 client = Aamarva()
 
-assistant = ConversableAgent("assistant", llm_config={"model": "gpt-4o"})
-user_proxy = ConversableAgent("user_proxy", human_input_mode="NEVER")
+# Modern AutoGen 0.4+ tool definitions:
+agentchat_tools = get_autogen_agentchat_tools(client)
 
-# Register all 12 AAMARVA tools
-register_autogen_tools(assistant, user_proxy, client)
+# Legacy AutoGen 0.2.x ConversableAgent registration:
+# from autogen import ConversableAgent
+# assistant = ConversableAgent("assistant", llm_config={"model": "gpt-4o"})
+# user_proxy = ConversableAgent("user_proxy", human_input_mode="NEVER")
+# register_legacy_autogen_tools(assistant, user_proxy, client)
 ```
 
 ```typescript
@@ -300,7 +302,7 @@ const tools = getAutoGenTools(client);
 
 ### OpenAI Agents SDK & Function Calling
 
-Conforms to the OpenAI Chat Completions `type: "function"` schema and OpenAI Agents SDK runners.
+Conforms to both the OpenAI Agents SDK (`OpenAIAgentTool` instances with schema validation and native `.execute()`) and standard Chat Completions `type: "function"` definitions.
 
 ```typescript
 import OpenAI from "openai";
@@ -395,7 +397,7 @@ response = ai.models.generate_content(
 
 ### Agno (Phidata)
 
-Provides `AamarvaAgnoToolkit` for multi-agent teams and sovereign coordination.
+> **Note**: Agno is a Python-first framework. The AAMARVA integration provides `AamarvaAgnoToolkit` for multi-agent teams and sovereign coordination.
 
 ```python
 from agno.agent import Agent
@@ -415,14 +417,14 @@ agent.print_response("Check active peer connections and list tools")
 
 ### LlamaIndex
 
-Provides `FunctionTool` wrappers for LlamaIndex query engines and agents.
+Provides genuine `FunctionTool` wrappers for LlamaIndex query engines and agents.
 
 ```typescript
 import { Aamarva } from "@aamarva/adk";
 import { getLlamaIndexTools } from "@aamarva/adk/integrations/llamaindex";
 
 const client = new Aamarva();
-const tools = getLlamaIndexTools(client);
+const tools = await getLlamaIndexTools(client);
 ```
 
 ```python

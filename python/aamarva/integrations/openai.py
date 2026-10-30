@@ -1,13 +1,25 @@
 """
 OpenAI Agents & Function Calling Integration for AAMARVA ADK (Python)
 
-Exposes AAMARVA tools conforming to OpenAI Chat Completions function calling format.
+Exposes AAMARVA tools conforming to the OpenAI Chat Completions tool specification
+and the OpenAI Agents SDK function_tool format.
 """
 
 import json
 from typing import Optional, Dict, Any, List
 
-def get_openai_tools(client: Optional[Any] = None) -> List[Dict[str, Any]]:
+try:
+    from agents import function_tool as agent_function_tool
+    HAS_OPENAI_AGENTS_SDK = True
+except ImportError:
+    HAS_OPENAI_AGENTS_SDK = False
+    agent_function_tool = None
+
+
+def get_openai_tool_definitions() -> List[Dict[str, Any]]:
+    """
+    Returns OpenAI Chat Completions function definitions for all AAMARVA tools.
+    """
     return [
         {
             "type": "function",
@@ -21,7 +33,7 @@ def get_openai_tools(client: Optional[Any] = None) -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "aamarva_floor_request_access",
-                "description": "Request human-in-the-loop (HITL) approval for an AAMARVA FLOOR tool without executing it.",
+                "description": "Request human-in-the-loop (HITL) approval for an AAMARVA FLOOR tool.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -37,7 +49,7 @@ def get_openai_tools(client: Optional[Any] = None) -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "aamarva_floor_check_status",
-                "description": "Check the status of a pending or processed FLOOR tool access request.",
+                "description": "Check status of a pending FLOOR access request.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -149,7 +161,7 @@ def get_openai_tools(client: Optional[Any] = None) -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "aamarva_get_agents",
-                "description": "List sovereign fleet accounts (master and slave agents) in caller fleet.",
+                "description": "List sovereign fleet accounts in caller fleet.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -172,7 +184,61 @@ def get_openai_tools(client: Optional[Any] = None) -> List[Dict[str, Any]]:
     ]
 
 
+def get_openai_tools(client: Optional[Any] = None) -> List[Dict[str, Any]]:
+    """
+    Returns OpenAI tools with executable callable handlers.
+    """
+    if client is None:
+        from ..client import Aamarva
+        client = Aamarva()
+    
+    defs = get_openai_tool_definitions()
+    
+    def create_execute(name: str):
+        def execute(**kwargs):
+            return execute_openai_tool_call(client, name, kwargs)
+        return execute
+
+    for d in defs:
+        d["execute"] = create_execute(d["function"]["name"])
+    
+    return defs
+
+
+def get_openai_agents_tools(client: Optional[Any] = None) -> List[Any]:
+    """
+    Returns genuine OpenAI Agents SDK function_tool objects.
+    """
+    if not HAS_OPENAI_AGENTS_SDK:
+        # Fall back to callable definitions with execute method
+        return get_openai_tools(client)
+
+    if client is None:
+        from ..client import Aamarva
+        client = Aamarva()
+
+    tools = []
+    for defn in get_openai_tool_definitions():
+        fn_name = defn["function"]["name"]
+        fn_desc = defn["function"]["description"]
+
+        def make_agent_tool(tool_name: str, doc: str):
+            def handler(**kwargs) -> str:
+                res = execute_openai_tool_call(client, tool_name, kwargs)
+                return json.dumps(res, default=str) if isinstance(res, (dict, list)) else str(res)
+            handler.__name__ = tool_name
+            handler.__doc__ = doc
+            return agent_function_tool(handler)
+
+        tools.append(make_agent_tool(fn_name, fn_desc))
+
+    return tools
+
+
 def execute_openai_tool_call(client: Any, name: str, args: Dict[str, Any]) -> Any:
+    """
+    Executes a named AAMARVA tool call.
+    """
     if name == "aamarva_floor_list_tools":
         return client.get_floor_tools()
     elif name == "aamarva_floor_request_access":
@@ -207,38 +273,35 @@ def execute_openai_tool_call(client: Any, name: str, args: Dict[str, Any]) -> An
 
 
 def handle_openai_tool_call(client: Any, tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handles a tool call dict and returns an OpenAI tool result response message.
+    """
     fn = tool_call.get("function", {})
-    tool_name = fn.get("name", "")
-    raw_args = fn.get("arguments", {})
-    if isinstance(raw_args, str):
-        try:
-            parsed_args = json.loads(raw_args)
-        except Exception:
-            return {
-                "tool_call_id": tool_call.get("id", "call_default"),
-                "role": "tool",
-                "name": tool_name,
-                "content": json.dumps({"error": "Malformed JSON in tool arguments"}),
-            }
-    else:
-        parsed_args = raw_args or {}
-
+    name = fn.get("name")
+    args_raw = fn.get("arguments", "{}")
+    args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+    
     try:
-        res = execute_openai_tool_call(client, tool_name, parsed_args)
-        if isinstance(res, (dict, list)):
-            content = json.dumps(res, default=str)
-        else:
-            content = str(res)
+        res = execute_openai_tool_call(client, name, args)
         return {
-            "tool_call_id": tool_call.get("id", "call_default"),
+            "tool_call_id": tool_call.get("id"),
             "role": "tool",
-            "name": tool_name,
-            "content": content,
+            "name": name,
+            "content": json.dumps(res, default=str) if isinstance(res, (dict, list)) else str(res)
         }
     except Exception as e:
         return {
-            "tool_call_id": tool_call.get("id", "call_default"),
+            "tool_call_id": tool_call.get("id"),
             "role": "tool",
-            "name": tool_name,
-            "content": json.dumps({"error": str(e)}),
+            "name": name,
+            "content": json.dumps({"error": str(e)})
         }
+
+
+__all__ = [
+    "get_openai_tools",
+    "get_openai_tool_definitions",
+    "get_openai_agents_tools",
+    "execute_openai_tool_call",
+    "handle_openai_tool_call",
+]

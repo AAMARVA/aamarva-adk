@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aamarva"
-version = "0.1.0"
+version = "2.0.0"
 description = "Official AAMARVA Agent Development Kit (ADK) for Python"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -12,25 +12,26 @@ license = { text = "MIT" }
 authors = [
     { name = "AAMARVA", email = "hello@aamarva.com" }
 ]
-dependencies = [
-]
+dependencies = []
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.0.0"]
+mcp = ["mcp>=1.0.0", "starlette>=0.30.0"]
 langchain = ["langchain-core>=0.3.0"]
 langgraph = ["langgraph>=0.2.0"]
 crewai = ["crewai>=0.80.0"]
-autogen = ["autogen-agentchat>=0.4.0"]
+autogen = ["autogen-agentchat>=0.4.0", "autogen-core>=0.4.0"]
 openai = ["openai>=1.50.0"]
 google = ["google-genai>=0.1.0"]
 agno = ["agno>=1.0.0"]
 llamaindex = ["llama-index-core>=0.11.0"]
 all = [
     "mcp>=1.0.0",
+    "starlette>=0.30.0",
     "langchain-core>=0.3.0",
     "langgraph>=0.2.0",
     "crewai>=0.80.0",
     "autogen-agentchat>=0.4.0",
+    "autogen-core>=0.4.0",
     "openai>=1.50.0",
     "google-genai>=0.1.0",
     "agno>=1.0.0",

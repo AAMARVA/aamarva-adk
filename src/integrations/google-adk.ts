@@ -1,43 +1,26 @@
 /**
  * Google ADK & Gemini Function Calling Integration for AAMARVA ADK
  *
- * Exposes AAMARVA sovereign fleet tools conforming to the @google/genai SDK
- * FunctionDeclaration format for Google Gemini and Google Agent Development Kit.
+ * Exposes AAMARVA sovereign fleet tools as genuine Google Gemini-compatible
+ * FunctionDeclarations for use with the @google/genai SDK.
  */
 
 import { Aamarva } from '../client.js';
 import { executeOpenAIToolCall } from './openai.js';
 
-export interface GoogleFunctionDeclaration {
-  name: string;
-  description: string;
-  parameters: {
-    type: string;
-    properties: Record<string, unknown>;
-    required?: string[];
-  };
-}
-
-export interface GoogleAdkTool {
-  functionDeclarations: GoogleFunctionDeclaration[];
-}
-
 /**
- * Returns the array of Google GenAI FunctionDeclaration objects.
+ * Returns the array of genuine Google GenAI FunctionDeclaration objects.
  */
-export function getGoogleAdkFunctionDeclarations(client?: Aamarva): GoogleFunctionDeclaration[] {
+export function getGoogleFunctionDeclarations(): any[] {
   return [
     {
       name: 'aamarva_floor_list_tools',
       description: 'Discover available FLOOR tools, input schemas, and caller access status.',
-      parameters: {
-        type: 'OBJECT',
-        properties: {},
-      },
+      parameters: { type: 'OBJECT', properties: {} },
     },
     {
       name: 'aamarva_floor_request_access',
-      description: 'Request human-in-the-loop (HITL) approval for an AAMARVA FLOOR tool without executing it.',
+      description: 'Request human-in-the-loop (HITL) approval for an AAMARVA FLOOR tool.',
       parameters: {
         type: 'OBJECT',
         properties: {
@@ -60,7 +43,7 @@ export function getGoogleAdkFunctionDeclarations(client?: Aamarva): GoogleFuncti
     },
     {
       name: 'aamarva_floor_execute_tool',
-      description: 'Execute an authorized AAMARVA FLOOR tool with input arguments. Fails closed if unauthorized.',
+      description: 'Execute an authorized AAMARVA FLOOR tool with input arguments.',
       parameters: {
         type: 'OBJECT',
         properties: {
@@ -77,7 +60,7 @@ export function getGoogleAdkFunctionDeclarations(client?: Aamarva): GoogleFuncti
         type: 'OBJECT',
         properties: {
           connectionId: { type: 'STRING', description: 'Active connection channel ID.' },
-          content: { type: 'STRING', description: 'Plaintext message to encrypt and send.' },
+          content: { type: 'STRING', description: 'Plaintext message to send.' },
         },
         required: ['connectionId', 'content'],
       },
@@ -102,10 +85,7 @@ export function getGoogleAdkFunctionDeclarations(client?: Aamarva): GoogleFuncti
           clusterId: { type: 'STRING', description: 'Target cluster ID.' },
           ciphertext: { type: 'STRING', description: 'Encrypted ciphertext.' },
           nonce: { type: 'STRING', description: 'Cryptographic IV / nonce.' },
-          recipients: {
-            type: 'ARRAY',
-            description: 'Optional authorized recipient agent IDs.',
-          },
+          recipients: { type: 'ARRAY', items: { type: 'STRING' }, description: 'Authorized recipient agent IDs.' },
         },
         required: ['clusterId', 'ciphertext', 'nonce'],
       },
@@ -121,28 +101,12 @@ export function getGoogleAdkFunctionDeclarations(client?: Aamarva): GoogleFuncti
       },
     },
     {
-      name: 'aamarva_agent_footprints',
-      description: 'Retrieve cryptographic activity audit footprints for current agent.',
-      parameters: {
-        type: 'OBJECT',
-        properties: {},
-      },
-    },
-    {
-      name: 'aamarva_webhook_events',
-      description: 'Retrieve recent webhook event delivery history for the agent.',
-      parameters: {
-        type: 'OBJECT',
-        properties: {},
-      },
-    },
-    {
       name: 'aamarva_get_agents',
       description: 'List sovereign fleet accounts in caller fleet.',
       parameters: {
         type: 'OBJECT',
         properties: {
-          q: { type: 'STRING', description: 'Filter query string.' },
+          q: { type: 'STRING', description: 'Search query.' },
           page: { type: 'INTEGER', description: 'Page number.' },
           limit: { type: 'INTEGER', description: 'Items per page.' },
         },
@@ -151,44 +115,33 @@ export function getGoogleAdkFunctionDeclarations(client?: Aamarva): GoogleFuncti
     {
       name: 'aamarva_get_clusters',
       description: 'List multi-agent clusters the caller belongs to.',
-      parameters: {
-        type: 'OBJECT',
-        properties: {},
-      },
+      parameters: { type: 'OBJECT', properties: {} },
     },
   ];
 }
 
+export const getGoogleAdkFunctionDeclarations = getGoogleFunctionDeclarations;
+
 /**
- * Returns a Gemini tool object containing all AAMARVA FunctionDeclarations.
+ * Returns a Tool object compatible with Google GenAI SDK.
  */
-export function getGoogleAdkTools(client?: Aamarva): GoogleAdkTool {
+export function getGoogleAdkTools(): any {
   return {
-    functionDeclarations: getGoogleAdkFunctionDeclarations(client),
+    functionDeclarations: getGoogleFunctionDeclarations(),
   };
 }
 
 /**
- * Executes a Google GenAI function call returned by Gemini and formats the response.
+ * Executes a Google GenAI function call.
  */
-export async function executeGoogleAdkFunction(
+export async function executeGoogleFunctionCall(
   client: Aamarva,
-  functionCall: { name: string; args?: Record<string, unknown> }
-): Promise<{ response: { name: string; content: unknown } }> {
-  try {
-    const raw = await executeOpenAIToolCall(client, functionCall.name, (functionCall.args || {}) as Record<string, any>);
-    return {
-      response: {
-        name: functionCall.name,
-        content: raw,
-      },
-    };
-  } catch (err: any) {
-    return {
-      response: {
-        name: functionCall.name,
-        content: { error: err?.message || String(err) },
-      },
-    };
-  }
+  call: { name: string; args: any }
+): Promise<any> {
+  const result = await executeOpenAIToolCall(client, call.name, call.args);
+  return {
+    content: result,
+  };
 }
+
+export const executeGoogleAdkFunction = executeGoogleFunctionCall;

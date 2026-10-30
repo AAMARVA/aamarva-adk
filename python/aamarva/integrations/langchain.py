@@ -1,65 +1,48 @@
 """
 LangChain Integration for AAMARVA ADK (Python)
 
-Provides LangChain-compatible tools exposing AAMARVA sovereign fleet capabilities
-and FLOOR governance.
+Provides genuine LangChain StructuredTool instances exposing AAMARVA
+sovereign fleet capabilities and FLOOR governance.
 """
 
-import json
-from typing import Optional, Dict, Any, List, Callable
-from .openai import execute_openai_tool_call, get_openai_tools
+from typing import Optional, List, Any, Callable
+from .openai import get_openai_tools, execute_openai_tool_call
 
 try:
-    from langchain_core.tools import BaseTool, StructuredTool
+    from langchain_core.tools import StructuredTool, BaseTool
     HAS_LANGCHAIN = True
 except ImportError:
     HAS_LANGCHAIN = False
+    StructuredTool = object
     BaseTool = object
-    StructuredTool = None
 
 
-class AamarvaLangChainTool:
+class AamarvaLangChainTool(StructuredTool if HAS_LANGCHAIN else object):
     """
-    Duck-typed LangChain tool supporting invoke, run, _run, and JSON Schema.
+    AAMARVA LangChain StructuredTool implementation.
     """
-    def __init__(self, name: str, description: str, schema: Dict[str, Any], handler: Callable[[Any], Any]):
-        self.name = name
-        self.description = description
-        self.args_schema = schema
-        self.handler = handler
-
-    def invoke(self, input_data: Any) -> str:
-        return self.run(input_data)
-
-    def run(self, *args, **kwargs) -> str:
-        input_data = {}
-        if args:
-            if len(args) == 1 and isinstance(args[0], dict):
-                input_data = args[0]
-            elif len(args) == 1 and isinstance(args[0], str):
-                try:
-                    input_data = json.loads(args[0])
-                except Exception:
-                    input_data = {"input": args[0]}
-        if kwargs:
-            input_data.update(kwargs)
-
-        try:
-            res = self.handler(input_data)
-            if isinstance(res, (dict, list)):
-                return json.dumps(res, default=str)
-            return str(res)
-        except Exception as e:
-            return json.dumps({"error": str(e)})
-
-    def _run(self, *args, **kwargs) -> str:
-        return self.run(*args, **kwargs)
-
-    async def _arun(self, *args, **kwargs) -> str:
-        return self.run(*args, **kwargs)
+    @classmethod
+    def create(cls, name: str, description: str, handler: Callable[..., Any]):
+        if not HAS_LANGCHAIN:
+            raise ImportError(
+                "LangChain dependencies not found. Please install 'langchain-core' via 'pip install aamarva[langchain]' to use this integration."
+            )
+        return StructuredTool.from_function(
+            func=handler,
+            name=name,
+            description=description,
+        )
 
 
 def get_langchain_tools(client: Optional[Any] = None) -> List[Any]:
+    """
+    Returns an array of genuine LangChain StructuredTool instances.
+    """
+    if not HAS_LANGCHAIN:
+        raise ImportError(
+            "LangChain dependencies not found. Please install 'langchain-core' via 'pip install aamarva[langchain]' to use this integration."
+        )
+
     if client is None:
         from ..client import Aamarva
         client = Aamarva()
@@ -68,20 +51,19 @@ def get_langchain_tools(client: Optional[Any] = None) -> List[Any]:
     tools = []
 
     for item in openai_tools:
-        fn = item["function"]
-        name = fn["name"]
-        description = fn["description"]
-        schema = fn["parameters"]
+        fn_def = item["function"]
+        name = fn_def["name"]
+        description = fn_def["description"]
 
-        def make_handler(tool_name: str):
-            return lambda args: execute_openai_tool_call(client, tool_name, args)
+        def create_handler(tool_name: str):
+            def handler(**kwargs):
+                return execute_openai_tool_call(client, tool_name, kwargs)
+            return handler
 
-        handler = make_handler(name)
-        tool = AamarvaLangChainTool(
+        tool = StructuredTool.from_function(
+            func=create_handler(name),
             name=name,
             description=description,
-            schema=schema,
-            handler=handler,
         )
         tools.append(tool)
 
@@ -89,8 +71,21 @@ def get_langchain_tools(client: Optional[Any] = None) -> List[Any]:
 
 
 def execute_langchain_tool(client: Any, name: str, input_args: Any) -> str:
+    """
+    Executes a LangChain tool by name.
+    """
     tools = get_langchain_tools(client)
     tool = next((t for t in tools if t.name == name), None)
     if not tool:
         raise ValueError(f"LangChain tool not found: {name}")
-    return tool.invoke(input_args)
+    
+    if isinstance(input_args, dict):
+        return tool.invoke(input_args)
+    return tool.invoke({"input": input_args})
+
+
+__all__ = [
+    "AamarvaLangChainTool",
+    "get_langchain_tools",
+    "execute_langchain_tool",
+]

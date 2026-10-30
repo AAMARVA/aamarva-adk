@@ -1,15 +1,18 @@
 """
 Google ADK & Gemini Function Calling Integration for AAMARVA ADK (Python)
 
-Provides Google GenAI FunctionDeclaration dictionaries compatible with
-the google-genai SDK for Gemini models.
+Provides genuine Google GenAI FunctionDeclaration objects and Google ADK-compatible
+tools for Gemini models using the google-genai SDK.
 """
 
 from typing import Optional, Dict, Any, List
 from .openai import execute_openai_tool_call
 
 
-def get_google_adk_function_declarations(client: Optional[Any] = None) -> List[Dict[str, Any]]:
+def get_google_function_declarations() -> List[Dict[str, Any]]:
+    """
+    Returns the array of genuine Google GenAI FunctionDeclaration dictionaries.
+    """
     return [
         {
             "name": "aamarva_floor_list_tools",
@@ -18,7 +21,7 @@ def get_google_adk_function_declarations(client: Optional[Any] = None) -> List[D
         },
         {
             "name": "aamarva_floor_request_access",
-            "description": "Request human-in-the-loop (HITL) approval for an AAMARVA FLOOR tool without executing it.",
+            "description": "Request human-in-the-loop (HITL) approval for an AAMARVA FLOOR tool.",
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
@@ -131,27 +134,36 @@ def get_google_adk_function_declarations(client: Optional[Any] = None) -> List[D
     ]
 
 
-def get_google_adk_tools(client: Optional[Any] = None) -> Dict[str, Any]:
-    return {
-        "function_declarations": get_google_adk_function_declarations(client),
-    }
+# Alias for explicit Google ADK naming
+get_google_adk_function_declarations = get_google_function_declarations
 
 
-def execute_google_adk_function(client: Any, function_call: Dict[str, Any]) -> Dict[str, Any]:
-    name = function_call.get("name", "")
-    args = function_call.get("args", {})
+def get_google_adk_tools(client: Optional[Any] = None) -> List[Dict[str, Any]]:
+    """
+    Returns a list of Tool dictionaries compatible with Google GenAI SDK.
+    """
+    return [{"function_declarations": get_google_function_declarations()}]
+
+
+def execute_google_function_call(client: Any, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Executes a Google GenAI function call and returns a response content dict.
+    """
     try:
         res = execute_openai_tool_call(client, name, args)
-        return {
-            "response": {
-                "name": name,
-                "content": res,
-            }
-        }
+        return {"content": res}
     except Exception as e:
-        return {
-            "response": {
-                "name": name,
-                "content": {"error": str(e)},
-            }
-        }
+        return {"content": {"error": str(e)}}
+
+
+# Alias for explicit Google ADK naming
+execute_google_adk_function = execute_google_function_call
+
+
+__all__ = [
+    "get_google_adk_tools",
+    "get_google_adk_function_declarations",
+    "get_google_function_declarations",
+    "execute_google_adk_function",
+    "execute_google_function_call",
+]

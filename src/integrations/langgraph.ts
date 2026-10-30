@@ -1,120 +1,51 @@
 /**
  * LangGraph Integration for AAMARVA ADK
  *
- * Provides LangGraph-compatible tool node runners and state handlers
- * that process tool calls against AAMARVA sovereign fleet capabilities.
+ * Provides genuine LangGraph-compatible tool node integration for sovereign fleet capabilities.
  */
 
 import { Aamarva } from '../client.js';
-import { executeOpenAIToolCall } from './openai.js';
-
-export interface LangGraphToolCall {
-  id?: string;
-  name: string;
-  args: Record<string, unknown> | string;
-}
-
-export interface LangGraphToolMessage {
-  tool_call_id: string;
-  content: string;
-  name: string;
-}
-
-export interface LangGraphStateWithMessages {
-  messages: Array<{
-    role?: string;
-    content?: any;
-    tool_calls?: LangGraphToolCall[];
-    additional_kwargs?: {
-      tool_calls?: LangGraphToolCall[];
-    };
-  }>;
-}
+import { getLangChainTools } from './langchain.js';
 
 /**
- * Executes an individual LangGraph tool call or action.
+ * Dynamically imports LangGraph dependencies.
  */
-export async function executeLangGraphAction(
-  client: Aamarva,
-  action: { tool: string; toolInput: Record<string, unknown> | string }
-): Promise<{ output: string }> {
-  let args = action.toolInput;
-  if (typeof args === 'string') {
-    try {
-      args = JSON.parse(args);
-    } catch {
-      args = { input: args };
-    }
-  }
-
+async function getLangGraphModules() {
   try {
-    const result = await executeOpenAIToolCall(client, action.tool, args as Record<string, any>);
-    return {
-      output: typeof result === 'string' ? result : JSON.stringify(result),
-    };
-  } catch (err: any) {
-    return {
-      output: JSON.stringify({ error: err?.message || String(err) }),
-    };
+    const { ToolNode } = await import('@langchain/langgraph/prebuilt');
+    return { ToolNode };
+  } catch (err) {
+    throw new Error(
+      'LangGraph dependencies not found. Please install @langchain/langgraph to use this integration.'
+    );
   }
 }
 
 /**
- * Processes an array of LangGraph tool calls and generates response messages.
+ * Creates a genuine LangGraph ToolNode containing all AAMARVA tools.
  */
-export async function executeLangGraphToolCalls(
+export async function createAamarvaToolNode(client?: Aamarva): Promise<any> {
+  const tools = await getLangChainTools(client);
+  const { ToolNode } = await getLangGraphModules();
+  return new ToolNode(tools);
+}
+
+export const createLangGraphToolNode = createAamarvaToolNode;
+
+/**
+ * Legacy compatibility wrapper for tool execution if needed outside of ToolNode.
+ */
+export async function executeAamarvaTool(
   client: Aamarva,
-  toolCalls: LangGraphToolCall[]
-): Promise<LangGraphToolMessage[]> {
-  const responses: LangGraphToolMessage[] = [];
-
-  for (const call of toolCalls) {
-    let args = call.args;
-    if (typeof args === 'string') {
-      try {
-        args = JSON.parse(args);
-      } catch {
-        args = { input: args };
-      }
-    }
-
-    try {
-      const res = await executeOpenAIToolCall(client, call.name, (args || {}) as Record<string, any>);
-      responses.push({
-        tool_call_id: call.id || `call_${Date.now()}`,
-        name: call.name,
-        content: typeof res === 'string' ? res : JSON.stringify(res),
-      });
-    } catch (err: any) {
-      responses.push({
-        tool_call_id: call.id || `call_${Date.now()}`,
-        name: call.name,
-        content: JSON.stringify({ error: err?.message || String(err) }),
-      });
-    }
+  name: string,
+  args: any
+): Promise<string> {
+  const tools = await getLangChainTools(client);
+  const tool = tools.find((t) => t.name === name);
+  if (!tool) {
+    throw new Error(`Tool not found: ${name}`);
   }
-
-  return responses;
+  return tool.invoke(args);
 }
 
-/**
- * Creates a LangGraph ToolNode runner function that can be added to a StateGraph.
- */
-export function createLangGraphToolNode(client?: Aamarva) {
-  const activeClient = client || new Aamarva();
-
-  return async function toolNode(state: LangGraphStateWithMessages): Promise<{ messages: LangGraphToolMessage[] }> {
-    const lastMessage = state.messages[state.messages.length - 1];
-    const toolCalls: LangGraphToolCall[] =
-      lastMessage?.tool_calls ||
-      lastMessage?.additional_kwargs?.tool_calls ||
-      [];
-
-    if (!toolCalls.length) {
-      return { messages: [] };
-    }
-
-    const messages = await executeLangGraphToolCalls(activeClient, toolCalls);
-    return { messages };
-  };
-}
+export const executeLangGraphAction = executeAamarvaTool;

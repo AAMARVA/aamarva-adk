@@ -82,7 +82,7 @@ export class FileSystemKeyStore implements KeyStore {
 }
 
 let activeKeyStore: KeyStore = new InMemoryKeyStore();
-const identityKeyCache = new Map<string, crypto.KeyPairKeyObjectResult>();
+const identityKeyCache = new Map<string, any>();
 
 export function setKeyStore(store: KeyStore): void {
   activeKeyStore = store;
@@ -97,13 +97,13 @@ export function resetLocalIdentityKeyPair(): void {
   activeKeyStore = new InMemoryKeyStore();
 }
 
-export function generateECKeyPair(): crypto.KeyPairKeyObjectResult {
+export function generateECKeyPair(): any {
   return crypto.generateKeyPairSync('ec', {
     namedCurve: 'prime256v1',
   });
 }
 
-export function getLocalIdentityKeyPair(identityId = 'default'): crypto.KeyPairKeyObjectResult {
+export function getLocalIdentityKeyPair(identityId = 'default'): any {
   const cached = identityKeyCache.get(identityId);
   if (cached) {
     return cached;
@@ -114,7 +114,7 @@ export function getLocalIdentityKeyPair(identityId = 'default'): crypto.KeyPairK
     try {
       const privateKey = crypto.createPrivateKey({ key: storedPem, format: 'pem', type: 'pkcs8' });
       const publicKey = crypto.createPublicKey(privateKey);
-      const kp: crypto.KeyPairKeyObjectResult = { privateKey, publicKey };
+      const kp: any = { privateKey, publicKey };
       identityKeyCache.set(identityId, kp);
       return kp;
     } catch (err: any) {

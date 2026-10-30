@@ -1,84 +1,35 @@
 /**
  * OpenAI Agents & Function Calling Integration for AAMARVA ADK
  *
- * Exposes AAMARVA sovereign fleet tools, FLOOR human-in-the-loop governance,
- * and end-to-end encrypted messaging conforming to the OpenAI Chat Completions
+ * Exposes AAMARVA sovereign fleet tools conforming to the OpenAI Chat Completions
  * and OpenAI Agents SDK tool specifications.
  */
 
 import { Aamarva } from '../client.js';
 
-export interface OpenAIFunctionParameterProperty {
-  type: string;
-  description?: string;
-  enum?: string[];
-  items?: Record<string, unknown>;
-}
-
-export interface OpenAIToolDefinition {
-  type: 'function';
-  function: {
-    name: string;
-    description: string;
-    parameters: {
-      type: 'object';
-      properties: Record<string, OpenAIFunctionParameterProperty>;
-      required?: string[];
-      additionalProperties?: boolean;
-    };
-    strict?: boolean;
-  };
-}
-
-export interface OpenAIToolCallPayload {
-  id?: string;
-  type?: 'function';
-  function: {
-    name: string;
-    arguments: string | Record<string, unknown>;
-  };
-}
-
-export interface OpenAIToolCallResult {
-  tool_call_id: string;
-  role: 'tool';
-  name?: string;
-  content: string;
-}
-
 /**
  * Returns the array of OpenAI-compatible function calling tool definitions.
  */
-export function getOpenAITools(client?: Aamarva): OpenAIToolDefinition[] {
+export function getOpenAIToolDefinitions(): any[] {
   return [
     {
       type: 'function',
       function: {
         name: 'aamarva_floor_list_tools',
         description: 'Discover available FLOOR tools, input schemas, and caller access status.',
-        parameters: {
-          type: 'object',
-          properties: {},
-          additionalProperties: false,
-        },
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
       },
     },
     {
       type: 'function',
       function: {
         name: 'aamarva_floor_request_access',
-        description: 'Request human-in-the-loop (HITL) approval for an AAMARVA FLOOR tool without executing it.',
+        description: 'Request human-in-the-loop (HITL) approval for an AAMARVA FLOOR tool.',
         parameters: {
           type: 'object',
           properties: {
-            toolId: {
-              type: 'string',
-              description: 'Identifier of the tool to request access for.',
-            },
-            reason: {
-              type: 'string',
-              description: 'Business or operational justification for requesting tool access.',
-            },
+            toolId: { type: 'string', description: 'Identifier of the tool to request access for.' },
+            reason: { type: 'string', description: 'Business justification for access request.' },
           },
           required: ['toolId'],
           additionalProperties: false,
@@ -93,10 +44,7 @@ export function getOpenAITools(client?: Aamarva): OpenAIToolDefinition[] {
         parameters: {
           type: 'object',
           properties: {
-            requestId: {
-              type: 'string',
-              description: 'The tool access request ID.',
-            },
+            requestId: { type: 'string', description: 'The tool access request ID.' },
           },
           required: ['requestId'],
           additionalProperties: false,
@@ -107,18 +55,12 @@ export function getOpenAITools(client?: Aamarva): OpenAIToolDefinition[] {
       type: 'function',
       function: {
         name: 'aamarva_floor_execute_tool',
-        description: 'Execute an authorized AAMARVA FLOOR tool with input arguments. Fails closed if unauthorized or revoked.',
+        description: 'Execute an authorized AAMARVA FLOOR tool with input arguments.',
         parameters: {
           type: 'object',
           properties: {
-            toolId: {
-              type: 'string',
-              description: 'Identifier of the tool to execute.',
-            },
-            arguments: {
-              type: 'object',
-              description: 'JSON object with input arguments matching the tool schema.',
-            },
+            toolId: { type: 'string', description: 'Identifier of the tool to execute.' },
+            arguments: { type: 'object', description: 'Input arguments conforming to tool schema.' },
           },
           required: ['toolId', 'arguments'],
         },
@@ -132,14 +74,8 @@ export function getOpenAITools(client?: Aamarva): OpenAIToolDefinition[] {
         parameters: {
           type: 'object',
           properties: {
-            connectionId: {
-              type: 'string',
-              description: 'Active peer connection channel ID.',
-            },
-            content: {
-              type: 'string',
-              description: 'Plaintext message string to encrypt and transmit.',
-            },
+            connectionId: { type: 'string', description: 'Active peer connection channel ID.' },
+            content: { type: 'string', description: 'Plaintext message string to send.' },
           },
           required: ['connectionId', 'content'],
           additionalProperties: false,
@@ -150,14 +86,11 @@ export function getOpenAITools(client?: Aamarva): OpenAIToolDefinition[] {
       type: 'function',
       function: {
         name: 'aamarva_get_messages',
-        description: 'Retrieve and decrypt private messages from an active peer connection channel.',
+        description: 'Retrieve and decrypt private messages from an active peer connection.',
         parameters: {
           type: 'object',
           properties: {
-            connectionId: {
-              type: 'string',
-              description: 'Active peer connection channel ID.',
-            },
+            connectionId: { type: 'string', description: 'Active peer connection channel ID.' },
           },
           required: ['connectionId'],
           additionalProperties: false,
@@ -168,27 +101,14 @@ export function getOpenAITools(client?: Aamarva): OpenAIToolDefinition[] {
       type: 'function',
       function: {
         name: 'aamarva_cluster_send_message',
-        description: 'Send an encrypted group message to a cluster with optional recipient restrictions.',
+        description: 'Send an encrypted group message to a cluster with recipient restrictions.',
         parameters: {
           type: 'object',
           properties: {
-            clusterId: {
-              type: 'string',
-              description: 'Target multi-agent cluster ID.',
-            },
-            ciphertext: {
-              type: 'string',
-              description: 'Encrypted ciphertext payload.',
-            },
-            nonce: {
-              type: 'string',
-              description: 'Cryptographic initialization vector / nonce.',
-            },
-            recipients: {
-              type: 'array',
-              description: 'Optional authorized recipient agent IDs.',
-              items: { type: 'string' },
-            },
+            clusterId: { type: 'string', description: 'Target multi-agent cluster ID.' },
+            ciphertext: { type: 'string', description: 'Encrypted ciphertext payload.' },
+            nonce: { type: 'string', description: 'Cryptographic IV / nonce.' },
+            recipients: { type: 'array', items: { type: 'string' }, description: 'Authorized recipient agent IDs.' },
           },
           required: ['clusterId', 'ciphertext', 'nonce'],
         },
@@ -202,10 +122,7 @@ export function getOpenAITools(client?: Aamarva): OpenAIToolDefinition[] {
         parameters: {
           type: 'object',
           properties: {
-            limit: {
-              type: 'number',
-              description: 'Maximum number of activity events to return.',
-            },
+            limit: { type: 'number', description: 'Maximum number of events.' },
           },
           additionalProperties: false,
         },
@@ -214,38 +131,14 @@ export function getOpenAITools(client?: Aamarva): OpenAIToolDefinition[] {
     {
       type: 'function',
       function: {
-        name: 'aamarva_agent_footprints',
-        description: 'Retrieve cryptographic activity audit footprints for the authenticated agent.',
-        parameters: {
-          type: 'object',
-          properties: {},
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'aamarva_webhook_events',
-        description: 'Retrieve recent webhook event delivery history for the agent.',
-        parameters: {
-          type: 'object',
-          properties: {},
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
         name: 'aamarva_get_agents',
-        description: 'List sovereign fleet accounts (master and slave agents) belonging to caller fleet.',
+        description: 'List sovereign fleet accounts (master and slave agents) in caller fleet.',
         parameters: {
           type: 'object',
           properties: {
-            q: { type: 'string', description: 'Filter query string.' },
-            page: { type: 'number', description: 'Page number for pagination.' },
-            limit: { type: 'number', description: 'Results per page.' },
+            q: { type: 'string', description: 'Search query.' },
+            page: { type: 'number', description: 'Page number.' },
+            limit: { type: 'number', description: 'Items per page.' },
           },
           additionalProperties: false,
         },
@@ -256,99 +149,55 @@ export function getOpenAITools(client?: Aamarva): OpenAIToolDefinition[] {
       function: {
         name: 'aamarva_get_clusters',
         description: 'List multi-agent clusters the caller belongs to.',
-        parameters: {
-          type: 'object',
-          properties: {},
-          additionalProperties: false,
-        },
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
       },
     },
   ];
 }
 
 /**
- * Executes a named AAMARVA tool call with validated arguments.
+ * Creates OpenAI-compatible tool wrappers for the AAMARVA client.
+ * Compatible with OpenAI Agents SDK.
+ */
+export function getOpenAITools(client?: Aamarva): any[] {
+  const activeClient = client || new Aamarva();
+  const defs = getOpenAIToolDefinitions();
+
+  return defs.map((def) => ({
+    ...def,
+    execute: async (args: any) => {
+      const name = def.function.name;
+      switch (name) {
+        case 'aamarva_floor_list_tools': return activeClient.getFloorTools();
+        case 'aamarva_floor_request_access': return activeClient.requestFloorAccess(args.toolId, args.reason);
+        case 'aamarva_floor_check_status': return activeClient.getFloorRequestStatus(args.requestId);
+        case 'aamarva_floor_execute_tool': return activeClient.executeFloorTool(args.toolId, args.arguments);
+        case 'aamarva_send_message': return activeClient.sendMessage(args.connectionId, args.content);
+        case 'aamarva_get_messages': return activeClient.getMessages(args.connectionId);
+        case 'aamarva_cluster_send_message': return activeClient.sendClusterMessage(args.clusterId, {
+          ciphertext: args.ciphertext,
+          nonce: args.nonce,
+          recipients: args.recipients,
+        });
+        case 'aamarva_watchtower_activity': return activeClient.getWatchtowerActivity(args.limit);
+        case 'aamarva_get_agents': return activeClient.getAgents(args);
+        case 'aamarva_get_clusters': return activeClient.getClusters();
+        default: throw new Error(`Unknown tool: ${name}`);
+      }
+    },
+  }));
+}
+
+/**
+ * Executes a named AAMARVA tool call.
  */
 export async function executeOpenAIToolCall(
   client: Aamarva,
   toolName: string,
-  args: Record<string, any>
-): Promise<unknown> {
-  switch (toolName) {
-    case 'aamarva_floor_list_tools':
-      return client.getFloorTools();
-    case 'aamarva_floor_request_access':
-      return client.requestFloorAccess(args.toolId, args.reason);
-    case 'aamarva_floor_check_status':
-      return client.getFloorRequestStatus(args.requestId);
-    case 'aamarva_floor_execute_tool':
-      return client.executeFloorTool(args.toolId, args.arguments);
-    case 'aamarva_send_message':
-      return client.sendMessage(args.connectionId, args.content);
-    case 'aamarva_get_messages':
-      return client.getMessages(args.connectionId);
-    case 'aamarva_cluster_send_message':
-      return client.sendClusterMessage(args.clusterId, {
-        ciphertext: args.ciphertext,
-        nonce: args.nonce,
-        recipients: args.recipients,
-      });
-    case 'aamarva_watchtower_activity':
-      return client.getWatchtowerActivity(args.limit);
-    case 'aamarva_agent_footprints':
-      return client.getFootprints();
-    case 'aamarva_webhook_events':
-      return client.getWebhookEvents();
-    case 'aamarva_get_agents':
-      return client.getAgents(args);
-    case 'aamarva_get_clusters':
-      return client.getClusters();
-    default:
-      throw new Error(`Unknown AAMARVA tool: ${toolName}`);
-  }
-}
-
-/**
- * Handles an OpenAI tool call payload and returns an OpenAI tool response message.
- */
-export async function handleOpenAIToolCall(
-  client: Aamarva,
-  toolCall: OpenAIToolCallPayload
-): Promise<OpenAIToolCallResult> {
-  const toolName = toolCall.function.name;
-  let parsedArgs: Record<string, any> = {};
-
-  if (typeof toolCall.function.arguments === 'string') {
-    try {
-      parsedArgs = JSON.parse(toolCall.function.arguments || '{}');
-    } catch (e) {
-      return {
-        tool_call_id: toolCall.id || 'call_default',
-        role: 'tool',
-        name: toolName,
-        content: JSON.stringify({ error: 'Malformed JSON arguments in tool call' }),
-      };
-    }
-  } else if (typeof toolCall.function.arguments === 'object' && toolCall.function.arguments !== null) {
-    parsedArgs = toolCall.function.arguments;
-  }
-
-  try {
-    const result = await executeOpenAIToolCall(client, toolName, parsedArgs);
-    return {
-      tool_call_id: toolCall.id || 'call_default',
-      role: 'tool',
-      name: toolName,
-      content: typeof result === 'string' ? result : JSON.stringify(result),
-    };
-  } catch (err: any) {
-    return {
-      tool_call_id: toolCall.id || 'call_default',
-      role: 'tool',
-      name: toolName,
-      content: JSON.stringify({
-        error: err?.message || String(err),
-      }),
-    };
-  }
+  args: any
+): Promise<any> {
+  const tools = getOpenAITools(client);
+  const tool = tools.find((t) => t.function.name === toolName);
+  if (!tool) throw new Error(`Unknown AAMARVA tool: ${toolName}`);
+  return tool.execute(args);
 }

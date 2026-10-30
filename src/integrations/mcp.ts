@@ -13,20 +13,51 @@
 
 import type { Readable, Writable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  ErrorCode,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
+import { createRequire } from 'node:module';
+import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type {
   StreamableHTTPServerTransport,
-  type StreamableHTTPServerTransportOptions,
+  StreamableHTTPServerTransportOptions,
 } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Aamarva } from '../client.js';
+
+let cachedMcpSdk: any = null;
+
+function getMcpSdk(): any {
+  if (cachedMcpSdk) {
+    return cachedMcpSdk;
+  }
+  try {
+    const require = createRequire(import.meta.url);
+    const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
+    const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
+    const {
+      CallToolRequestSchema,
+      ListToolsRequestSchema,
+      ErrorCode,
+      McpError,
+    } = require('@modelcontextprotocol/sdk/types.js');
+    const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
+    const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
+    cachedMcpSdk = {
+      Server,
+      McpServer,
+      CallToolRequestSchema,
+      ListToolsRequestSchema,
+      ErrorCode,
+      McpError,
+      StdioServerTransport,
+      StreamableHTTPServerTransport,
+    };
+    return cachedMcpSdk;
+  } catch (err) {
+    throw new Error(
+      'Model Context Protocol SDK not found. Please install @modelcontextprotocol/sdk to use MCP server features.'
+    );
+  }
+}
 
 export interface McpToolDefinition {
   name: string;
@@ -237,10 +268,11 @@ export class AamarvaMcpServer {
    * Creates an official standards-compliant MCP Protocol Server instance.
    */
   public toProtocolServer(): Server {
+    const { Server, ListToolsRequestSchema, CallToolRequestSchema } = getMcpSdk();
     const server = new Server(
       {
         name: 'aamarva-adk',
-        version: '1.0.0',
+        version: '2.0.0',
       },
       {
         capabilities: {
@@ -253,7 +285,7 @@ export class AamarvaMcpServer {
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       const tools = this.getTools();
       return {
-        tools: tools.map((tool) => ({
+        tools: tools.map((tool: any) => ({
           name: tool.name,
           description: tool.description,
           inputSchema: tool.inputSchema,
@@ -262,10 +294,10 @@ export class AamarvaMcpServer {
     });
 
     // Register standard tools/call handler
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
       const { name, arguments: args } = request.params;
       const tools = this.getTools();
-      const tool = tools.find((t) => t.name === name);
+      const tool = tools.find((t: any) => t.name === name);
 
       if (!tool) {
         return {
@@ -309,30 +341,30 @@ export class AamarvaMcpServer {
    * Creates a high-level McpServer instance.
    */
   public toMcpServer(): McpServer {
+    const { McpServer, CallToolRequestSchema, McpError, ErrorCode } = getMcpSdk();
     const mcp = new McpServer({
       name: 'aamarva-adk',
-      version: '1.0.0',
+      version: '2.0.0',
     });
 
     const tools = this.getTools();
-    for (const tool of tools) {
-      mcp.server.setRequestHandler(CallToolRequestSchema, async (req) => {
-        if (req.params.name === tool.name) {
-          try {
-            const res = await tool.handler(req.params.arguments || {});
-            return {
-              content: [{ type: 'text', text: typeof res === 'string' ? res : JSON.stringify(res) }],
-            };
-          } catch (e: any) {
-            return {
-              isError: true,
-              content: [{ type: 'text', text: e.message || String(e) }],
-            };
-          }
-        }
+    mcp.server.setRequestHandler(CallToolRequestSchema, async (req: any) => {
+      const tool = tools.find((t: any) => t.name === req.params.name);
+      if (!tool) {
         throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${req.params.name}`);
-      });
-    }
+      }
+      try {
+        const res = await tool.handler(req.params.arguments || {});
+        return {
+          content: [{ type: 'text', text: typeof res === 'string' ? res : JSON.stringify(res) }],
+        };
+      } catch (e: any) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: e.message || String(e) }],
+        };
+      }
+    });
 
     return mcp;
   }
@@ -344,6 +376,7 @@ export class AamarvaMcpServer {
     stdin?: Readable,
     stdout?: Writable
   ): Promise<{ server: Server; transport: StdioServerTransport }> {
+    const { StdioServerTransport } = getMcpSdk();
     const server = this.toProtocolServer();
     const transport = new StdioServerTransport(stdin, stdout);
     await server.connect(transport);
@@ -356,6 +389,7 @@ export class AamarvaMcpServer {
   public createStreamableHttpTransport(
     options?: StreamableHTTPServerTransportOptions
   ): { server: Server; transport: StreamableHTTPServerTransport } {
+    const { StreamableHTTPServerTransport } = getMcpSdk();
     const server = this.toProtocolServer();
     const transport = new StreamableHTTPServerTransport(options);
     return { server, transport };

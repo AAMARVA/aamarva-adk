@@ -1,65 +1,76 @@
 """
 LlamaIndex Integration for AAMARVA ADK (Python)
 
-Provides LlamaIndex FunctionTool instances exposing AAMARVA sovereign fleet tools.
+Provides genuine LlamaIndex FunctionTool instances exposing AAMARVA tools.
 """
 
-from typing import Optional, Dict, Any, List, Callable
-from .openai import get_openai_tools, execute_openai_tool_call
+from typing import Optional, List, Any
+from .openai import get_openai_tool_definitions, execute_openai_tool_call
 
-
-class LlamaIndexToolMetadata:
-    def __init__(self, name: str, description: str, parameters: Dict[str, Any]):
-        self.name = name
-        self.description = description
-        self.parameters = parameters
+try:
+    from llama_index.core.tools import FunctionTool
+    HAS_LLAMAINDEX = True
+except ImportError:
+    HAS_LLAMAINDEX = False
+    FunctionTool = object
 
 
 class AamarvaLlamaIndexTool:
-    def __init__(self, name: str, description: str, parameters: Dict[str, Any], fn: Callable):
-        self.metadata = LlamaIndexToolMetadata(name, description, parameters)
-        self.fn = fn
-
-    def __call__(self, *args, **kwargs):
-        return self.call(*args, **kwargs)
-
-    def call(self, *args, **kwargs):
-        if args and isinstance(args[0], dict):
-            kwargs.update(args[0])
-        return self.fn(**kwargs)
+    """
+    AAMARVA LlamaIndex tool adapter.
+    """
+    @classmethod
+    def from_client(cls, client: Optional[Any] = None) -> List[Any]:
+        return get_llamaindex_tools(client)
 
 
 def get_llamaindex_tools(client: Optional[Any] = None) -> List[Any]:
+    """
+    Returns an array of genuine LlamaIndex FunctionTool instances.
+    """
+    if not HAS_LLAMAINDEX:
+        raise ImportError(
+            "LlamaIndex dependencies not found. Please install 'llama-index-core' via 'pip install aamarva[llamaindex]'."
+        )
+
     if client is None:
         from ..client import Aamarva
         client = Aamarva()
 
-    openai_tools = get_openai_tools(client)
+    tool_defs = get_openai_tool_definitions()
     tools = []
 
-    for item in openai_tools:
-        fn = item["function"]
-        name = fn["name"]
-        description = fn["description"]
-        params = fn["parameters"]
+    for item in tool_defs:
+        fn_def = item["function"]
+        name = fn_def["name"]
+        description = fn_def["description"]
 
-        def make_func(tool_name: str):
-            return lambda **kwargs: execute_openai_tool_call(client, tool_name, kwargs)
+        def create_func(tool_name: str):
+            def func(**kwargs):
+                return execute_openai_tool_call(client, tool_name, kwargs)
+            func.__name__ = tool_name
+            func.__doc__ = description
+            return func
 
-        func = make_func(name)
-        func.__name__ = name
-        func.__doc__ = description
-
-        tool = AamarvaLlamaIndexTool(
+        tool = FunctionTool.from_defaults(
+            fn=create_func(name),
             name=name,
             description=description,
-            parameters=params,
-            fn=func,
         )
         tools.append(tool)
 
     return tools
 
 
-def execute_llamaindex_tool(client: Any, name: str, args: Dict[str, Any]) -> Any:
+def execute_llamaindex_tool(client: Any, name: str, args: dict) -> Any:
+    """
+    Executes a LlamaIndex tool by name.
+    """
     return execute_openai_tool_call(client, name, args)
+
+
+__all__ = [
+    "AamarvaLlamaIndexTool",
+    "get_llamaindex_tools",
+    "execute_llamaindex_tool",
+]

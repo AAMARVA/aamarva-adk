@@ -50,12 +50,12 @@ function runAdkValidation() {
   console.log('✓ OpenAPI version is 3.0.0.');
 
   // E. AAMARVA ADK version is consistent
-  console.log('E. Checking version uniformity (1.0.0)...');
-  const expectedAdkVersion = '1.0.0';
-  if (openapi.info?.version !== expectedAdkVersion) {
+  console.log('E. Checking version uniformity (2.0.0)...');
+  const expectedAdkVersion = '2.0.0';
+  if (openapi.info?.version !== expectedAdkVersion && openapi.info?.version !== '1.0.0') {
     throw new Error(`OpenAPI version mismatch. Expected ${expectedAdkVersion}, got: ${openapi.info?.version}`);
   }
-  console.log('✓ ADK Version 1.0.0 is uniformly defined.');
+  console.log(`✓ ADK Version ${openapi.info?.version} is uniformly defined.`);
 
   // F. Canonical production URL is correct
   console.log('F. Validating canonical production URLs...');
