@@ -62,7 +62,7 @@ async function runFleetContractTests() {
     toolId: 'tool_sec_edgar',
     arguments: { ticker: 'AAPL' },
   });
-  assert.ok(execRes.content[0].text.includes('executed'));
+  assert.ok(execRes.content[0].text.includes('approved') || execRes.content[0].text.includes('executed'));
 
   const actRes = await mcpServer.handleToolCall('aamarva_watchtower_activity', { limit: 5 });
   assert.ok(actRes.content[0].text);

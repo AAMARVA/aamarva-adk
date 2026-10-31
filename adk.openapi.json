@@ -128,15 +128,15 @@
         "responses": { "200": { "description": "Success" } }
       }
     },
-    "/floor/tools/{toolId}/execute": {
+    "/floor/tools/{toolId}/invoke": {
       "post": {
-        "summary": "Execute FLOOR tool",
+        "summary": "Request / create invocation for FLOOR tool",
         "responses": { "200": { "description": "Success" } }
       }
     },
-    "/floor/tools/{toolId}/request-access": {
+    "/floor/invocations/{invocationId}/execute": {
       "post": {
-        "summary": "Submit HITL access request",
+        "summary": "Authorize execution of FLOOR invocation",
         "responses": { "200": { "description": "Success" } }
       }
     },

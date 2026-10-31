@@ -5,6 +5,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { AamarvaError } from './errors.js';
 import type { ECJWK } from './types.js';
 
@@ -47,6 +48,9 @@ export class InMemoryKeyStore implements KeyStore {
   }
 
   public savePrivateKey(privateKeyPem: string, identityId = 'default'): void {
+    if (this.keys.has(identityId)) {
+      return;
+    }
     this.keys.set(identityId, privateKeyPem);
   }
 }
@@ -59,7 +63,7 @@ export class FileSystemKeyStore implements KeyStore {
   private baseDir: string;
 
   constructor(baseDir?: string) {
-    this.baseDir = baseDir || process.env.AAMARVA_KEY_STORE_PATH || '';
+    this.baseDir = baseDir || process.env.AAMARVA_KEY_STORE_PATH || path.join(os.homedir(), '.aamarva', 'keys');
   }
 
   public loadPrivateKey(identityId = 'default'): string | null {
@@ -77,6 +81,9 @@ export class FileSystemKeyStore implements KeyStore {
       fs.mkdirSync(this.baseDir, { recursive: true, mode: 0o700 });
     }
     const keyPath = path.join(this.baseDir, `${identityId}.pem`);
+    if (fs.existsSync(keyPath)) {
+      return;
+    }
     fs.writeFileSync(keyPath, privateKeyPem, { mode: 0o600 });
   }
 }
@@ -545,4 +552,115 @@ export function decryptMessage(envelope: any, connectionId: string, agentIdA?: s
     code: 'MESSAGE_DECRYPTION_FAILED',
   });
 }
+
+/**
+ * Cluster Key Distribution and Encryption
+ */
+export function generateClusterKey(): Buffer {
+  return crypto.randomBytes(32);
+}
+
+export function wrapClusterKeyForRecipient(
+  clusterKey: Buffer,
+  recipientPublicKeyPemOrJwk: any,
+  senderPrivateKey: any
+): { encryptedKeyPackage: string; nonce: string; wrappingParams: { alg: string } } {
+  const recipientKey = typeof recipientPublicKeyPemOrJwk === 'string'
+    ? importPublicKey(recipientPublicKeyPemOrJwk)
+    : (recipientPublicKeyPemOrJwk?.publicKey ? recipientPublicKeyPemOrJwk.publicKey : importPublicKey(recipientPublicKeyPemOrJwk));
+
+  const sharedSecret = deriveSharedSecret(senderPrivateKey, recipientKey);
+  const wrapKey = crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), Buffer.from('AAMARVA-CLUSTER-KEY-WRAP', 'utf8'), 32);
+  const iv = crypto.randomBytes(12);
+
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(wrapKey), iv);
+  const encryptedBuf = Buffer.concat([cipher.update(clusterKey), cipher.final(), cipher.getAuthTag()]);
+
+  return {
+    encryptedKeyPackage: encryptedBuf.toString('base64'),
+    nonce: iv.toString('base64'),
+    wrappingParams: { alg: 'ECDH-ES+A256GCM' },
+  };
+}
+
+export function unwrapClusterKey(
+  encryptedKeyPackageBase64: string,
+  nonceBase64: string,
+  recipientPrivateKey: any,
+  senderPublicKeyPemOrJwk: any
+): Buffer {
+  const senderKey = typeof senderPublicKeyPemOrJwk === 'string'
+    ? importPublicKey(senderPublicKeyPemOrJwk)
+    : (senderPublicKeyPemOrJwk?.publicKey ? senderPublicKeyPemOrJwk.publicKey : importPublicKey(senderPublicKeyPemOrJwk));
+
+  const sharedSecret = deriveSharedSecret(recipientPrivateKey, senderKey);
+  const wrapKey = crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), Buffer.from('AAMARVA-CLUSTER-KEY-WRAP', 'utf8'), 32);
+  const iv = Buffer.from(nonceBase64, 'base64');
+  const combined = Buffer.from(encryptedKeyPackageBase64, 'base64');
+
+  if (combined.length < 16) {
+    throw new AamarvaError('Cluster key package is too short or malformed.', {
+      code: 'CLUSTER_KEY_UNWRAP_FAILED',
+    });
+  }
+
+  const authTag = combined.subarray(combined.length - 16);
+  const ciphertextBuf = combined.subarray(0, combined.length - 16);
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(wrapKey), iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(ciphertextBuf), decipher.final()]);
+}
+
+export function encryptClusterMessagePayload(
+  plaintext: string,
+  clusterKey: Buffer,
+  clusterId: string,
+  epoch = 1
+): { ciphertext: string; nonce: string; version: number; keyEpoch: number } {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', clusterKey, iv);
+  cipher.setAAD(Buffer.from(`${clusterId}:${epoch}:v2`, 'utf8'));
+
+  const ciphertextBuf = Buffer.concat([
+    cipher.update(Buffer.from(plaintext, 'utf8')),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
+
+  return {
+    ciphertext: ciphertextBuf.toString('base64'),
+    nonce: iv.toString('base64'),
+    version: 2,
+    keyEpoch: epoch,
+  };
+}
+
+export function decryptClusterMessagePayload(
+  ciphertextBase64: string,
+  nonceBase64: string,
+  clusterKey: Buffer,
+  clusterId: string,
+  epoch = 1,
+  version = 2
+): string {
+  const iv = Buffer.from(nonceBase64, 'base64');
+  const combined = Buffer.from(ciphertextBase64, 'base64');
+
+  if (combined.length < 16) {
+    throw new AamarvaError('Cluster ciphertext is too short or malformed.', {
+      code: 'CLUSTER_MESSAGE_DECRYPTION_FAILED',
+    });
+  }
+
+  const authTag = combined.subarray(combined.length - 16);
+  const ciphertextBuf = combined.subarray(0, combined.length - 16);
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', clusterKey, iv);
+  decipher.setAAD(Buffer.from(`${clusterId}:${epoch}:v${version}`, 'utf8'));
+  decipher.setAuthTag(authTag);
+
+  return Buffer.concat([decipher.update(ciphertextBuf), decipher.final()]).toString('utf8');
+}
+
 

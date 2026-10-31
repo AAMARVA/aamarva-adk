@@ -25,8 +25,11 @@ export interface MockDataStore {
   clusters: Cluster[];
   clusterMembers: Record<string, string[]>;
   clusterMessages: Record<string, any[]>;
+  clusterKeyDistributions?: Record<string, any>;
   floorTools: FloorTool[];
   floorRequests: Record<string, any>;
+  floorInvocations: Record<string, any>;
+  mcpServerUrl?: string;
   watchtowerActivities: WatchtowerActivity[];
 }
 
@@ -126,6 +129,8 @@ export function createMockDataStore(): MockDataStore {
         reason: 'Autonomous market making',
       },
     },
+    floorInvocations: {},
+    clusterKeyDistributions: {},
     watchtowerActivities: [
       {
         id: 'act_001',
@@ -167,6 +172,24 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
         status,
         headers: { 'Content-Type': 'application/json' },
       });
+
+    // External MCP JSON-RPC handler for simulated FLOOR execution
+    if (pathname === '/mcp' || (body as any)?.method === 'tools/call') {
+      const toolName = (body as any)?.params?.name || 'tool_sec_edgar';
+      const toolArgs = (body as any)?.params?.arguments || {};
+      return json(200, {
+        jsonrpc: '2.0',
+        id: (body as any)?.id || 1,
+        result: {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ filings: [{ form: '10-K', year: 2026, ticker: toolArgs.ticker || 'AAPL' }] }),
+            },
+          ],
+        },
+      });
+    }
 
     // Health
     if (pathname === '/health' || pathname === '/adk') {
@@ -338,10 +361,10 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       return json(200, { success: true, data: store.floorTools });
     }
 
-    // FLOOR Tool Execute
-    const floorExecuteMatch = pathname.match(/^\/floor\/tools\/([^/]+)\/execute$/);
-    if (floorExecuteMatch && method === 'POST') {
-      const toolId = decodeURIComponent(floorExecuteMatch[1]);
+    // FLOOR Tool Invoke (Request/Create Invocation)
+    const floorInvokeMatch = pathname.match(/^\/floor\/tools\/([^/]+)\/invoke$/);
+    if (floorInvokeMatch && method === 'POST') {
+      const toolId = decodeURIComponent(floorInvokeMatch[1]);
       const tool = store.floorTools.find((t) => t.id === toolId);
       if (!tool) {
         return json(404, {
@@ -350,52 +373,72 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
           message: `Tool ${toolId} not found.`,
         });
       }
-      if (tool.accessStatus !== 'authorized') {
-        return json(403, {
-          success: false,
-          error: 'FLOOR_ACCESS_DENIED',
-          message: `Agent is not authorized to execute tool ${toolId}. Access status is '${tool.accessStatus}'. Please request access first.`,
-          code: 'FLOOR_ACCESS_DENIED',
-        });
-      }
-      return json(200, {
-        success: true,
-        status: 'executed',
-        data: {
-          status: 'executed',
-          result: { filings: [{ form: '10-K', year: 2026 }] },
-        },
-      });
-    }
-
-    // FLOOR Tool Access Request
-    const floorAccessMatch = pathname.match(/^\/floor\/tools\/([^/]+)\/request-access$/);
-    if (floorAccessMatch && method === 'POST') {
-      const toolId = decodeURIComponent(floorAccessMatch[1]);
-      const tool = store.floorTools.find((t) => t.id === toolId);
-      if (!tool) {
-        return json(404, {
-          success: false,
-          error: 'FLOOR_TOOL_NOT_FOUND',
-          message: `Tool ${toolId} not found.`,
-        });
-      }
-      const requestId = 'req_tool_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
-      store.floorRequests[requestId] = {
-        requestId,
-        status: 'pending',
+      const invocationId = 'inv_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
+      const isApproved = tool.accessStatus === 'authorized' || tool.accessStatus === 'granted' || tool.accessStatus === 'approved';
+      const status = isApproved ? 'approved' : 'pending';
+      store.floorInvocations[invocationId] = {
+        invocationId,
+        toolId,
+        status,
+        arguments: body?.arguments || {},
+        reason: body?.reason,
+      };
+      store.floorRequests[invocationId] = {
+        requestId: invocationId,
+        status,
         toolId,
         reason: body?.reason,
         createdAt: new Date().toISOString(),
       };
-      return json(202, {
+      return json(200, {
         success: true,
-        status: 'pending',
         data: {
-          status: 'pending',
-          requestId,
+          invocationId,
+          requestId: invocationId,
+          toolId,
+          status,
+          message: isApproved ? 'Invocation authorized.' : 'Access request submitted for approval.',
         },
-        message: 'Access request submitted for human approval.',
+      });
+    }
+
+    // FLOOR Invocation Execute Authorization
+    const floorExecInvocationMatch = pathname.match(/^\/floor\/invocations\/([^/]+)\/execute$/);
+    if (floorExecInvocationMatch && method === 'POST') {
+      const invocationId = decodeURIComponent(floorExecInvocationMatch[1]);
+      const inv = store.floorInvocations[invocationId] || {
+        invocationId,
+        toolId: 'tool_sec_edgar',
+        status: 'approved',
+      };
+      if (inv.status !== 'approved') {
+        return json(403, {
+          success: false,
+          status: inv.status,
+          data: {
+            status: inv.status,
+            message: `Invocation is ${inv.status}.`,
+          },
+          message: `Invocation is ${inv.status}.`,
+        });
+      }
+      return json(200, {
+        success: true,
+        data: {
+          status: 'approved',
+          invocationId,
+          toolId: inv.toolId,
+          serverUrl: store.mcpServerUrl || 'https://aamarva.com/api/mcp',
+          auth: {
+            type: 'bearer',
+            token: 'mock_mcp_jwt_token',
+          },
+          grant: {
+            grantId: 'grant_' + Date.now(),
+            scope: 'read:sec_edgar',
+            expiresAt: new Date(Date.now() + 3600000).toISOString(),
+          },
+        },
       });
     }
 
@@ -569,22 +612,38 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
 
     // Cluster Key Distribution
     const clusterKeyDistMatch = pathname.match(/^\/clusters\/([^/]+)\/key-distribution$/);
-    if (clusterKeyDistMatch && method === 'GET') {
+    if (clusterKeyDistMatch) {
       const clusterId = clusterKeyDistMatch[1];
-      const epochStr = url.searchParams.get('epoch');
-      const epoch = epochStr ? parseInt(epochStr, 10) : 1;
-      return json(200, {
-        success: true,
-        data: {
-          clusterId,
-          epoch,
-          keyFingerprint: 'SHA256:mock_group_key_fp',
-          senderAgentId: 'AMR-0000-MASTER',
-          recipientAgentId: 'AMR-1111-2222',
-          wrappingParams: { alg: 'ECDH-ES+A256KW' },
-          encryptedKeyPackage: 'mock_wrapped_group_key_base64',
-        },
-      });
+      if (method === 'POST') {
+        store.clusterKeyDistributions = store.clusterKeyDistributions || {};
+        store.clusterKeyDistributions[clusterId] = body;
+        return json(200, {
+          success: true,
+          data: {
+            clusterId,
+            status: 'distributed',
+          },
+        });
+      }
+      if (method === 'GET') {
+        const epochStr = url.searchParams.get('epoch');
+        const epoch = epochStr ? parseInt(epochStr, 10) : 1;
+        const saved = store.clusterKeyDistributions?.[clusterId];
+        const keyPackage = saved?.keyPackages?.[0];
+        return json(200, {
+          success: true,
+          data: {
+            clusterId,
+            epoch,
+            keyFingerprint: 'SHA256:mock_group_key_fp',
+            senderAgentId: saved?.senderAgentId || 'AMR-0000-MASTER',
+            recipientAgentId: keyPackage?.recipientAgentId || 'AMR-1111-2222',
+            wrappingParams: keyPackage?.wrappingParams || { alg: 'ECDH-ES+A256KW' },
+            encryptedKeyPackage: keyPackage?.encryptedKeyPackage || 'mock_wrapped_group_key_base64',
+            nonce: keyPackage?.nonce || 'mock_nonce_b64',
+          },
+        });
+      }
     }
 
     return json(404, { success: false, error: `Mock endpoint not found: ${method} ${pathname}` });

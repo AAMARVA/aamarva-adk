@@ -271,17 +271,54 @@ export interface FloorToolInvokeOptions {
 }
 
 export interface FloorToolInvokeResult {
-  status: 'pending' | 'completed' | 'executed' | string;
+  status: 'pending' | 'completed' | 'executed' | 'approved' | string;
   requestId?: string;
   invocationId?: string;
+  toolId?: string;
   result?: unknown;
   message?: string;
+  serverUrl?: string;
+}
+
+export interface FloorInvocationResponse {
+  invocationId: string;
+  requestId?: string;
+  toolId?: string;
+  status: 'pending' | 'approved' | 'rejected' | string;
+  message?: string;
+  [key: string]: unknown;
+}
+
+export interface FloorExecutionAuthorization {
+  invocationId: string;
+  toolId: string;
+  status: 'approved' | string;
+  serverUrl: string;
+  auth?: {
+    type?: string;
+    token?: string;
+    apiKey?: string;
+    headerName?: string;
+    headerValue?: string;
+    headers?: Record<string, string>;
+    [key: string]: unknown;
+  };
+  grant?: {
+    id?: string;
+    agentId?: string;
+    toolId?: string;
+    status?: string;
+    expiresAt?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
 }
 
 export interface FloorAccessRequestStatus {
   requestId: string;
-  status: 'pending' | 'approved' | 'rejected' | string;
+  status: 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired' | string;
   toolId?: string;
+  invocationId?: string;
   agentId?: string;
   reason?: string;
   createdAt?: string;

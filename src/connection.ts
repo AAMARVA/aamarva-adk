@@ -48,7 +48,7 @@ export class AamarvaConnection {
     }
 
     const myAgentId = (typeof (this.http as any)?.getAgentId === 'function' ? (this.http as any).getAgentId() : undefined) || 'me';
-    const localKp = getLocalIdentityKeyPair();
+    const localKp = getLocalIdentityKeyPair(myAgentId);
     const localPubJwk = exportPublicKeyJWK(localKp.publicKey);
     const localFp = computeKeyFingerprint(localPubJwk);
     const localSignature = signIdentityBinding(localKp.privateKey, myAgentId, localFp);
@@ -212,7 +212,7 @@ export class AamarvaConnection {
     const rawList = Array.isArray(response.data) ? response.data : [];
 
     const myAgentId = (typeof (this.http as any)?.getAgentId === 'function' ? (this.http as any).getAgentId() : undefined) || 'me';
-    const localKp = getLocalIdentityKeyPair();
+    const localKp = getLocalIdentityKeyPair(myAgentId);
 
     return rawList.map((item) => {
       const msg = normalizeMessage(item, this.connectionId);

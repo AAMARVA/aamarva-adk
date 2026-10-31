@@ -86,8 +86,8 @@ function runAdkValidation() {
     '/agent/footprints',
     '/webhooks/events',
     '/floor/agent/tools',
-    '/floor/tools/{toolId}/execute',
-    '/floor/tools/{toolId}/request-access',
+    '/floor/tools/{toolId}/invoke',
+    '/floor/invocations/{invocationId}/execute',
     '/floor/requests/{requestId}',
     '/adk'
   ];

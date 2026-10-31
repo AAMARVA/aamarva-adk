@@ -55,5 +55,10 @@ export {
   verifyPeerKey,
   encryptMessageWithKeys,
   decryptMessageWithKeys,
+  generateClusterKey,
+  wrapClusterKeyForRecipient,
+  unwrapClusterKey,
+  encryptClusterMessagePayload,
+  decryptClusterMessagePayload,
 } from './crypto.js';
 export * from './types.js';

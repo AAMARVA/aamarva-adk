@@ -206,6 +206,53 @@ class TestCryptoSecurityHardening(unittest.TestCase):
                 mode = os.stat(key_file).st_mode & 0o777
                 self.assertEqual(mode, 0o600)
 
+    def test_persistent_keystore_process_restart(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            set_key_store(FileSystemKeyStore(tmp_dir))
+
+            # 1. Generate identity key for Alice before restart
+            alice_key_1 = get_local_identity_key("AMR-ALICE-PERSISTENT")
+            alice_pub_pem_1 = get_local_public_key_pem("AMR-ALICE-PERSISTENT")
+            alice_pub_jwk_1 = export_public_key_jwk(alice_key_1.public_key())
+            alice_fp_1 = compute_key_fingerprint(alice_pub_jwk_1)
+            alice_sig_1 = sign_identity_binding(alice_key_1, "AMR-ALICE-PERSISTENT", alice_fp_1)
+
+            # Bob generates key
+            bob_key = ec.generate_private_key(ec.SECP256R1())
+            bob_pub_pem = bob_key.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ).decode('utf-8')
+            bob_fp = compute_key_fingerprint(bob_key.public_key())
+            bob_jwk = export_public_key_jwk(bob_key.public_key())
+            bob_sig = sign_identity_binding(bob_key, "AMR-BOB", bob_fp)
+
+            # Encrypt message before restart
+            secret = "Python persistent secret surviving restart"
+            envelope = encrypt_message_with_keys(
+                secret, "conn-persist-py", alice_key_1, bob_pub_pem, bob_fp, "AMR-BOB", bob_sig, bob_jwk
+            )
+
+            # 2. Simulate Process Restart: Clear cached identity keys & re-assign FileSystemKeyStore
+            reset_local_identity_key()
+            set_key_store(FileSystemKeyStore(tmp_dir))
+
+            # 3. Reload Alice's key after restart
+            alice_key_2 = get_local_identity_key("AMR-ALICE-PERSISTENT")
+            alice_pub_pem_2 = get_local_public_key_pem("AMR-ALICE-PERSISTENT")
+            alice_pub_jwk_2 = export_public_key_jwk(alice_key_2.public_key())
+            alice_fp_2 = compute_key_fingerprint(alice_pub_jwk_2)
+
+            self.assertEqual(alice_fp_1, alice_fp_2, "Key fingerprint must survive process restart")
+            self.assertEqual(alice_pub_pem_1, alice_pub_pem_2, "Public key PEM must survive process restart")
+
+            # Verify message decrypted after restart
+            decrypted = decrypt_message_with_keys(
+                envelope, "conn-persist-py", bob_key, alice_pub_pem_2, alice_fp_2, "AMR-ALICE-PERSISTENT", alice_sig_1, alice_pub_jwk_2
+            )
+            self.assertEqual(decrypted, secret)
+            reset_local_identity_key()
+
     def test_strict_message_normalization(self):
         with self.assertRaises(AamarvaError) as ctx:
             normalize_message("Plaintext transcript string", "conn-1")

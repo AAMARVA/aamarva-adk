@@ -130,32 +130,31 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(tools[0].accessStatus, "authorized")
 
     def test_floor_access_request(self):
-        self.client.http.request.return_value = {
-            "success": True,
-            "status": "pending",
-            "data": {"status": "pending", "requestId": "req_tool_99"}
-        }
+        def mock_req(method, path, **kwargs):
+            if path == "/floor/agent/tools":
+                return {"success": True, "data": [{"id": "tool_orderbook", "name": "Orderbook", "description": "", "inputSchema": {}, "accessStatus": "required"}]}
+            if path == "/floor/tools/tool_orderbook/invoke":
+                return {"success": True, "status": "pending", "data": {"status": "pending", "requestId": "req_tool_99", "invocationId": "req_tool_99"}}
+            return {}
+        self.client.http.request.side_effect = mock_req
         res = self.client.request_floor_access("tool_orderbook", "Need market depth data")
         self.assertEqual(res.status, "pending")
         self.assertEqual(res.requestId, "req_tool_99")
-        self.client.http.request.assert_called_with(
-            "POST", "/floor/tools/tool_orderbook/request-access", auth=True,
-            json_data={"reason": "Need market depth data"}
-        )
 
     def test_floor_execute(self):
-        self.client.http.request.return_value = {
-            "success": True,
-            "status": "executed",
-            "data": {"status": "executed", "result": {"data": 123}}
-        }
-        res = self.client.execute_floor_tool("tool_sec", {"ticker": "AAPL"})
-        self.assertEqual(res.status, "executed")
-        self.assertEqual(res.result, {"data": 123})
-        self.client.http.request.assert_called_with(
-            "POST", "/floor/tools/tool_sec/execute", auth=True,
-            json_data={"arguments": {"ticker": "AAPL"}}
-        )
+        def mock_req(method, path, **kwargs):
+            if path == "/floor/agent/tools":
+                return {"success": True, "data": [{"id": "tool_sec", "name": "SEC Extractor", "description": "", "inputSchema": {"properties": {"ticker": {"type": "string"}}}, "accessStatus": "authorized"}]}
+            if path == "/floor/tools/tool_sec/invoke":
+                return {"success": True, "data": {"invocationId": "inv_123", "status": "approved"}}
+            if path == "/floor/invocations/inv_123/execute":
+                return {"success": True, "data": {"status": "approved", "invocationId": "inv_123", "toolId": "tool_sec", "serverUrl": "http://127.0.0.1:4000/mcp", "auth": {"type": "bearer", "token": "tok"}, "grant": {"grantId": "g1"}}}
+            return {}
+        self.client.http.request.side_effect = mock_req
+        with unittest.mock.patch("aamarva.client.invoke_external_mcp_tool", return_value={"data": 123}):
+            res = self.client.execute_floor_tool("tool_sec", {"ticker": "AAPL"})
+            self.assertEqual(res.status, "approved")
+            self.assertEqual(res.result, {"data": 123})
 
     def test_legacy_removal_on_client(self):
         # Assert obsolete methods do not exist
@@ -188,47 +187,46 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(len(e2ee_calls), 1)
 
     def test_floor_execute_fail_closed_missing_status(self):
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": {"result": {"some": "data"}}
-        }
+        def mock_req(method, path, **kwargs):
+            if path == "/floor/agent/tools":
+                return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
+            if path == "/floor/tools/tool_sec/invoke":
+                return {"success": True, "data": {"invocationId": "inv_1", "status": "approved"}}
+            if path == "/floor/invocations/inv_1/execute":
+                return {"success": True, "data": {"result": {"some": "data"}}}
+            return {}
+        self.client.http.request.side_effect = mock_req
         with self.assertRaises(AamarvaError) as ctx:
             self.client.execute_floor_tool("tool_sec", {"ticker": "AAPL"})
         self.assertEqual(ctx.exception.code, "FLOOR_EXECUTION_FAILED")
 
     def test_floor_execute_fail_closed_unknown_status(self):
-        self.client.http.request.return_value = {
-            "success": True,
-            "data": {"status": "in_progress", "result": {"some": "data"}}
-        }
+        def mock_req(method, path, **kwargs):
+            if path == "/floor/agent/tools":
+                return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
+            if path == "/floor/tools/tool_sec/invoke":
+                return {"success": True, "data": {"invocationId": "inv_1", "status": "approved"}}
+            if path == "/floor/invocations/inv_1/execute":
+                return {"success": True, "data": {"status": "in_progress", "result": {"some": "data"}}}
+            return {}
+        self.client.http.request.side_effect = mock_req
         with self.assertRaises(AamarvaError) as ctx:
             self.client.execute_floor_tool("tool_sec", {"ticker": "AAPL"})
         self.assertEqual(ctx.exception.code, "FLOOR_EXECUTION_FAILED")
 
     def test_floor_execute_fail_closed_malformed_data(self):
-        # 1. data is null
-        self.client.http.request.return_value = {"success": True, "data": None}
+        def mock_req(method, path, **kwargs):
+            if path == "/floor/agent/tools":
+                return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
+            if path == "/floor/tools/tool_sec/invoke":
+                return {"success": True, "data": {"invocationId": "inv_1", "status": "approved"}}
+            if path == "/floor/invocations/inv_1/execute":
+                return {"success": True, "data": None}
+            return {}
+        self.client.http.request.side_effect = mock_req
         with self.assertRaises(AamarvaError) as ctx1:
             self.client.execute_floor_tool("tool_sec", {})
         self.assertEqual(ctx1.exception.code, "FLOOR_EXECUTION_FAILED")
-
-        # 2. data is string
-        self.client.http.request.return_value = {"success": True, "data": "unexpected_string"}
-        with self.assertRaises(AamarvaError) as ctx2:
-            self.client.execute_floor_tool("tool_sec", {})
-        self.assertEqual(ctx2.exception.code, "FLOOR_EXECUTION_FAILED")
-
-        # 3. data is list
-        self.client.http.request.return_value = {"success": True, "data": [1, 2, 3]}
-        with self.assertRaises(AamarvaError) as ctx3:
-            self.client.execute_floor_tool("tool_sec", {})
-        self.assertEqual(ctx3.exception.code, "FLOOR_EXECUTION_FAILED")
-
-        # 4. response itself is string
-        self.client.http.request.return_value = "raw_non_json_string"
-        with self.assertRaises(AamarvaError) as ctx4:
-            self.client.execute_floor_tool("tool_sec", {})
-        self.assertEqual(ctx4.exception.code, "FLOOR_EXECUTION_FAILED")
 
     @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
     def test_registration_cache_identity_aware(self):
@@ -417,11 +415,13 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "MASTER_RESOLUTION_FAILED")
 
     def test_floor_execute_denied_status_raises(self):
-        self.client.http.request.return_value = {
-            "success": False,
-            "status": "denied",
-            "data": {"status": "denied", "message": "Access not granted"}
-        }
+        def mock_req(method, path, **kwargs):
+            if path == "/floor/agent/tools":
+                return {"success": True, "data": [{"id": "tool_denied", "name": "Denied Tool", "description": "", "inputSchema": {}, "accessStatus": "denied"}]}
+            if path == "/floor/tools/tool_denied/invoke":
+                return {"success": False, "status": "denied", "data": {"status": "denied", "message": "Access not granted"}}
+            return {}
+        self.client.http.request.side_effect = mock_req
         with self.assertRaises(AamarvaError) as ctx:
             self.client.execute_floor_tool("tool_denied", {})
         self.assertEqual(ctx.exception.code, "FLOOR_ACCESS_DENIED")

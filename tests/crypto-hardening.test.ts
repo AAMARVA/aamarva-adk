@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   generateECKeyPair,
+  exportPublicKeyJWK,
   computeKeyFingerprint,
   verifyPeerKey,
   encryptMessageWithKeys,
@@ -217,6 +218,67 @@ async function runCryptoHardeningTests() {
   }
   fs.rmSync(tmpDir, { recursive: true, force: true });
   console.log('✓ KeyStore abstraction (InMemory & FileSystem) verified.');
+
+  // Test 10b: Persistent KeyStore across process restart verification
+  const persistentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aamarva-persistent-'));
+  setKeyStore(new FileSystemKeyStore(persistentDir));
+
+  // 1. Generate/load persistent key for Alice
+  const aliceKeyPair1 = getLocalIdentityKeyPair('AMR-ALICE-PERSISTENT');
+  const alicePubJwk1 = exportPublicKeyJWK(aliceKeyPair1.publicKey);
+  const aliceFp1 = computeKeyFingerprint(alicePubJwk1);
+  const alicePubPem1 = getLocalPublicKeyPem('AMR-ALICE-PERSISTENT');
+  const aliceSig1 = signIdentityBinding(aliceKeyPair1.privateKey, 'AMR-ALICE-PERSISTENT', aliceFp1);
+
+  // Bob generates key
+  const bobKeyPairPersistent = generateECKeyPair();
+  const bobPubPemPersistent = bobKeyPairPersistent.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const bobFpPersistent = computeKeyFingerprint(exportPublicKeyJWK(bobKeyPairPersistent.publicKey));
+  const bobSigPersistent = signIdentityBinding(bobKeyPairPersistent.privateKey, 'AMR-BOB', bobFpPersistent);
+
+  // Alice encrypts message to Bob before process restart
+  const secretPayload = "Secret message surviving agent process restart";
+  const envelopePersistent = encryptMessageWithKeys(
+    secretPayload,
+    'conn-persist-1',
+    aliceKeyPair1.privateKey,
+    bobPubPemPersistent,
+    bobFpPersistent,
+    'AMR-BOB',
+    bobSigPersistent,
+    exportPublicKeyJWK(bobKeyPairPersistent.publicKey)
+  );
+
+  // 2. Simulate Process Restart: Clear in-memory key cache & reset active KeyStore
+  resetLocalIdentityKeyPair();
+  setKeyStore(new FileSystemKeyStore(persistentDir));
+
+  // 3. Load Alice's key from disk after restart
+  const aliceKeyPair2 = getLocalIdentityKeyPair('AMR-ALICE-PERSISTENT');
+  const alicePubJwk2 = exportPublicKeyJWK(aliceKeyPair2.publicKey);
+  const aliceFp2 = computeKeyFingerprint(alicePubJwk2);
+  const alicePubPem2 = getLocalPublicKeyPem('AMR-ALICE-PERSISTENT');
+
+  // Assert keys match across process restarts
+  assert.strictEqual(aliceFp1, aliceFp2, 'Public key fingerprint must match across process restarts');
+  assert.strictEqual(alicePubPem1, alicePubPem2, 'Public key PEM must match across process restarts');
+
+  // Verify Bob decrypts message encrypted before restart using Alice's key loaded after restart
+  const decryptedPostRestart = decryptMessageWithKeys(
+    envelopePersistent,
+    'conn-persist-1',
+    bobKeyPairPersistent.privateKey,
+    alicePubPem2,
+    aliceFp2,
+    'AMR-ALICE-PERSISTENT',
+    aliceSig1,
+    alicePubJwk2
+  );
+  assert.strictEqual(decryptedPostRestart, secretPayload, 'Message must be decryptable after process restart');
+
+  fs.rmSync(persistentDir, { recursive: true, force: true });
+  resetLocalIdentityKeyPair();
+  console.log('✓ Persistent FileSystemKeyStore key survival across process restart verified.');
 
   // Test 11: Strict message normalization
   assert.throws(

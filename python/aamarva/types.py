@@ -95,8 +95,10 @@ class FloorToolInvokeResult:
     status: str
     requestId: Optional[str] = None
     invocationId: Optional[str] = None
+    toolId: Optional[str] = None
     result: Optional[Any] = None
     message: Optional[str] = None
+    serverUrl: Optional[str] = None
 
 @dataclass
 class FloorAccessRequestStatus:

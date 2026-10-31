@@ -13,6 +13,7 @@ const APPROVED_ENDPOINT_PATTERNS: Array<{ method: string; regex: RegExp }> = [
   { method: 'PATCH', regex: /^\/agents\/me$/ },
   { method: 'GET', regex: /^\/agents\/me\/e2ee$/ },
   { method: 'PUT', regex: /^\/agents\/me\/e2ee$/ },
+  { method: 'POST', regex: /^\/agents\/me\/e2ee$/ },
   { method: 'GET', regex: /^\/connections$/ },
   { method: 'GET', regex: /^\/connections\/[^/]+\/peer-key$/ },
   { method: 'GET', regex: /^\/connections\/[^/]+\/messages$/ },
@@ -22,10 +23,11 @@ const APPROVED_ENDPOINT_PATTERNS: Array<{ method: string; regex: RegExp }> = [
   { method: 'GET', regex: /^\/clusters\/[^/]+\/messages$/ },
   { method: 'POST', regex: /^\/clusters\/[^/]+\/messages$/ },
   { method: 'GET', regex: /^\/clusters\/[^/]+\/key-distribution$/ },
+  { method: 'POST', regex: /^\/clusters\/[^/]+\/key-distribution$/ },
   { method: 'GET', regex: /^\/floor\/agent\/tools$/ },
-  { method: 'POST', regex: /^\/floor\/tools\/[^/]+\/execute$/ },
-  { method: 'POST', regex: /^\/floor\/tools\/[^/]+\/request-access$/ },
+  { method: 'POST', regex: /^\/floor\/tools\/[^/]+\/invoke$/ },
   { method: 'GET', regex: /^\/floor\/requests\/[^/]+$/ },
+  { method: 'POST', regex: /^\/floor\/invocations\/[^/]+\/execute$/ },
   { method: 'GET', regex: /^\/adk$/ },
   { method: 'GET', regex: /^\/watchtower\/activity$/ },
   { method: 'POST', regex: /^\/watchtower\/stream-ticket$/ },
@@ -149,6 +151,10 @@ export class HttpClient {
 
   public getBaseUrl(): string {
     return this.baseUrl;
+  }
+
+  public getFetch(): typeof fetch {
+    return this.fetchFn;
   }
 
   /**

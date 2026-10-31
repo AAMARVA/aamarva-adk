@@ -36,6 +36,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "start": "node server.ts",
     "test": "tsx tests/run-all.ts",
     "lint": "tsc --noEmit"

@@ -69,16 +69,18 @@ class InMemoryKeyStore(KeyStore):
         return self._keys.get(identity_id)
 
     def save_private_key(self, private_key_pem: str, identity_id: str = "default") -> None:
+        if identity_id in self._keys:
+            return
         self._keys[identity_id] = private_key_pem
 
 
 class FileSystemKeyStore(KeyStore):
     """
     FileSystemKeyStore persists private keys to disk with POSIX permissions (0600).
-    Configurable via base_dir or AAMARVA_KEY_STORE_PATH env variable.
+    Configurable via base_dir or AAMARVA_KEY_STORE_PATH env variable (defaults to ~/.aamarva/keys).
     """
     def __init__(self, base_dir: Optional[str] = None):
-        self.base_dir = base_dir or os.environ.get("AAMARVA_KEY_STORE_PATH", "")
+        self.base_dir = base_dir or os.environ.get("AAMARVA_KEY_STORE_PATH") or os.path.expanduser("~/.aamarva/keys")
 
     def load_private_key(self, identity_id: str = "default") -> Optional[str]:
         if not self.base_dir:
@@ -94,6 +96,8 @@ class FileSystemKeyStore(KeyStore):
             return
         os.makedirs(self.base_dir, mode=0o700, exist_ok=True)
         key_path = os.path.join(self.base_dir, f"{identity_id}.pem")
+        if os.path.exists(key_path):
+            return
         with open(key_path, "w", encoding="utf-8") as f:
             f.write(private_key_pem)
         try:
@@ -467,4 +471,132 @@ def encrypt_message(plaintext: str, connection_id: str, agent_id_a: str = "", ag
 
 def decrypt_message(envelope: dict, connection_id: str, agent_id_a: str = "", agent_id_b: str = "") -> str:
     raise AamarvaError("Use connection.get_messages() with E2EE key exchange.", code="MESSAGE_DECRYPTION_FAILED")
+
+
+# Cluster Key Distribution & Group Encryption
+def generate_cluster_key() -> bytes:
+    """
+    Generate a 256-bit symmetric key for cluster encryption.
+    """
+    _require_cryptography()
+    return os.urandom(32)
+
+
+def wrap_cluster_key_for_recipient(
+    cluster_key: bytes,
+    recipient_public_key: Any,
+    sender_private_key: Any,
+) -> Dict[str, Any]:
+    """
+    Wrap cluster symmetric key for a recipient using ECDH-ES+A256GCM.
+    """
+    _require_cryptography()
+    recipient_pub = import_public_key(recipient_public_key)
+    sender_priv = sender_private_key if isinstance(sender_private_key, ec.EllipticCurvePrivateKey) else get_local_identity_key()
+
+    shared_secret = sender_priv.exchange(ec.ECDH(), recipient_pub)
+    wrap_key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"",
+        info=b"AAMARVA-CLUSTER-KEY-WRAP",
+    ).derive(shared_secret)
+
+    iv = os.urandom(12)
+    aesgcm = AESGCM(wrap_key)
+    ciphertext_with_tag = aesgcm.encrypt(iv, cluster_key, None)
+
+    return {
+        "encryptedKeyPackage": base64.b64encode(ciphertext_with_tag).decode("utf-8"),
+        "nonce": base64.b64encode(iv).decode("utf-8"),
+        "wrappingParams": {"alg": "ECDH-ES+A256GCM"},
+    }
+
+
+def unwrap_cluster_key(
+    encrypted_key_package_b64: str,
+    nonce_b64: str,
+    recipient_private_key: Any,
+    sender_public_key: Any,
+) -> bytes:
+    """
+    Unwrap cluster symmetric key using recipient private key and sender public key.
+    """
+    _require_cryptography()
+    sender_pub = import_public_key(sender_public_key)
+    recipient_priv = recipient_private_key if isinstance(recipient_private_key, ec.EllipticCurvePrivateKey) else get_local_identity_key()
+
+    shared_secret = recipient_priv.exchange(ec.ECDH(), sender_pub)
+    wrap_key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"",
+        info=b"AAMARVA-CLUSTER-KEY-WRAP",
+    ).derive(shared_secret)
+
+    try:
+        iv = base64.b64decode(nonce_b64)
+        combined = base64.b64decode(encrypted_key_package_b64)
+        if len(combined) < 16:
+            raise AamarvaError("Cluster key package is too short or malformed.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        aesgcm = AESGCM(wrap_key)
+        return aesgcm.decrypt(iv, combined, None)
+    except Exception as err:
+        if isinstance(err, AamarvaError):
+            raise err
+        raise AamarvaError(f"Failed to unwrap cluster key: {str(err)}", code="CLUSTER_KEY_UNWRAP_FAILED")
+
+
+def encrypt_cluster_message(
+    plaintext: str,
+    cluster_key: bytes,
+    cluster_id: str,
+    epoch: int = 1,
+) -> Dict[str, Any]:
+    """
+    Encrypt cluster message using symmetric cluster key and AES-256-GCM.
+    """
+    _require_cryptography()
+    if not isinstance(plaintext, str):
+        raise AamarvaError("Cluster message plaintext must be a string.", code="MESSAGE_ENCRYPTION_FAILED")
+
+    iv = os.urandom(12)
+    aesgcm = AESGCM(cluster_key)
+    aad = f"{cluster_id}:{epoch}:v2".encode("utf-8")
+    ciphertext_with_tag = aesgcm.encrypt(iv, plaintext.encode("utf-8"), aad)
+
+    return {
+        "ciphertext": base64.b64encode(ciphertext_with_tag).decode("utf-8"),
+        "nonce": base64.b64encode(iv).decode("utf-8"),
+        "version": 2,
+        "keyEpoch": epoch,
+    }
+
+
+def decrypt_cluster_message(
+    ciphertext_b64: str,
+    nonce_b64: str,
+    cluster_key: bytes,
+    cluster_id: str,
+    epoch: int = 1,
+    version: int = 2,
+) -> str:
+    """
+    Decrypt cluster message using symmetric cluster key and AES-256-GCM.
+    """
+    _require_cryptography()
+    try:
+        iv = base64.b64decode(nonce_b64)
+        combined = base64.b64decode(ciphertext_b64)
+        if len(combined) < 16:
+            raise AamarvaError("Cluster ciphertext is too short or malformed.", code="CLUSTER_MESSAGE_DECRYPTION_FAILED")
+
+        aesgcm = AESGCM(cluster_key)
+        aad = f"{cluster_id}:{epoch}:v{version}".encode("utf-8")
+        decrypted_bytes = aesgcm.decrypt(iv, combined, aad)
+        return decrypted_bytes.decode("utf-8")
+    except Exception as err:
+        if isinstance(err, AamarvaError):
+            raise err
+        raise AamarvaError(f"Failed to decrypt cluster message: {str(err)}", code="CLUSTER_MESSAGE_DECRYPTION_FAILED")
 
