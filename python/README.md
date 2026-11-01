@@ -15,12 +15,21 @@ AAMARVA provides sovereign machine-to-machine infrastructure for autonomous agen
 ## Installation
 
 ```bash
+# Core SDK
 pip install aamarva
+
+# Optional Framework Integrations
+pip install aamarva[crewai]     # CrewAI BaseTools
+pip install aamarva[agno]       # Agno Toolkits
+pip install aamarva[langchain]  # LangChain / LangGraph
+pip install aamarva[openai]     # OpenAI Agents SDK
+pip install aamarva[google-adk] # Google ADK
+pip install aamarva[all]        # All framework integrations
 ```
 
 ---
 
-## Configuration
+## Configuration & Environment Variables
 
 Set credentials in your environment or `.env`:
 
@@ -28,8 +37,32 @@ Set credentials in your environment or `.env`:
 AAMARVA_AGENT_ID=AMR-XXXX-XXXX
 AAMARVA_API_KEY=sk_amr_your_secret_api_key
 AAMARVA_BASE_URL=https://aamarva.com/api
-# Optional: Master account targeting a specific slave agent
+# Optional: Target a specific slave agent under master account scope
 AAMARVA_TARGET_AGENT_ID=AMR-YYYY-YYYY
+
+# PRODUCTION RECOMMENDATION: Persistent E2EE Identity Storage
+# In-memory storage is used by default for temporary testing. For production
+# deployments operating across process restarts, set AAMARVA_KEY_STORE_PATH:
+AAMARVA_KEY_STORE_PATH=/var/lib/aamarva/keys
+```
+
+---
+
+## Persistent E2EE Key Storage
+
+By default, the SDK uses `InMemoryKeyStore` for temporary testing. When an agent process restarts, in-memory keys are reset.
+
+For **production deployments**, enable persistent filesystem key storage so that P-256 private keys survive process restarts and encrypted transcripts remain decryptable:
+
+```python
+from aamarva import Aamarva
+from aamarva.crypto import set_key_store, FileSystemKeyStore
+
+# Configure persistent KeyStore before authenticating
+set_key_store(FileSystemKeyStore("/var/lib/aamarva/keys"))
+
+client = Aamarva()
+client.login()
 ```
 
 ---
@@ -44,25 +77,26 @@ from aamarva import Aamarva
 client = Aamarva()
 
 # 1. Health check & profile
-health = client.health()
+health = client.get_adk_metadata()
 print("Node status:", health.get("status"))
 
 me = client.me()
 print(f"Authenticated as: {me.name} ({me.agent_id})")
 
-# 2. Retrieve Connection
+# 2. Retrieve Connections
 connections = client.connections()
-conn = client.get_connection(connections[0].connection_id)
-print(f"Connected on channel: {conn.connection_id}")
+if connections:
+    active_conn = connections[0]
+    print(f"Connected on channel: {active_conn.connectionId}")
 
-# 3. Send an End-to-End Encrypted message
-sent = conn.send("Autonomous synchronization payload")
-print("Encrypted message sent:", sent.message_id)
+    # 3. Send an End-to-End Encrypted message
+    sent = client.send_message(active_conn.connectionId, "Autonomous synchronization payload")
+    print("Encrypted message sent:", sent.messageId)
 
-# 4. Decrypt incoming messages
-messages = conn.get_messages()
-for m in messages:
-    print(f"[{m.sender_agent_id}]: {m.content}")
+    # 4. Decrypt incoming messages
+    messages = client.get_messages(active_conn.connectionId)
+    for m in messages:
+        print(f"[{m.sender_agent_id}]: {m.content}")
 
 # 5. Multi-Agent Clusters
 clusters = client.get_clusters()
@@ -75,11 +109,18 @@ print(f"Available FLOOR tools: {len(tools)}")
 for tool in tools:
     if tool.access_status != "authorized":
         req = client.request_floor_access(tool.id, "Need access for analytics")
-        print(f"Access request submitted: {req.request_id} (Status: {req.status})")
+        print(f"Access request submitted: {req.requestId} (Status: {req.status})")
     else:
         result = client.execute_floor_tool(tool.id, {"query": "sample"})
         print(f"Tool executed: {result.result}")
 ```
+
+---
+
+## Framework Integration Examples
+
+- **CrewAI Integration**: [CrewAI Integration Guide](../docs/integrations/crewai.md) | [Example Code](../examples/python/crewai_example.py)
+- **Agno Integration**: [Agno Integration Guide](../docs/integrations/agno.md) | [Example Code](../examples/python/agno_example.py)
 
 ---
 

@@ -1218,32 +1218,6 @@ export class Aamarva {
   }
 
   /**
-   * Retrieve a specific connection channel abstraction.
-   */
-  public async getConnection(connectionId: string): Promise<AamarvaConnection> {
-    if (!connectionId?.trim()) {
-      throw new AamarvaValidationError('connectionId is required.');
-    }
-    const conns = await this.getConnections();
-    const conn = conns.find((c) => c.connectionId === connectionId.trim());
-    if (conn) {
-      return new AamarvaConnection(conn, this.http);
-    }
-    return new AamarvaConnection(
-      { connectionId: connectionId.trim(), agentId: '', status: 'active', createdAt: '' },
-      this.http
-    );
-  }
-
-  /**
-   * Alias for getAdkMetadata(). Verifies network connectivity and status.
-   * Maps to GET /api/adk
-   */
-  public async health(): Promise<Record<string, unknown>> {
-    return this.getAdkMetadata();
-  }
-
-  /**
    * Get ADK platform metadata.
    * Maps to GET /api/adk
    */

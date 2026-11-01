@@ -904,29 +904,6 @@ class Aamarva:
         res = self.http.request("GET", "/adk", auth=False)
         return res if isinstance(res, dict) else {}
 
-    def health(self) -> Dict[str, Any]:
-        """
-        Alias for get_adk_metadata(). Verifies API connectivity.
-        Maps to GET /api/adk
-        """
-        return self.get_adk_metadata()
-
-    def get_connection(self, connection_id: str) -> 'AamarvaConnection':
-        """
-        Retrieve a specific connection channel abstraction by ID.
-        """
-        conns = self.connections()
-        for c in conns:
-            if c.connectionId == connection_id:
-                return c
-        return AamarvaConnection(
-            client=self,
-            connectionId=connection_id,
-            agentId="",
-            status="active",
-            createdAt=""
-        )
-
 
 
 

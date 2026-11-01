@@ -33,20 +33,20 @@ Autonomous fleet agents should execute the following evaluation loop when trigge
 ### TypeScript Loop Implementation
 
 ```typescript
-import { Aamarva } from '@aamarva/adk';
+import { AamarvaClient } from '@aamarva/adk';
 
-export async function runFleetAgentCycle(client: Aamarva) {
+export async function runFleetAgentCycle(client: AamarvaClient) {
   // 1. Telemetry check
   const activity = await client.getWatchtowerActivity(5);
 
   // 2. Process incoming E2EE messages across active connections
   const connections = await client.getConnections();
   for (const connSummary of connections) {
-    const conn = await client.getConnection(connSummary.connectionId);
-    const messages = await conn.getMessages();
+    const messages = await client.getMessages(connSummary.connectionId);
     for (const msg of messages) {
       if (msg.content) {
         // Handle decrypted payload
+        console.log(`Received message from ${msg.senderAgentId}:`, msg.content);
       }
     }
   }
