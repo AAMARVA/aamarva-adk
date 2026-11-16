@@ -7,15 +7,12 @@ from unittest.mock import MagicMock
 
 try:
     from cryptography.hazmat.primitives.asymmetric import ec, ed25519
-    from cryptography.hazmat.primitives import serialization, hashes
-    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives import serialization
     HAS_CRYPTOGRAPHY = True
 except ImportError:
     ec = None
     ed25519 = None
     serialization = None
-    hashes = None
-    HKDF = None
     HAS_CRYPTOGRAPHY = False
 
 from aamarva import Aamarva, AamarvaConnection
@@ -34,7 +31,6 @@ from aamarva.crypto import (
     verify_peer_key,
     encrypt_message_with_keys,
     decrypt_message_with_keys,
-    derive_connection_aes_key,
     create_identity_binding_string,
     verify_identity_binding,
 )
@@ -45,10 +41,6 @@ from aamarva.errors import AamarvaError
 @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
 class TestCryptoSecurityHardening(unittest.TestCase):
     def setUp(self):
-        self._tmp_key_dir = tempfile.TemporaryDirectory()
-        self._prev_key_dir = os.environ.get("AAMARVA_KEY_STORE_PATH")
-        os.environ["AAMARVA_KEY_STORE_PATH"] = self._tmp_key_dir.name
-        set_key_store(FileSystemKeyStore(self._tmp_key_dir.name))
         reset_local_identity_key()
         self.alice_priv = ec.generate_private_key(ec.SECP256R1())
         self.alice_pub_pem = self.alice_priv.public_key().public_bytes(
@@ -72,25 +64,7 @@ class TestCryptoSecurityHardening(unittest.TestCase):
         self.bob_identity_pub_jwk = export_public_key_jwk(self.bob_identity_priv.public_key())
         self.bob_sig = sign_identity_binding(self.bob_identity_priv, "AMR-BOB", self.bob_fp)
 
-    def tearDown(self):
-        reset_local_identity_key()
-        if self._prev_key_dir is None:
-            os.environ.pop("AAMARVA_KEY_STORE_PATH", None)
-        else:
-            os.environ["AAMARVA_KEY_STORE_PATH"] = self._prev_key_dir
-        self._tmp_key_dir.cleanup()
 
-    def test_hkdf_channel_vector(self):
-        shared_secret = bytes(range(32))
-        conn_id = "conn_hkdf_vector_1"
-        actual = derive_connection_aes_key(shared_secret, conn_id)
-        expected = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=b"aamarva-e2ee-channel-v1",
-            info=f"aamarva-channel:{conn_id}".encode("utf-8"),
-        ).derive(shared_secret)
-        self.assertEqual(actual, expected)
 
     def test_deterministic_fingerprint_vector(self):
         deterministic_jwk = {
@@ -299,9 +273,9 @@ class TestCryptoSecurityHardening(unittest.TestCase):
         def mock_req(method, path, auth=False, params=None, json_data=None):
             if path == "/agents/me/e2ee":
                 return {"success": True}
-            if path == "/connections/peer-key/AMR-BOB":
-                return {"success": True, "data": {"connectionId": "conn-leak", "peerAccountId": "AMR-BOB", "peerAgentId": "AMR-BOB", "peerE2eePublicKey": export_public_key_jwk(self.bob_priv.public_key()), "peerKeyFingerprint": self.bob_fp, "peerIdentityKey": self.bob_identity_pub_jwk, "peerKeySignature": self.bob_sig, "peerKeyEpoch": 1}}
-            if path == "/connections/messages/AMR-BOB" and method == "POST":
+            if path == "/connections/conn-leak/peer-key":
+                return {"success": True, "data": {"peerAgentId": "AMR-BOB", "peerE2eePublicKey": export_public_key_jwk(self.bob_priv.public_key()), "peerKeyFingerprint": self.bob_fp, "peerIdentityKey": self.bob_identity_pub_jwk, "peerKeySignature": self.bob_sig, "peerKeyEpoch": 1}}
+            if path == "/connections/conn-leak/messages" and method == "POST":
                 nonlocal captured_body
                 captured_body = json_data
                 return {"success": True, "data": {

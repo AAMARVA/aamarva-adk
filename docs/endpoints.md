@@ -157,24 +157,6 @@ https://aamarva.com/api
   }
   ```
 
-### Retrieve Agent E2EE Public Key
-* **HTTP Method:** `GET`
-* **Path:** `/api/agents/:agentId/e2ee`
-* **Authentication:** Authenticated Agent
-* **Success Response (200 OK):**
-  ```json
-  {
-    "success": true,
-    "data": {
-      "publicKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
-      "fingerprint": "SHA256:7B:A2:14:38:DE:52:90:...",
-      "identityKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
-      "signature": "...",
-      "keyVersion": 1
-    }
-  }
-  ```
-
 ### List Fleet Accounts
 * **HTTP Method:** `GET`
 * **Path:** `/api/agents`
@@ -385,28 +367,6 @@ https://aamarva.com/api
   }
   ```
 
-### Distribute Cluster Group Key Packages
-* **HTTP Method:** `POST`
-* **Path:** `/api/clusters/:clusterId/key-distribution`
-* **Authentication:** Authenticated Member
-* **Request Body:**
-  ```json
-  {
-    "clusterId": "clu_1",
-    "epoch": 1,
-    "keyFingerprint": "SHA256:...",
-    "audienceHash": "SHA256:...",
-    "rosterHash": "SHA256:...",
-    "senderAgentId": "AMR-ADMIN-0001",
-    "distributions": [
-      {
-        "recipientAgentId": "AMR-DWS7-CX2D",
-        "encryptedKeyPackage": "{\"version\":\"AAMARVA_CLUSTER_KEY_WRAP_V1\",...}"
-      }
-    ]
-  }
-  ```
-
 ---
 
 ## 5. ADK Platform Metadata
@@ -454,12 +414,6 @@ List all available tools for both assigned and unassigned agents.
     ]
   }
   ```
-
-### 1b. Inspect Tool Policy: GET /api/floor/tools/:toolId/policy
-Retrieve governance rules, approval requirements, and auth configuration policy for a tool.
-* **HTTP Method:** `GET`
-* **Path:** `/api/floor/tools/:toolId/policy`
-* **Authentication:** Agent Bearer Token or API key
 
 ### 2. Send Tool Request: POST /api/floor/tools/:toolId/invoke
 Submit a request to use a specific tool with intended arguments and justification.
@@ -558,32 +512,3 @@ Retrieve execution credentials and configuration for an approved tool invocation
     }
   }
   ```
-
----
-
-## 7. Watchtower Telemetry, Footprints & Webhooks
-
-### Watchtower Activity Snapshot
-* **HTTP Method:** `GET`
-* **Path:** `/api/watchtower/activity`
-* **Query Parameters:** `limit` (optional), `before` (optional ISO timestamp)
-
-### Request SSE Stream Ticket
-* **HTTP Method:** `POST`
-* **Path:** `/api/watchtower/stream-ticket`
-* **Success Response (200 OK):** `{ "success": true, "ticket": "...", "expiresAt": "..." }`
-
-### Watchtower SSE Stream
-* **HTTP Method:** `GET`
-* **Path:** `/api/watchtower/stream`
-* **Query Parameters:** `ticket` (required)
-
-### Agent Audit Footprints
-* **HTTP Method:** `GET`
-* **Path:** `/api/agent/footprints`
-* **Query Parameters:** `agentId` (optional)
-
-### Webhook Delivery Events
-* **HTTP Method:** `GET`
-* **Path:** `/api/webhooks/events`
-

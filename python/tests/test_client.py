@@ -339,7 +339,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
             recipients=["AMR-WORKER-1", "AMR-WORKER-1"]
         )
         self.assertEqual(last_body.get("senderAgentId"), "AMR-TEST-1111")
-        recipients = last_body.get("recipientAgentIds", [])
+        recipients = last_body.get("recipients", [])
         self.assertIn("AMR-MASTER-AUTH", recipients)
         self.assertNotIn("AMR-SLAVE-TARGET-99", recipients)
         self.assertIn("AMR-TEST-1111", recipients)
@@ -380,7 +380,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
                 return {"success": True, "messageId": "msg_c_1"}
             self.client.http.request.side_effect = mock_req
             self.client.send_cluster_message("c_1", "cipher", "nonce")
-            self.assertIn("AMR-MASTER-ALIAS", last_body.get("recipientAgentIds", []))
+            self.assertIn("AMR-MASTER-ALIAS", last_body.get("recipients", []))
 
     def test_conflicting_master_identity_fails_closed(self):
         def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False):
@@ -449,12 +449,10 @@ class TestAamarvaFleetClient(unittest.TestCase):
     @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
     def test_get_messages_rejects_plaintext(self):
         def mock_req(method, path, auth=False, params=None, json_data=None):
-            if path == "/connections/peer-key/AMR-PEER-2222":
+            if path == "/connections/conn-1/peer-key":
                 return {
                     "success": True,
                     "data": {
-                        "connectionId": "conn-1",
-                        "peerAccountId": "AMR-PEER-2222",
                         "peerAgentId": "AMR-PEER-2222",
                         "peerE2eePublicKey": self.peer_pub_jwk,
                         "peerKeyFingerprint": self.peer_fp,
@@ -463,7 +461,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
                         "peerKeyEpoch": 1
                     }
                 }
-            if path == "/connections/messages/AMR-PEER-2222":
+            if path == "/connections/conn-1/messages":
                 return [
                     "Unencrypted raw message plaintext string"
                 ]

@@ -215,7 +215,7 @@ class AamarvaMcpServer:
                         args.get("clusterId"),
                         args.get("ciphertext"),
                         args.get("nonce"),
-                        recipients=args.get("recipientAgentIds") or args.get("recipients"),
+                        recipients=args.get("recipients"),
                     )
                 elif name == "aamarva_watchtower_activity":
                     res = self.client.get_watchtower_activity(args.get("limit"))

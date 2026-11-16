@@ -12,7 +12,6 @@ from .types import (
 
 from .errors import AamarvaError
 
-
 def extract_master_id(raw: dict) -> Optional[str]:
     fields = ["masterId", "master_id", "masterAgentId", "master_agent_id", "ownerAgentId", "owner_agent_id"]
     candidates = []
@@ -34,20 +33,19 @@ def extract_master_id(raw: dict) -> Optional[str]:
 
     return primary_val
 
-
 def normalize_agent(raw: Any) -> Agent:
     if not isinstance(raw, dict):
         return Agent(agentId="", name="", bio=None, email=None, status="active", createdAt=None, updatedAt=None)
-
+    
     agent_id = str(raw.get("agentId") or raw.get("id") or "")
-    name = str(raw.get("name") or raw.get("displayName") or raw.get("display_name") or "")
+    name = str(raw.get("name") or "")
     bio = raw.get("bio")
     email = raw.get("email")
     status = raw.get("status") or "active"
     created_at = raw.get("createdAt")
     updated_at = raw.get("updatedAt")
     master_id = extract_master_id(raw)
-
+    
     return Agent(
         agentId=agent_id,
         name=name,
@@ -56,27 +54,18 @@ def normalize_agent(raw: Any) -> Agent:
         status=status if isinstance(status, str) else "active",
         avatar=raw.get("avatar"),
         avatarUrl=raw.get("avatarUrl") or raw.get("avatar_url"),
-        role=raw.get("role") if isinstance(raw.get("role"), str) else None,
-        isMaster=raw.get("isMaster") if isinstance(raw.get("isMaster"), bool) else None,
-        isSlave=raw.get("isSlave") if isinstance(raw.get("isSlave"), bool) else None,
-        verificationStatus=raw.get("verificationStatus") if isinstance(raw.get("verificationStatus"), str) else None,
         masterId=master_id,
-        masterAgentId=master_id,
-        ownerAgentId=master_id,
         slaveIds=raw.get("slaveIds") or raw.get("slave_ids"),
         createdAt=created_at if isinstance(created_at, str) else None,
         updatedAt=updated_at if isinstance(updated_at, str) else None,
     )
 
-
 def normalize_connection(raw: Any, current_agent_id: Optional[str] = None) -> Connection:
     if not isinstance(raw, dict):
         return Connection(connectionId="", agentId="", status="active", createdAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
-
+    
     peer_agent_id = ""
-    if raw.get("peerAccountId"):
-        peer_agent_id = str(raw.get("peerAccountId"))
-    elif raw.get("peerAgentId"):
+    if raw.get("peerAgentId"):
         peer_agent_id = str(raw.get("peerAgentId"))
     elif raw.get("agentId") and raw.get("agentId") != current_agent_id:
         peer_agent_id = str(raw.get("agentId"))
@@ -84,19 +73,17 @@ def normalize_connection(raw: Any, current_agent_id: Optional[str] = None) -> Co
         peer_agent_id = str(raw.get("targetAgentId"))
     elif raw.get("receiverAgentId"):
         peer_agent_id = str(raw.get("receiverAgentId"))
-
+            
     connection_id = str(raw.get("connectionId") or raw.get("id") or "")
     connected_agent_name = raw.get("connectedAgentName") or raw.get("connected_agent_name")
     status = raw.get("status") or "active"
     created_at = raw.get("createdAt") or datetime.datetime.now(datetime.timezone.utc).isoformat()
     updated_at = raw.get("updatedAt")
-    resolved_agent = str(raw.get("agentId") or peer_agent_id or current_agent_id or "")
-
+    
     return Connection(
         connectionId=connection_id,
-        agentId=resolved_agent,
+        agentId=str(raw.get("agentId") or current_agent_id or ""),
         peerAgentId=peer_agent_id or None,
-        peerAccountId=raw.get("peerAccountId") or (peer_agent_id or None),
         connectedAgentName=connected_agent_name if isinstance(connected_agent_name, str) else None,
         status=status if isinstance(status, str) else "active",
         createdAt=created_at if isinstance(created_at, str) else datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -107,7 +94,7 @@ def normalize_connection(raw: Any, current_agent_id: Optional[str] = None) -> Co
 def normalize_message(raw: Any, connection_id: Optional[str] = None) -> Message:
     if isinstance(raw, str):
         raise AamarvaError("Plaintext transcript string received on private E2EE channel; transport must be encrypted.", code="PLAINTEXT_MESSAGE_RECEIVED")
-
+    
     if not isinstance(raw, dict):
         raise AamarvaError("Invalid message format received.", code="MESSAGE_INVALID_ENVELOPE")
 
@@ -115,7 +102,7 @@ def normalize_message(raw: Any, connection_id: Optional[str] = None) -> Message:
     ciphertext = raw.get("ciphertext")
     nonce = raw.get("nonce")
     version = raw.get("version")
-    key_epoch = raw.get("keyEpoch") if raw.get("keyEpoch") is not None else (raw.get("key_epoch") if raw.get("key_epoch") is not None else raw.get("keyVersion"))
+    key_epoch = raw.get("keyEpoch") if raw.get("keyEpoch") is not None else raw.get("key_epoch")
 
     if has_plaintext and not ciphertext:
         raise AamarvaError("Plaintext message received from private-message endpoint; transport must be encrypted.", code="PLAINTEXT_MESSAGE_RECEIVED")
@@ -125,15 +112,6 @@ def normalize_message(raw: Any, connection_id: Optional[str] = None) -> Message:
             raise AamarvaError("Plaintext message received from private-message endpoint; transport must be encrypted.", code="PLAINTEXT_MESSAGE_RECEIVED")
         raise AamarvaError("Invalid encrypted envelope: missing required fields or key epoch.", code="MESSAGE_INVALID_ENVELOPE")
 
-    try:
-        parsed_version = int(version)
-        parsed_epoch = int(key_epoch)
-    except Exception:
-        raise AamarvaError("Invalid encrypted envelope: version and keyEpoch must be positive integers.", code="MESSAGE_INVALID_ENVELOPE")
-
-    if parsed_version < 1 or parsed_epoch < 1:
-        raise AamarvaError("Invalid encrypted envelope: version and keyEpoch must be positive integers.", code="MESSAGE_INVALID_ENVELOPE")
-
     return Message(
         messageId=str(raw.get("messageId") or raw.get("id") or ""),
         connectionId=str(raw.get("connectionId") or connection_id or ""),
@@ -142,11 +120,10 @@ def normalize_message(raw: Any, connection_id: Optional[str] = None) -> Message:
         content=None,
         ciphertext=str(ciphertext),
         nonce=str(nonce),
-        version=parsed_version,
-        keyEpoch=parsed_epoch,
+        version=int(version) if isinstance(version, (int, float, str)) else 1,
+        keyEpoch=int(key_epoch) if isinstance(key_epoch, (int, float, str)) else 1,
         createdAt=raw.get("createdAt") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-
 
 def normalize_cluster(raw: Any) -> Cluster:
     if not isinstance(raw, dict):
@@ -161,31 +138,22 @@ def normalize_cluster(raw: Any) -> Cluster:
         ownerAgentId=raw.get("ownerAgentId") or raw.get("owner_agent_id"),
         membersCount=raw.get("membersCount") or raw.get("members_count"),
         members=raw.get("members"),
-        epoch=raw.get("epoch") if isinstance(raw.get("epoch"), int) else None,
         createdAt=raw.get("createdAt"),
         updatedAt=raw.get("updatedAt"),
     )
-
 
 def normalize_floor_tool(raw: Any) -> FloorTool:
     if not isinstance(raw, dict):
         return FloorTool(id="", name="", description="", inputSchema={}, accessStatus="required")
 
     schema = raw.get("inputSchema") or raw.get("input_schema") or raw.get("parameters") or {"type": "object"}
-    server_obj = raw.get("server") if isinstance(raw.get("server"), dict) else {}
     return FloorTool(
         id=str(raw.get("id") or raw.get("toolId") or raw.get("tool_id") or ""),
         name=str(raw.get("name") or ""),
         description=str(raw.get("description") or ""),
         inputSchema=schema if isinstance(schema, dict) else {"type": "object"},
         accessStatus=str(raw.get("accessStatus") or raw.get("access_status") or raw.get("status") or "required"),
-        serverId=raw.get("serverId") or raw.get("server_id") or server_obj.get("id"),
-        serverName=raw.get("serverName") or raw.get("server_name") or server_obj.get("name"),
-        serverUrl=raw.get("serverUrl") or raw.get("server_url") or server_obj.get("url"),
-        authType=raw.get("authType") or raw.get("auth_type"),
-        authHeaderName=raw.get("authHeaderName") or raw.get("auth_header_name"),
     )
-
 
 def normalize_floor_request_status(raw: Any) -> FloorAccessRequestStatus:
     if not isinstance(raw, dict):
@@ -195,13 +163,11 @@ def normalize_floor_request_status(raw: Any) -> FloorAccessRequestStatus:
         requestId=str(raw.get("requestId") or raw.get("request_id") or raw.get("id") or ""),
         status=str(raw.get("status") or "pending"),
         toolId=raw.get("toolId") or raw.get("tool_id"),
-        invocationId=raw.get("invocationId") or raw.get("invocation_id"),
         agentId=raw.get("agentId") or raw.get("agent_id"),
         reason=raw.get("reason"),
         createdAt=raw.get("createdAt"),
         updatedAt=raw.get("updatedAt"),
     )
-
 
 def normalize_watchtower_activity(raw: Any) -> WatchtowerActivity:
     if not isinstance(raw, dict):
@@ -209,13 +175,12 @@ def normalize_watchtower_activity(raw: Any) -> WatchtowerActivity:
 
     return WatchtowerActivity(
         id=str(raw.get("id") or raw.get("activityId") or raw.get("activity_id") or ""),
-        type=str(raw.get("type") or raw.get("category") or raw.get("eventType") or "unknown"),
-        summary=str(raw.get("summary") or raw.get("text") or raw.get("message") or raw.get("description") or raw.get("action") or ""),
+        type=str(raw.get("type") or raw.get("eventType") or "unknown"),
+        summary=str(raw.get("summary") or raw.get("description") or ""),
         timestamp=str(raw.get("timestamp") or raw.get("createdAt") or datetime.datetime.now(datetime.timezone.utc).isoformat()),
-        actorAgentId=raw.get("actorAgentId") or raw.get("actor_agent_id") or raw.get("agentId"),
-        actorAgentName=raw.get("agentName") or raw.get("actorAgentName"),
+        actorAgentId=raw.get("actorAgentId") or raw.get("actor_agent_id"),
         targetAgentId=raw.get("targetAgentId") or raw.get("target_agent_id"),
-        category=raw.get("category") if isinstance(raw.get("category"), str) else None,
-        outcome=raw.get("outcome") if isinstance(raw.get("outcome"), str) else None,
         details=raw.get("details") if isinstance(raw.get("details"), dict) else None,
     )
+
+

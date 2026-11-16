@@ -2,11 +2,11 @@
  * Primary AAMARVA Client providing fleet-only autonomous agent abstractions.
  *
  * Implements:
- * 1. Authentication, Token Refresh & Agent Identity Management
+ * 1. Authentication & Agent Account Management
  * 2. Direct Connections & End-to-End Encrypted (E2EE) Messaging
- * 3. Multi-Agent Clusters, Key Distribution & Recipient-Restricted Messaging
- * 4. Watchtower Fleet Telemetry & Authenticated SSE Event Streaming
- * 5. FLOOR MCP Tool Governance (Discovery, Policy, HITL Access Requests, Grant Redemption & Hardened MCP Execution)
+ * 3. Multi-Agent Clusters & Recipient-Restricted Messaging
+ * 4. Watchtower Fleet Telemetry & Event Streaming
+ * 5. FLOOR MCP Tool Governance (Discovery, HITL Access Requests, Status)
  */
 
 import { HttpClient } from './http.js';
@@ -14,7 +14,6 @@ import { AamarvaConnection } from './connection.js';
 import {
   AamarvaConfig,
   Agent,
-  AgentLifecycleState,
   Connection,
   Message,
   SendMessageOptions,
@@ -25,14 +24,11 @@ import {
   ClusterMessage,
   SendClusterMessageOptions,
   FloorTool,
-  FloorToolPolicy,
   FloorToolInvokeResult,
   FloorAccessRequestStatus,
-  FloorExecutionAuthorization,
   PeerKeyResponse,
   WatchtowerActivity,
   WatchtowerStreamTicket,
-  WatchtowerStreamEvent,
   Footprint,
   WebhookEvent,
   GetAgentsOptions,
@@ -48,47 +44,29 @@ import {
   normalizeWatchtowerActivity,
 } from './normalize.js';
 import {
-  getLocalIdentitySigningKeyPair,
-  getLocalEcdhKeyPair,
-  findLocalEcdhKeyPair,
-  getLatestLocalEcdhEpoch,
-  rotateLocalEcdhKeyPair,
+  getLocalIdentityKeyPair,
   exportPublicKeyJWK,
   computeKeyFingerprint,
-  computeClusterKeyFingerprint,
-  computeAudienceHash,
-  computeRosterHash,
   signIdentityBinding,
-  verifyPeerKey,
   generateClusterKey,
   wrapClusterKeyForRecipient,
   unwrapClusterKey,
   encryptClusterMessagePayload,
   decryptClusterMessagePayload,
 } from './crypto.js';
-import { invokeExternalMcpTool, McpExecutionAuthConfig } from './mcp-executor.js';
-import { AamarvaValidationError, AamarvaError, AamarvaAuthError } from './errors.js';
+import { invokeExternalMcpTool } from './mcp-executor.js';
+import { AamarvaValidationError, AamarvaError } from './errors.js';
 
 export class Aamarva {
   public readonly http: HttpClient;
-  private lifecycleState: AgentLifecycleState = 'unauthenticated';
   private registeredAgentId?: string;
   private registeredKeyFingerprint?: string;
-  private registeredKeyEpoch?: number;
   private isRegisteringKey = false;
   private clusterKeyCache = new Map<string, Buffer>();
-  private allowInsecureLocalhostMcpHttp: boolean;
 
   constructor(config: AamarvaConfig = {}) {
     this.http = new HttpClient(config);
-    this.allowInsecureLocalhostMcpHttp = Boolean(config.allowInsecureHttpForLocalhost);
-    if (config.accessToken) {
-      this.lifecycleState = 'authenticated';
-    }
     this.http.setOnAuthSuccess(() => this.registerPublicKey());
-    this.http.setOnTargetAgentIdChange(() => {
-      this.invalidateTargetScopedState();
-    });
   }
 
   /**
@@ -99,29 +77,7 @@ export class Aamarva {
   }
 
   /**
-   * Explicit client authentication and E2EE lifecycle state
-   */
-  public getLifecycleState(): AgentLifecycleState {
-    if (this.registeredAgentId && this.registeredKeyFingerprint) {
-      return 'e2ee_ready';
-    }
-    if (this.http.getTokens().accessToken) {
-      return this.lifecycleState === 'e2ee_ready' ? 'e2ee_ready' : 'authenticated';
-    }
-    return this.lifecycleState;
-  }
-
-  private invalidateTargetScopedState(): void {
-    this.registeredAgentId = undefined;
-    this.registeredKeyFingerprint = undefined;
-    this.registeredKeyEpoch = undefined;
-    this.clusterKeyCache.clear();
-    this.lifecycleState = this.http.getTokens().accessToken ? 'authenticated' : 'unauthenticated';
-  }
-
-  /**
-   * Set target slave agent ID when operating within a managed fleet scope.
-   * Immediately clears target-scoped key registrations and cluster key caches to prevent cross-agent contamination.
+   * Set target slave agent ID when operating within a managed fleet scope
    */
   public setTargetAgentId(targetAgentId?: string): void {
     this.http.setTargetAgentId(targetAgentId);
@@ -135,17 +91,19 @@ export class Aamarva {
   }
 
   // ===========================================================================
-  // 1. Authentication, Identity & Key Management
+  // 1. Authentication & Profile Management
   // ===========================================================================
 
-  private async resolveEffectiveAgentId(explicitAgentId?: string): Promise<string> {
-    const targetId = this.http.getTargetAgentId();
-    const candidate = (explicitAgentId || targetId || this.http.getAgentId() || '').trim();
-    if (candidate && candidate.toLowerCase() !== 'me') {
-      return candidate;
+  /**
+   * Register local public key automatically via PUT /api/agents/me/e2ee (idempotent).
+   */
+  public async registerPublicKey(options?: { force?: boolean; agentId?: string }): Promise<void> {
+    if (this.isRegisteringKey) {
+      return;
     }
 
-    if (this.http.getTokens().accessToken) {
+    let myAgentId = options?.agentId || this.http.getAgentId() || this.agentId;
+    if ((!myAgentId || myAgentId === 'me') && this.http.getTokens().accessToken) {
       try {
         const meRes = await this.http.request<any>({
           method: 'GET',
@@ -156,52 +114,32 @@ export class Aamarva {
         const meData = meRes.data || {};
         const authoritativeId = meData.agentId || meData.id;
         if (authoritativeId && typeof authoritativeId === 'string' && authoritativeId.trim()) {
-          const resolved = authoritativeId.trim();
-          if (!targetId && this.http.getApiKey()) {
-            this.http.setCredentials(resolved, this.http.getApiKey()!, true);
+          myAgentId = authoritativeId.trim();
+          if (this.http.getApiKey()) {
+            this.http.setCredentials(myAgentId, this.http.getApiKey()!, true);
           }
-          return resolved;
         }
-      } catch (err: any) {
-        throw new AamarvaError(`Unable to resolve authoritative agent identity for E2EE registration: ${err.message}`, {
-          code: 'E2EE_KEY_REGISTRATION_FAILED',
-          cause: err,
-        });
+      } catch {
+        // Fall back to 'me' only if me() profile cannot be resolved
       }
     }
 
-    throw new AamarvaError('Agent identity could not be resolved for E2EE key registration.', {
-      code: 'E2EE_KEY_REGISTRATION_FAILED',
-    });
-  }
-
-  /**
-   * Register local E2EE public key automatically via PUT /api/agents/me/e2ee (idempotent per identity/epoch/fingerprint).
-   */
-  public async registerPublicKey(options?: { force?: boolean; agentId?: string; allowRotation?: boolean }): Promise<void> {
-    if (this.isRegisteringKey) {
-      return;
+    if (!myAgentId) {
+      myAgentId = 'me';
     }
 
-    const myAgentId = await this.resolveEffectiveAgentId(options?.agentId);
-    const epoch = getLatestLocalEcdhEpoch(myAgentId);
-
     let localPubJwk: any;
-    let localIdentityJwk: any;
     let localFp: string;
     let localSignature: string;
 
     try {
-      const ecdhKp = getLocalEcdhKeyPair(myAgentId, epoch);
-      const identityKp = getLocalIdentitySigningKeyPair(myAgentId);
-      localPubJwk = exportPublicKeyJWK(ecdhKp.publicKey);
-      localIdentityJwk = exportPublicKeyJWK(identityKp.publicKey);
+      const localKp = getLocalIdentityKeyPair(myAgentId);
+      localPubJwk = exportPublicKeyJWK(localKp.publicKey);
       localFp = computeKeyFingerprint(localPubJwk);
-      localSignature = signIdentityBinding(identityKp.privateKey, myAgentId, localFp);
+      localSignature = signIdentityBinding(localKp.privateKey, myAgentId, localFp);
     } catch (err: any) {
       this.registeredAgentId = undefined;
       this.registeredKeyFingerprint = undefined;
-      this.registeredKeyEpoch = undefined;
       if (err instanceof AamarvaError) throw err;
       throw new AamarvaError(`Failed to generate or export local public key: ${err.message}`, {
         code: 'E2EE_KEY_REGISTRATION_FAILED',
@@ -211,10 +149,8 @@ export class Aamarva {
 
     if (
       !options?.force &&
-      !options?.allowRotation &&
       this.registeredAgentId === myAgentId &&
-      this.registeredKeyFingerprint === localFp &&
-      this.registeredKeyEpoch === epoch
+      this.registeredKeyFingerprint === localFp
     ) {
       return;
     }
@@ -227,11 +163,10 @@ export class Aamarva {
         body: {
           publicKey: localPubJwk,
           fingerprint: localFp,
-          identityKey: localIdentityJwk,
+          identityKey: localPubJwk,
           signature: localSignature,
-          allowRotation: Boolean(options?.allowRotation),
-          keyVersion: epoch,
-          keyEpoch: epoch,
+          allowRotation: true,
+          keyEpoch: 1,
         },
         auth: true,
         skipAutoAuth: true,
@@ -257,12 +192,9 @@ export class Aamarva {
 
       this.registeredAgentId = myAgentId;
       this.registeredKeyFingerprint = localFp;
-      this.registeredKeyEpoch = epoch;
-      this.lifecycleState = 'e2ee_ready';
     } catch (err: any) {
       this.registeredAgentId = undefined;
       this.registeredKeyFingerprint = undefined;
-      this.registeredKeyEpoch = undefined;
       if (err instanceof AamarvaError && err.code === 'E2EE_KEY_REGISTRATION_FAILED') {
         throw err;
       }
@@ -276,85 +208,10 @@ export class Aamarva {
   }
 
   /**
-   * Rotate the active local ECDH transport keypair to the next positive epoch while retaining historical keys for past message decryption,
-   * and register the new key with allowRotation: true bound by the persistent ECDSA identity signing key.
-   */
-  public async rotateE2eeKey(): Promise<{ keyEpoch: number; fingerprint: string; publicKey: any }> {
-    await this.http.ensureAuthenticated();
-    const myAgentId = await this.resolveEffectiveAgentId();
-
-    this.isRegisteringKey = true;
-    try {
-      const rotated = rotateLocalEcdhKeyPair(myAgentId);
-      const identityKp = getLocalIdentitySigningKeyPair(myAgentId);
-      const localPubJwk = exportPublicKeyJWK(rotated.publicKey);
-      const localIdentityJwk = exportPublicKeyJWK(identityKp.publicKey);
-      const localFp = computeKeyFingerprint(localPubJwk);
-      const localSignature = signIdentityBinding(identityKp.privateKey, myAgentId, localFp);
-
-      const response = await this.http.request<any>({
-        method: 'PUT',
-        path: '/agents/me/e2ee',
-        body: {
-          publicKey: localPubJwk,
-          fingerprint: localFp,
-          identityKey: localIdentityJwk,
-          signature: localSignature,
-          allowRotation: true,
-          keyVersion: rotated.keyEpoch,
-          keyEpoch: rotated.keyEpoch,
-        },
-        auth: true,
-        skipAutoAuth: true,
-      });
-
-      if (!response || response.success === false) {
-        throw new AamarvaError('Server rejected rotated E2EE public key registration.', {
-          code: 'E2EE_KEY_REGISTRATION_FAILED',
-        });
-      }
-
-      this.registeredAgentId = myAgentId;
-      this.registeredKeyFingerprint = localFp;
-      this.registeredKeyEpoch = rotated.keyEpoch;
-      this.clusterKeyCache.clear();
-      this.lifecycleState = 'e2ee_ready';
-
-      return {
-        keyEpoch: rotated.keyEpoch,
-        fingerprint: localFp,
-        publicKey: localPubJwk,
-      };
-    } finally {
-      this.isRegisteringKey = false;
-    }
-  }
-
-  /**
    * Check whether E2EE identity is verified and ready for secure operations.
    */
   public isE2eeReady(): boolean {
     return Boolean(this.registeredAgentId && this.registeredKeyFingerprint);
-  }
-
-  /**
-   * Verify that the server's registered E2EE key matches our active local ECDH keypair.
-   * Fails closed on mismatch (IDENTITY_KEY_MISMATCH).
-   */
-  public async verifyRegisteredKeyConsistency(): Promise<AgentE2eeKeyResponse> {
-    const myAgentId = await this.resolveEffectiveAgentId();
-    const latestEpoch = getLatestLocalEcdhEpoch(myAgentId);
-    const localEcdhKp = getLocalEcdhKeyPair(myAgentId, latestEpoch);
-    const localFp = computeKeyFingerprint(exportPublicKeyJWK(localEcdhKp.publicKey));
-
-    const serverKey = await this.getAgentE2eeKey();
-    if (serverKey.fingerprint && serverKey.fingerprint !== localFp) {
-      throw new AamarvaError(
-        `Server E2EE key fingerprint mismatch: server holds "${serverKey.fingerprint}", local keystore holds "${localFp}".`,
-        { code: 'IDENTITY_KEY_MISMATCH' }
-      );
-    }
-    return serverKey;
   }
 
   /**
@@ -385,6 +242,7 @@ export class Aamarva {
       return masterId.trim();
     }
 
+    // Fail closed! Never substitute sender ID for unresolved master ID.
     throw new AamarvaError('Missing master identity: unable to resolve owning master agent ID for cluster message.', {
       code: 'MASTER_RESOLUTION_FAILED',
     });
@@ -397,7 +255,6 @@ export class Aamarva {
   public async login(options?: LoginOptions): Promise<AuthTokens> {
     if (options?.agentId && options?.apiKey) {
       this.http.setCredentials(options.agentId, options.apiKey);
-      this.invalidateTargetScopedState();
     }
 
     await this.http.ensureAuthenticated();
@@ -409,6 +266,7 @@ export class Aamarva {
       });
     }
 
+    // Automatically register public key upon authentication
     try {
       await this.registerPublicKey();
     } catch (err: any) {
@@ -512,31 +370,13 @@ export class Aamarva {
   }
 
   /**
-   * Retrieve another agent's registered E2EE public key metadata.
-   * Maps to GET /api/agents/:agentId/e2ee
-   */
-  public async getAgentE2eeKeyById(agentId: string): Promise<AgentE2eeKeyResponse> {
-    if (!agentId || !agentId.trim()) {
-      throw new AamarvaValidationError('agentId is required.');
-    }
-
-    const response = await this.http.request<Record<string, unknown>>({
-      method: 'GET',
-      path: `/agents/${encodeURIComponent(agentId.trim())}/e2ee`,
-      auth: true,
-    });
-
-    const data = (response.data as Record<string, unknown>) || response;
-    return data as AgentE2eeKeyResponse;
-  }
-
-  /**
    * Alias for getAgentE2eeKey().
    * Maps to GET /api/agents/me/e2ee
    */
   public async getRegisteredPublicKey(): Promise<AgentE2eeKeyResponse> {
     return this.getAgentE2eeKey();
   }
+
 
   // ===========================================================================
   // 2. Direct Connections & E2EE Private Messaging
@@ -557,68 +397,18 @@ export class Aamarva {
     return list.map((item) => normalizeConnection(item, this.agentId));
   }
 
-  private async resolveConnectionRecord(
-    accountOrConnectionId: string,
-    explicitPeerAgentId?: string
-  ): Promise<Connection> {
-    if (!accountOrConnectionId || !accountOrConnectionId.trim()) {
-      throw new AamarvaValidationError('accountId or connectionId is required.');
-    }
-    const cleanId = accountOrConnectionId.trim();
-    if (explicitPeerAgentId && explicitPeerAgentId.trim()) {
-      const cleanPeer = explicitPeerAgentId.trim();
-      return {
-        connectionId: cleanId,
-        agentId: cleanPeer,
-        peerAccountId: cleanPeer,
-        peerAgentId: cleanPeer,
-        status: 'active',
-        createdAt: '',
-      };
-    }
-
-    // If caller passed an account ID directly (e.g., AMR-5678), route directly with it,
-    // or if caller passed a connectionId (e.g., conn_mock_123), resolve peerAccountId via GET /connections.
-    const looksLikeConnectionId = /^(conn|c)[_-]/i.test(cleanId) || !cleanId.toUpperCase().startsWith('AMR-');
-    if (looksLikeConnectionId) {
-      try {
-        const connections = await this.getConnections();
-        const match = connections.find(
-          (c) =>
-            c.connectionId === cleanId ||
-            c.peerAccountId === cleanId ||
-            c.peerAgentId === cleanId ||
-            c.agentId === cleanId
-        );
-        if (match) {
-          return match;
-        }
-      } catch {
-        // Fall back to direct ID routing if connection list fetch fails
-      }
-    }
-
-    return {
-      connectionId: cleanId,
-      agentId: cleanId,
-      peerAccountId: cleanId,
-      peerAgentId: cleanId,
-      status: 'active',
-      createdAt: '',
-    };
-  }
-
   /**
    * Retrieve peer public key details for end-to-end encryption.
-   * Maps to GET /api/connections/peer-key/:accountId
+   * Maps to GET /api/connections/:connectionId/peer-key
    */
-  public async getPeerKey(accountOrConnectionId: string): Promise<PeerKeyResponse> {
-    const conn = await this.resolveConnectionRecord(accountOrConnectionId);
-    const accountId = (conn.peerAccountId || conn.peerAgentId || conn.agentId || conn.connectionId).trim();
+  public async getPeerKey(connectionId: string): Promise<PeerKeyResponse> {
+    if (!connectionId?.trim()) {
+      throw new AamarvaValidationError('connectionId is required.');
+    }
 
     const response = await this.http.request<PeerKeyResponse>({
       method: 'GET',
-      path: `/connections/peer-key/${encodeURIComponent(accountId)}`,
+      path: `/connections/${encodeURIComponent(connectionId.trim())}/peer-key`,
       auth: true,
     });
 
@@ -627,25 +417,19 @@ export class Aamarva {
 
   /**
    * Send an E2EE encrypted message over a connection channel.
-   * Maps to POST /api/connections/messages/:accountId
+   * Maps to POST /api/connections/:connectionId/messages
    */
-  public async sendMessage(accountOrConnectionId: string, options: string | SendMessageOptions): Promise<Message> {
-    const explicitPeer = typeof options === 'object' ? options.peerAgentId : undefined;
-    const connRecord = await this.resolveConnectionRecord(accountOrConnectionId, explicitPeer);
-    const conn = new AamarvaConnection(connRecord, this.http);
+  public async sendMessage(connectionId: string, options: string | SendMessageOptions): Promise<Message> {
+    const conn = new AamarvaConnection({ connectionId, agentId: '', status: 'active', createdAt: '' }, this.http);
     return conn.send(options);
   }
 
   /**
    * Retrieve and decrypt private messages for a connection channel.
-   * Maps to GET /api/connections/messages/:accountId
+   * Maps to GET /api/connections/:connectionId/messages
    */
-  public async getMessages(
-    accountOrConnectionId: string,
-    options: { page?: number; limit?: number; since?: string; peerAgentId?: string } = {}
-  ): Promise<Message[]> {
-    const connRecord = await this.resolveConnectionRecord(accountOrConnectionId, options.peerAgentId);
-    const conn = new AamarvaConnection(connRecord, this.http);
+  public async getMessages(connectionId: string, options: { page?: number; limit?: number } = {}): Promise<Message[]> {
+    const conn = new AamarvaConnection({ connectionId, agentId: '', status: 'active', createdAt: '' }, this.http);
     return conn.getMessages(options);
   }
 
@@ -690,46 +474,29 @@ export class Aamarva {
    * Retrieve encrypted cluster messages.
    * Maps to GET /api/clusters/:clusterId/messages
    */
-  public async getClusterMessages(
-    clusterId: string,
-    options: { since?: string; page?: number; limit?: number } = {}
-  ): Promise<ClusterMessage[]> {
+  public async getClusterMessages(clusterId: string): Promise<ClusterMessage[]> {
     if (!clusterId?.trim()) {
       throw new AamarvaValidationError('clusterId is required.');
     }
 
-    const query: Record<string, string | number | undefined> = {};
-    if (options.since) query.since = options.since;
-    if (options.page !== undefined) query.page = options.page;
-    if (options.limit !== undefined) query.limit = options.limit;
-
     const response = await this.http.request<unknown[]>({
       method: 'GET',
       path: `/clusters/${encodeURIComponent(clusterId.trim())}/messages`,
-      query: Object.keys(query).length > 0 ? query : undefined,
       auth: true,
     });
 
     const list = Array.isArray(response.data) ? response.data : [];
-    return list.map((item: any) => {
-      const rawRecipients = Array.isArray(item.recipientAgentIds)
-        ? item.recipientAgentIds.map(String)
-        : Array.isArray(item.recipients)
-        ? item.recipients.map(String)
-        : undefined;
-      return {
-        messageId: String(item.messageId || item.id || ''),
-        clusterId: clusterId.trim(),
-        senderAgentId: String(item.senderAgentId || item.sender_agent_id || ''),
-        ciphertext: String(item.ciphertext || ''),
-        nonce: String(item.nonce || ''),
-        version: Number(item.version !== undefined ? item.version : 2),
-        keyEpoch: Number(item.keyEpoch ?? item.key_epoch ?? 1),
-        recipients: rawRecipients,
-        recipientAgentIds: rawRecipients,
-        createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
-      };
-    });
+    return list.map((item: any) => ({
+      messageId: String(item.messageId || item.id || ''),
+      clusterId: clusterId.trim(),
+      senderAgentId: String(item.senderAgentId || item.sender_agent_id || ''),
+      ciphertext: String(item.ciphertext || ''),
+      nonce: String(item.nonce || ''),
+      version: Number(item.version || 1),
+      keyEpoch: Number(item.keyEpoch || item.key_epoch || 1),
+      recipients: Array.isArray(item.recipients) ? item.recipients.map(String) : undefined,
+      createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+    }));
   }
 
   /**
@@ -783,8 +550,7 @@ export class Aamarva {
         code: 'MASTER_RESOLUTION_FAILED',
       });
     }
-
-    const rawRecipients = options.recipientAgentIds || options.recipients || [];
+    const rawRecipients = options.recipients || [];
     for (const r of rawRecipients) {
       if (typeof r !== 'string' || !r.trim()) {
         throw new AamarvaValidationError('Invalid recipient ID in cluster message.', {
@@ -801,18 +567,13 @@ export class Aamarva {
     }
     const finalRecipients = Array.from(recipientSet);
 
-    const keyEpoch = options.keyEpoch !== undefined ? options.keyEpoch : 1;
-    if (!Number.isInteger(keyEpoch) || keyEpoch < 1) {
-      throw new AamarvaValidationError('keyEpoch must be a positive integer >= 1.');
-    }
-
     const payload = {
       senderAgentId,
       ciphertext: options.ciphertext,
       nonce: options.nonce,
       version: options.version !== undefined ? options.version : 2,
-      keyEpoch,
-      recipientAgentIds: finalRecipients,
+      keyEpoch: options.keyEpoch || 1,
+      recipients: finalRecipients,
     };
 
     const response = await this.http.request<any>({
@@ -837,18 +598,11 @@ export class Aamarva {
     clusterId: string,
     payload: {
       epoch: number;
-      senderAgentId?: string;
-      keyFingerprint?: string;
-      audienceHash?: string;
-      rosterHash?: string;
-      distributions?: Array<{
+      senderAgentId: string;
+      keyPackages: Array<{
         recipientAgentId: string;
         encryptedKeyPackage: string;
-      }>;
-      keyPackages?: Array<{
-        recipientAgentId: string;
-        encryptedKeyPackage: string;
-        nonce?: string;
+        nonce: string;
         wrappingParams?: Record<string, unknown>;
       }>;
     }
@@ -857,85 +611,19 @@ export class Aamarva {
       throw new AamarvaValidationError('clusterId is required.');
     }
 
-    const distributions =
-      payload.distributions ||
-      (payload.keyPackages || []).map((kp) => ({
-        recipientAgentId: kp.recipientAgentId,
-        encryptedKeyPackage: kp.encryptedKeyPackage,
-      }));
-
     await this.http.request({
       method: 'POST',
       path: `/clusters/${encodeURIComponent(clusterId.trim())}/key-distribution`,
       body: {
         clusterId: clusterId.trim(),
-        epoch: payload.epoch,
-        ...(payload.keyFingerprint ? { keyFingerprint: payload.keyFingerprint } : {}),
-        ...(payload.audienceHash ? { audienceHash: payload.audienceHash } : {}),
-        ...(payload.rosterHash ? { rosterHash: payload.rosterHash } : {}),
-        ...(payload.senderAgentId ? { senderAgentId: payload.senderAgentId } : {}),
-        distributions,
+        ...payload,
       },
       auth: true,
     });
   }
 
-  private async resolvePeerEcdhPublicKey(agentId: string): Promise<any | null> {
-    // 1. Prefer direct /agents/:agentId/e2ee endpoint
-    try {
-      const agentKey = await this.getAgentE2eeKeyById(agentId);
-      if (agentKey && agentKey.publicKey) {
-        if (agentKey.identityKey && agentKey.signature && agentKey.fingerprint) {
-          verifyPeerKey(
-            agentKey.publicKey,
-            agentKey.fingerprint,
-            agentId,
-            agentKey.signature,
-            agentKey.identityKey
-          );
-        }
-        return agentKey.publicKey;
-      }
-    } catch (err: any) {
-      if (err instanceof AamarvaError && err.code === 'PEER_KEY_VERIFICATION_FAILED') {
-        throw err;
-      }
-      // Fall back to connection peer-key lookup
-    }
-
-    // 2. Fallback via /connections and /connections/peer-key/:accountId
-    try {
-      const connections = await this.getConnections();
-      const conn = connections.find(
-        (c) =>
-          (c.peerAccountId || c.peerAgentId || c.agentId).trim().toUpperCase() === agentId.trim().toUpperCase()
-      );
-      if (conn) {
-        const peerKey = await this.getPeerKey(conn.peerAccountId || conn.peerAgentId || conn.agentId);
-        if (peerKey && peerKey.peerE2eePublicKey) {
-          if (peerKey.peerIdentityKey && peerKey.peerKeySignature && peerKey.peerKeyFingerprint) {
-            verifyPeerKey(
-              peerKey.peerE2eePublicKey,
-              peerKey.peerKeyFingerprint,
-              peerKey.peerAgentId || peerKey.peerAccountId || agentId,
-              peerKey.peerKeySignature,
-              peerKey.peerIdentityKey
-            );
-          }
-          return peerKey.peerE2eePublicKey;
-        }
-      }
-    } catch (err: any) {
-      if (err instanceof AamarvaError && err.code === 'PEER_KEY_VERIFICATION_FAILED') {
-        throw err;
-      }
-    }
-
-    return null;
-  }
-
   /**
-   * Generate, wrap, and distribute cluster symmetric keys to all authorized recipients using AAMARVA_CLUSTER_KEY_WRAP_V1.
+   * Generate, wrap, and distribute cluster symmetric keys to all required recipients.
    */
   public async distributeClusterKey(
     clusterId: string,
@@ -945,67 +633,50 @@ export class Aamarva {
       recipientPublicKeys?: Record<string, any>;
     } = {}
   ): Promise<{ epoch: number; clusterKey: Buffer; recipients: string[] }> {
-    if (!clusterId?.trim()) {
-      throw new AamarvaValidationError('clusterId is required.');
-    }
-    const epoch = options.epoch !== undefined ? options.epoch : 1;
-    if (!Number.isInteger(epoch) || epoch < 1) {
-      throw new AamarvaValidationError('epoch must be a positive integer >= 1.');
+    const epoch = options.epoch || 1;
+    const authAgentId = (this.http.getAgentId() || this.agentId || '').trim();
+    if (!authAgentId) {
+      throw new AamarvaValidationError('Sender agent ID is required for cluster key distribution.');
     }
 
-    const effectiveAgentId = await this.resolveEffectiveAgentId();
     const masterId = await this.resolveMasterAgentId();
-
-    let clusterMembers: string[] = [];
-    try {
-      const cluster = await this.getCluster(clusterId);
-      if (Array.isArray(cluster.members) && cluster.members.length > 0) {
-        clusterMembers = cluster.members.map(String);
-        const memberSetUpper = new Set(clusterMembers.map((m) => m.trim().toUpperCase()));
-        if (options.recipients) {
-          for (const r of options.recipients) {
-            if (r && r.trim() && !memberSetUpper.has(r.trim().toUpperCase())) {
-              throw new AamarvaError(
-                `Recipient "${r}" is not a verified member of cluster "${clusterId}".`,
-                { code: 'CLUSTER_MEMBERSHIP_INVALID' }
-              );
-            }
-          }
-        }
-      }
-    } catch (err: any) {
-      if (err instanceof AamarvaError && err.code === 'CLUSTER_MEMBERSHIP_INVALID') {
-        throw err;
-      }
-    }
-
     const recipientSet = new Set<string>();
     if (masterId) recipientSet.add(masterId);
-    if (effectiveAgentId) recipientSet.add(effectiveAgentId);
+    if (authAgentId) recipientSet.add(authAgentId);
     if (options.recipients) {
       for (const r of options.recipients) {
         if (r && r.trim()) recipientSet.add(r.trim());
       }
     }
     const finalRecipients = Array.from(recipientSet);
-    const rosterMembers = clusterMembers.length > 0 ? clusterMembers : finalRecipients;
 
+    // Generate local 256-bit symmetric cluster key
     const clusterKey = generateClusterKey();
-    const localEpoch = getLatestLocalEcdhEpoch(effectiveAgentId);
-    const senderKp = getLocalEcdhKeyPair(effectiveAgentId, localEpoch);
+    const senderKp = getLocalIdentityKeyPair(authAgentId);
 
-    const distributions: Array<{
+    const keyPackages: Array<{
       recipientAgentId: string;
       encryptedKeyPackage: string;
+      nonce: string;
+      wrappingParams: Record<string, unknown>;
     }> = [];
 
     for (const recipientId of finalRecipients) {
       let recipientPubKey = options.recipientPublicKeys?.[recipientId];
       if (!recipientPubKey) {
-        if (recipientId.toUpperCase() === effectiveAgentId.toUpperCase()) {
+        if (recipientId === authAgentId) {
           recipientPubKey = senderKp.publicKey;
         } else {
-          recipientPubKey = await this.resolvePeerEcdhPublicKey(recipientId);
+          try {
+            const connections = await this.getConnections();
+            const conn = connections.find((c) => c.peerAgentId === recipientId);
+            if (conn) {
+              const peerKey = await this.getPeerKey(conn.connectionId);
+              recipientPubKey = peerKey.peerE2eePublicKey || peerKey.peerIdentityKey;
+            }
+          } catch {
+            // connection lookup failed
+          }
         }
       }
 
@@ -1016,23 +687,20 @@ export class Aamarva {
         );
       }
 
-      const wrapped = wrapClusterKeyForRecipient(clusterKey, recipientPubKey, senderKp.privateKey, {
-        clusterId: clusterId.trim(),
-        epoch,
-      });
-      distributions.push({
+      const wrapped = wrapClusterKeyForRecipient(clusterKey, recipientPubKey, senderKp.privateKey);
+      keyPackages.push({
         recipientAgentId: recipientId,
         encryptedKeyPackage: wrapped.encryptedKeyPackage,
+        nonce: wrapped.nonce,
+        wrappingParams: wrapped.wrappingParams,
       });
     }
 
+    // Submit key packages via existing platform endpoint
     await this.submitClusterKeyDistribution(clusterId, {
       epoch,
-      keyFingerprint: computeClusterKeyFingerprint(clusterKey),
-      audienceHash: computeAudienceHash(finalRecipients),
-      rosterHash: computeRosterHash(rosterMembers),
-      senderAgentId: effectiveAgentId,
-      distributions,
+      senderAgentId: authAgentId,
+      keyPackages,
     });
 
     this.clusterKeyCache.set(`${clusterId}:${epoch}`, clusterKey);
@@ -1079,9 +747,6 @@ export class Aamarva {
     epoch = 1,
     options?: { senderPublicKey?: any }
   ): Promise<Buffer> {
-    if (!Number.isInteger(epoch) || epoch < 1) {
-      throw new AamarvaValidationError('epoch must be a positive integer >= 1.');
-    }
     const cacheKey = `${clusterId}:${epoch}`;
     if (this.clusterKeyCache.has(cacheKey)) {
       return this.clusterKeyCache.get(cacheKey)!;
@@ -1094,57 +759,36 @@ export class Aamarva {
       });
     }
 
-    if (dist.epoch !== undefined && Number(dist.epoch) !== epoch) {
-      throw new AamarvaError(`Cluster key distribution epoch mismatch: expected ${epoch}, got ${dist.epoch}.`, {
-        code: 'CLUSTER_KEY_UNWRAP_FAILED',
-      });
-    }
-
-    const effectiveAgentId = await this.resolveEffectiveAgentId();
-    const latestEpoch = getLatestLocalEcdhEpoch(effectiveAgentId);
-    let localKp = getLocalEcdhKeyPair(effectiveAgentId, latestEpoch);
-
-    // If platform specifies recipientKeyFingerprint, locate the matching historical or active local ECDH key
-    if (dist.recipientKeyFingerprint) {
-      let matched = false;
-      for (let e = latestEpoch; e >= 1; e--) {
-        const candidate = findLocalEcdhKeyPair(effectiveAgentId, e);
-        if (candidate && computeKeyFingerprint(exportPublicKeyJWK(candidate.publicKey)) === dist.recipientKeyFingerprint) {
-          localKp = candidate;
-          matched = true;
-          break;
-        }
-      }
-      if (!matched) {
-        throw new AamarvaError(
-          `No local ECDH private key matches cluster distribution recipientKeyFingerprint "${dist.recipientKeyFingerprint}".`,
-          { code: 'CLUSTER_KEY_UNWRAP_FAILED' }
-        );
-      }
-    }
+    const authAgentId = (this.http.getAgentId() || this.agentId || 'me').trim();
+    const localKp = getLocalIdentityKeyPair(authAgentId);
 
     let senderPubKey = options?.senderPublicKey || dist.senderPublicKey;
     if (!senderPubKey && dist.senderAgentId) {
-      if (dist.senderAgentId.trim().toUpperCase() === effectiveAgentId.toUpperCase()) {
+      if (dist.senderAgentId === authAgentId) {
         senderPubKey = localKp.publicKey;
       } else {
-        senderPubKey = await this.resolvePeerEcdhPublicKey(dist.senderAgentId);
+        try {
+          const conns = await this.getConnections();
+          const conn = conns.find((c) => c.peerAgentId === dist.senderAgentId);
+          if (conn) {
+            const pk = await this.getPeerKey(conn.connectionId);
+            senderPubKey = pk.peerE2eePublicKey || pk.peerIdentityKey;
+          }
+        } catch {
+          // fallback
+        }
       }
     }
 
-    const clusterKey = unwrapClusterKey(
-      dist.encryptedKeyPackage,
-      { expectedClusterId: clusterId.trim(), expectedEpoch: epoch },
-      localKp.privateKey,
-      senderPubKey
-    );
-
-    if (dist.keyFingerprint && computeClusterKeyFingerprint(clusterKey) !== dist.keyFingerprint) {
-      throw new AamarvaError('Unwrapped cluster key fingerprint does not match distribution metadata.', {
-        code: 'CLUSTER_KEY_UNWRAP_FAILED',
-      });
+    if (!senderPubKey) {
+      throw new AamarvaError(
+        `Unable to unwrap cluster key: missing sender public key for "${dist.senderAgentId}".`,
+        { code: 'CLUSTER_KEY_UNWRAP_FAILED' }
+      );
     }
 
+    const nonce = String(dist.nonce || (dist.wrappingParams as any)?.nonce || '');
+    const clusterKey = unwrapClusterKey(dist.encryptedKeyPackage, nonce, localKp.privateKey, senderPubKey);
     this.clusterKeyCache.set(cacheKey, clusterKey);
     return clusterKey;
   }
@@ -1157,24 +801,17 @@ export class Aamarva {
     plaintext: string,
     options: {
       recipients?: string[];
-      recipientAgentIds?: string[];
       epoch?: number;
       recipientPublicKeys?: Record<string, any>;
     } = {}
   ): Promise<{ messageId: string; version: number; keyEpoch: number; recipients: string[] }> {
-    const epoch = options.epoch !== undefined ? options.epoch : 1;
-    if (!Number.isInteger(epoch) || epoch < 1) {
-      throw new AamarvaValidationError('epoch must be a positive integer >= 1.');
-    }
-
-    const requestedRecipients = options.recipientAgentIds || options.recipients;
-
+    const epoch = options.epoch || 1;
     let clusterKey: Buffer;
     try {
       clusterKey = await this.getClusterKey(clusterId, epoch);
     } catch {
       const dist = await this.distributeClusterKey(clusterId, {
-        recipients: requestedRecipients,
+        recipients: options.recipients,
         epoch,
         recipientPublicKeys: options.recipientPublicKeys,
       });
@@ -1187,12 +824,12 @@ export class Aamarva {
       nonce: enc.nonce,
       version: 2,
       keyEpoch: epoch,
-      recipientAgentIds: requestedRecipients,
+      recipients: options.recipients,
     });
 
     const masterId = await this.resolveMasterAgentId();
     const senderId = (this.http.getAgentId() || this.agentId || '').trim();
-    const allRecipients = Array.from(new Set([masterId, senderId, ...(requestedRecipients || [])]));
+    const allRecipients = Array.from(new Set([masterId, senderId, ...(options.recipients || [])]));
 
     return {
       messageId: result.messageId,
@@ -1210,40 +847,26 @@ export class Aamarva {
     message: { ciphertext: string; nonce: string; keyEpoch?: number; version?: number },
     options?: { senderPublicKey?: any }
   ): Promise<string> {
-    if (!message || typeof message !== 'object') {
-      throw new AamarvaValidationError('Cluster message object is required.');
-    }
-    const epoch = message.keyEpoch;
-    if (typeof epoch !== 'number' || !Number.isInteger(epoch) || epoch < 1) {
-      throw new AamarvaError(`Missing or invalid keyEpoch on cluster message: ${String(epoch)}`, {
-        code: 'CLUSTER_MESSAGE_DECRYPTION_FAILED',
-      });
-    }
+    const epoch = message.keyEpoch || 1;
     const version = message.version !== undefined ? message.version : 2;
     const clusterKey = await this.getClusterKey(clusterId, epoch, options);
     return decryptClusterMessagePayload(message.ciphertext, message.nonce, clusterKey, clusterId, epoch, version);
   }
 
+
   // ===========================================================================
-  // 4. Watchtower Fleet Telemetry & Authenticated SSE Streaming
+  // 4. Watchtower Fleet Telemetry & Preserved Stream Operations
   // ===========================================================================
 
   /**
    * Retrieve recent fleet activity telemetry.
    * Maps to GET /api/watchtower/activity
    */
-  public async getWatchtowerActivity(
-    limit?: number,
-    options: { before?: string } = {}
-  ): Promise<WatchtowerActivity[]> {
-    const query: Record<string, string | number | undefined> = {};
-    if (limit !== undefined) query.limit = limit;
-    if (options.before) query.before = options.before;
-
+  public async getWatchtowerActivity(limit?: number): Promise<WatchtowerActivity[]> {
     const response = await this.http.request<unknown[]>({
       method: 'GET',
       path: '/watchtower/activity',
-      query: Object.keys(query).length > 0 ? query : undefined,
+      query: limit ? { limit } : undefined,
       auth: true,
     });
 
@@ -1262,19 +885,11 @@ export class Aamarva {
       auth: true,
     });
 
-    const data = response.data && typeof response.data === 'object' ? response.data : {};
-    const resAny = response as any;
-    const ticket = String(resAny.ticket || data.ticket || '');
-    const expiresAt = String(resAny.expiresAt || data.expiresAt || '');
-    if (!ticket) {
-      throw new AamarvaError('Watchtower stream-ticket endpoint did not return a valid ticket.', {
-        code: 'WATCHTOWER_TICKET_FAILED',
-      });
-    }
+    const data = response.data || {};
     return {
-      ticket,
-      streamUrl: `${this.http.getBaseUrl()}/watchtower/stream?ticket=${encodeURIComponent(ticket)}`,
-      expiresAt,
+      ticket: String(data.ticket || ''),
+      streamUrl: `${this.http.getBaseUrl()}/watchtower/stream?ticket=${encodeURIComponent(data.ticket || '')}`,
+      expiresAt: String(data.expiresAt || ''),
     };
   }
 
@@ -1288,218 +903,13 @@ export class Aamarva {
   }
 
   /**
-   * Stream real-time Watchtower telemetry events over Server-Sent Events (SSE).
-   * Handles ticket acquisition, incremental chunk parsing, event deduplication, and bounded backoff reconnect.
-   */
-  public async *streamWatchtowerEvents(
-    options: {
-      ticket?: string;
-      signal?: AbortSignal;
-      maxReconnects?: number;
-      deduplicate?: boolean;
-    } = {}
-  ): AsyncGenerator<WatchtowerStreamEvent, void, unknown> {
-    const maxReconnects = options.maxReconnects ?? 5;
-    const deduplicate = options.deduplicate !== false;
-    const seenIds = new Set<string>();
-    let reconnects = 0;
-    let currentTicket = options.ticket;
-    let lastEventId: string | undefined;
-
-    while (!options.signal?.aborted) {
-      try {
-        if (!currentTicket) {
-          const issued = await this.getWatchtowerStreamTicket();
-          currentTicket = issued.ticket;
-        }
-
-        const headers: Record<string, string> = {};
-        if (lastEventId) {
-          headers['Last-Event-ID'] = lastEventId;
-        }
-
-        const response = await this.http.openStream(
-          '/watchtower/stream',
-          { ticket: currentTicket },
-          { signal: options.signal, headers, auth: true }
-        );
-
-        const body = response.body;
-        if (!body) {
-          throw new AamarvaError('Watchtower SSE stream response has no readable body.', {
-            code: 'WATCHTOWER_STREAM_FAILED',
-          });
-        }
-
-        const reader = body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let eventName = 'message';
-        let eventId: string | undefined;
-        let dataLines: string[] = [];
-
-        const flushEvent = (): WatchtowerStreamEvent | null => {
-          if (dataLines.length === 0) {
-            eventName = 'message';
-            eventId = undefined;
-            return null;
-          }
-          const rawData = dataLines.join('\n');
-          dataLines = [];
-          let parsed: unknown = rawData;
-          try {
-            parsed = JSON.parse(rawData);
-          } catch {
-            // Preserve raw string data when non-JSON
-          }
-          const ev: WatchtowerStreamEvent = {
-            id: eventId,
-            event: eventName || 'message',
-            data: parsed,
-            rawData,
-          };
-          if (eventId) {
-            lastEventId = eventId;
-          }
-          eventName = 'message';
-          eventId = undefined;
-          return ev;
-        };
-
-        try {
-          while (!options.signal?.aborted) {
-            const { value, done } = await reader.read();
-            if (done) {
-              break;
-            }
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split(/\r?\n/);
-            buffer = lines.pop() ?? '';
-
-            for (const line of lines) {
-              if (line === '') {
-                const ev = flushEvent();
-                if (ev) {
-                  reconnects = 0; // Reset backoff once valid event is received
-                  if (deduplicate && ev.id) {
-                    if (seenIds.has(ev.id)) continue;
-                    seenIds.add(ev.id);
-                    if (seenIds.size > 1000) {
-                      const oldest = seenIds.values().next().value;
-                      if (oldest !== undefined) seenIds.delete(oldest);
-                    }
-                  }
-                  yield ev;
-                }
-                continue;
-              }
-              if (line.startsWith(':')) {
-                continue; // SSE comment / keepalive
-              }
-              const colonIdx = line.indexOf(':');
-              const field = colonIdx === -1 ? line : line.slice(0, colonIdx);
-              let val = colonIdx === -1 ? '' : line.slice(colonIdx + 1);
-              if (val.startsWith(' ')) val = val.slice(1);
-
-              if (field === 'event') eventName = val;
-              else if (field === 'id') eventId = val;
-              else if (field === 'data') dataLines.push(val);
-            }
-          }
-
-          if (!options.signal?.aborted && dataLines.length > 0) {
-            const trailing = flushEvent();
-            if (trailing && (!deduplicate || !trailing.id || !seenIds.has(trailing.id))) {
-              if (trailing.id) seenIds.add(trailing.id);
-              yield trailing;
-            }
-          }
-        } finally {
-          try {
-            reader.releaseLock();
-          } catch {
-            // Ignore lock release errors
-          }
-        }
-
-        // Stream closed cleanly; if aborted or maxReconnects === 0 stop
-        if (options.signal?.aborted || maxReconnects <= 0) {
-          return;
-        }
-        currentTicket = undefined;
-        reconnects++;
-        if (reconnects > maxReconnects) {
-          return;
-        }
-      } catch (err: any) {
-        if (options.signal?.aborted) {
-          return;
-        }
-        if (err instanceof AamarvaAuthError || err?.statusCode === 401 || err?.statusCode === 403) {
-          throw err;
-        }
-        reconnects++;
-        if (reconnects > maxReconnects) {
-          throw err;
-        }
-        currentTicket = undefined;
-      }
-
-      const backoffMs = Math.min(Math.pow(2, reconnects) * 250, 5000) + Math.floor(Math.random() * 100);
-      await new Promise((resolve) => setTimeout(resolve, backoffMs));
-    }
-  }
-
-  /**
-   * Callback subscription wrapper around streamWatchtowerEvents().
-   */
-  public subscribeWatchtowerStream(
-    onEvent: (event: WatchtowerStreamEvent) => void | Promise<void>,
-    options: {
-      ticket?: string;
-      maxReconnects?: number;
-      deduplicate?: boolean;
-      onError?: (err: unknown) => void;
-    } = {}
-  ): { close: () => void; done: Promise<void> } {
-    const controller = new AbortController();
-    const done = (async () => {
-      try {
-        for await (const ev of this.streamWatchtowerEvents({
-          ticket: options.ticket,
-          signal: controller.signal,
-          maxReconnects: options.maxReconnects,
-          deduplicate: options.deduplicate,
-        })) {
-          await onEvent(ev);
-        }
-      } catch (err) {
-        if (!controller.signal.aborted && options.onError) {
-          options.onError(err);
-        } else if (!controller.signal.aborted) {
-          throw err;
-        }
-      }
-    })();
-
-    return {
-      close: () => controller.abort(),
-      done,
-    };
-  }
-
-  /**
    * Retrieve outbound agent footprints trace.
    * Maps to GET /api/agent/footprints
    */
-  public async getFootprints(options: { agentId?: string } = {}): Promise<Footprint[]> {
-    const query: Record<string, string | undefined> = {};
-    if (options.agentId) query.agentId = options.agentId;
-
+  public async getFootprints(): Promise<Footprint[]> {
     const response = await this.http.request<Footprint[]>({
       method: 'GET',
       path: '/agent/footprints',
-      query: Object.keys(query).length > 0 ? query : undefined,
       auth: true,
     });
 
@@ -1540,139 +950,55 @@ export class Aamarva {
   }
 
   /**
-   * Retrieve tool governance policy before submitting an invocation or access request.
-   * Maps to GET /api/floor/tools/:toolId/policy
-   */
-  public async getFloorToolPolicy(toolId: string): Promise<FloorToolPolicy> {
-    if (!toolId?.trim()) {
-      throw new AamarvaValidationError('toolId is required.');
-    }
-
-    const response = await this.http.request<FloorToolPolicy>({
-      method: 'GET',
-      path: `/floor/tools/${encodeURIComponent(toolId.trim())}/policy`,
-      auth: true,
-    });
-
-    const data = (response.data && typeof response.data === 'object' ? response.data : response) as FloorToolPolicy;
-    return data;
-  }
-
-  /**
-   * Request / create an invocation or access request for a FLOOR tool.
+   * Request / create an invocation for a FLOOR tool.
    * Maps to POST /api/floor/tools/:toolId/invoke
    */
   public async createFloorInvocation(
     toolId: string,
-    options: { reason?: string; arguments?: Record<string, unknown>; requestType?: 'access' | 'execute' } = {}
+    options: { reason?: string; arguments?: Record<string, unknown> } = {}
   ): Promise<any> {
     if (!toolId?.trim()) {
       throw new AamarvaValidationError('toolId is required.');
     }
 
-    const body: Record<string, unknown> = {
-      reason: options.reason || 'Agent requested tool invocation',
-      arguments: options.arguments || {},
-    };
-    if (options.requestType) {
-      body.requestType = options.requestType;
-    }
-
     const response = await this.http.request<any>({
       method: 'POST',
       path: `/floor/tools/${encodeURIComponent(toolId.trim())}/invoke`,
-      body,
+      body: {
+        reason: options.reason || 'Agent requested tool invocation',
+        arguments: options.arguments || {},
+      },
       auth: true,
     });
 
-    const rawData = response.data;
-    const data = (rawData && typeof rawData === 'object' ? rawData : response) || {};
+    const data = (response.data && typeof response.data === 'object' ? response.data : response) || {};
     const resAny = response as any;
-    const status = String(data.status || resAny.status || '').trim().toLowerCase();
-    const requestId = data.requestId || resAny.requestId || (data.invocationId ? String(data.invocationId) : undefined);
-    const invocationId = String(data.invocationId || data.id || requestId || '');
-
-    // Handle HTTP 200 immediate direct result when no invocationId/pending request was created
-    const hasImmediateOutput =
-      status === 'completed' ||
-      status === 'executed' ||
-      (response.success === true && !invocationId && status !== 'pending' && status !== 'denied' && status !== 'rejected' && status !== 'approved');
-
-    if (hasImmediateOutput) {
-      return {
-        invocationId,
-        requestId,
-        toolId: String(data.toolId || toolId.trim()),
-        status: 'executed',
-        directResult: data.result !== undefined ? data.result : rawData,
-        message: resAny.message || data.message,
-      };
-    }
-
     return {
-      invocationId,
-      requestId: requestId ? String(requestId) : undefined,
+      invocationId: String(data.invocationId || data.id || data.requestId || ''),
+      requestId: data.requestId ? String(data.requestId) : (data.invocationId ? String(data.invocationId) : undefined),
       toolId: String(data.toolId || toolId.trim()),
-      status: status || 'pending',
+      status: String(data.status || resAny.status || 'pending').toLowerCase(),
       message: resAny.message || data.message,
     };
   }
 
   /**
-   * Poll a FLOOR access request until approved or terminal denial/timeout.
-   */
-  public async waitForFloorRequestApproval(
-    requestId: string,
-    options: { intervalMs?: number; timeoutMs?: number } = {}
-  ): Promise<FloorAccessRequestStatus> {
-    if (!requestId?.trim()) {
-      throw new AamarvaValidationError('requestId is required.');
-    }
-
-    const intervalMs = Math.max(50, options.intervalMs ?? 1000);
-    const timeoutMs = Math.max(intervalMs, options.timeoutMs ?? 30000);
-    const deadline = Date.now() + timeoutMs;
-
-    while (true) {
-      const status = await this.getFloorRequestStatus(requestId);
-      const norm = (status.status || '').trim().toLowerCase();
-
-      if (norm === 'approved' || norm === 'accepted' || norm === 'granted') {
-        return status;
-      }
-      if (['denied', 'rejected', 'revoked', 'expired'].includes(norm)) {
-        throw new AamarvaError(`FLOOR request "${requestId}" was not approved (status: ${norm}).`, {
-          code: 'FLOOR_ACCESS_DENIED',
-        });
-      }
-      if (Date.now() >= deadline) {
-        throw new AamarvaError(`Timed out waiting for FLOOR request "${requestId}" approval.`, {
-          code: 'FLOOR_APPROVAL_TIMEOUT',
-        });
-      }
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
-  }
-
-  /**
-   * Obtain execution authorization & credentials for an approved FLOOR invocation.
-   * Maps to POST /api/floor/invocations/:invocationId/execute (or /access)
+   * Obtain execution authorization for a FLOOR invocation.
+   * Maps to POST /api/floor/invocations/:invocationId/execute
    */
   public async obtainFloorExecutionAuthorization(
     invocationId: string,
-    options: { arguments?: Record<string, unknown>; reason?: string; useAccessEndpoint?: boolean } = {}
-  ): Promise<FloorExecutionAuthorization> {
+    options: { arguments?: Record<string, unknown> } = {}
+  ): Promise<any> {
     if (!invocationId?.trim()) {
       throw new AamarvaValidationError('invocationId is required.');
     }
 
-    const suffix = options.useAccessEndpoint ? 'access' : 'execute';
     const response = await this.http.request<any>({
       method: 'POST',
-      path: `/floor/invocations/${encodeURIComponent(invocationId.trim())}/${suffix}`,
+      path: `/floor/invocations/${encodeURIComponent(invocationId.trim())}/execute`,
       body: {
         arguments: options.arguments || {},
-        ...(options.reason ? { reason: options.reason } : {}),
       },
       auth: true,
     });
@@ -1690,14 +1016,6 @@ export class Aamarva {
       });
     }
 
-    if (response.data === null || typeof response.data !== 'object' || Array.isArray(response.data)) {
-      if ('data' in response) {
-        throw new AamarvaError('FLOOR authorization failed: malformed response data payload.', {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-    }
-
     const data = (response.data && typeof response.data === 'object' ? response.data : response) as any;
     const rawStatus = (data.status || (response as any).status || '').trim().toLowerCase();
 
@@ -1708,12 +1026,7 @@ export class Aamarva {
       );
     }
 
-    const hasVerifiedPlatformGrant =
-      data.verificationInfo?.verified === true &&
-      data.authConfig &&
-      typeof data.authConfig === 'object';
-
-    if (rawStatus !== 'approved' && !(rawStatus === '' && hasVerifiedPlatformGrant)) {
+    if (rawStatus !== 'approved') {
       throw new AamarvaError(
         data.message || response.message || `FLOOR authorization failed: expected status 'approved', got '${rawStatus}'.`,
         { code: 'FLOOR_EXECUTION_FAILED' }
@@ -1734,70 +1047,10 @@ export class Aamarva {
       });
     }
 
-    // Verify expiration timestamp if present
-    const expiresAt = data.expiresAt || data.grant?.expiresAt;
-    if (expiresAt && typeof expiresAt === 'string') {
-      const expMs = Date.parse(expiresAt);
-      if (!Number.isNaN(expMs) && expMs <= Date.now()) {
-        throw new AamarvaError('FLOOR execution authorization grant has expired.', {
-          code: 'FLOOR_ACCESS_DENIED',
-        });
-      }
-    }
-
-    // Check verificationInfo consistency if provided
-    if (data.verificationInfo) {
-      if (data.verificationInfo.verified !== true) {
-        throw new AamarvaError('FLOOR authorization failed: verificationInfo.verified is not true.', {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-      if (data.verificationInfo.toolId && data.toolId && data.verificationInfo.toolId !== data.toolId) {
-        throw new AamarvaError('FLOOR authorization failed: verificationInfo.toolId mismatch.', {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-      const expectedAgentId = (this.http.getTargetAgentId() || this.http.getAgentId() || '').trim();
-      if (
-        expectedAgentId &&
-        data.verificationInfo.agentId &&
-        data.verificationInfo.agentId.trim().toUpperCase() !== expectedAgentId.toUpperCase()
-      ) {
-        throw new AamarvaError('FLOOR authorization failed: verificationInfo.agentId mismatch.', {
-          code: 'FLOOR_ACCESS_DENIED',
-        });
-      }
-    }
-
-    const hasLegacyGrant = Boolean(data.grant && typeof data.grant === 'object');
-    if (!hasLegacyGrant && !hasVerifiedPlatformGrant) {
-      throw new AamarvaError('FLOOR authorization failed: grant or authConfig details missing in response.', {
+    if (!data.grant || typeof data.grant !== 'object') {
+      throw new AamarvaError('FLOOR authorization failed: grant details missing in response.', {
         code: 'FLOOR_EXECUTION_FAILED',
       });
-    }
-
-    // Map authConfig or legacy auth into unified McpExecutionAuthConfig and validate credential presence
-    let mappedAuth: McpExecutionAuthConfig | undefined;
-    if (data.authConfig && typeof data.authConfig === 'object') {
-      const ac = data.authConfig;
-      const aType = String(ac.authType || 'none').trim().toLowerCase();
-      const hdrVal = ac.headerValue ?? data.accessToken ?? data.grantToken;
-      if (aType !== 'none' && (!hdrVal || typeof hdrVal !== 'string' || !hdrVal.trim())) {
-        throw new AamarvaError(`FLOOR authorization failed: missing credential for authType "${aType}".`, {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-      mappedAuth = {
-        type: aType,
-        authType: aType,
-        headerName: ac.authHeaderName,
-        authHeaderName: ac.authHeaderName,
-        headerValue: hdrVal,
-        token: aType === 'bearer' ? hdrVal : undefined,
-        apiKey: aType === 'api_key' || aType === 'apikey' ? hdrVal : undefined,
-      };
-    } else if (data.auth || data.authentication) {
-      mappedAuth = data.auth || data.authentication;
     }
 
     return {
@@ -1805,33 +1058,19 @@ export class Aamarva {
       toolId: String(data.toolId || ''),
       status: 'approved',
       serverUrl: serverUrl.trim(),
-      auth: mappedAuth as any,
-      authConfig: data.authConfig,
-      verificationInfo: data.verificationInfo,
-      grantToken: data.grantToken,
-      accessToken: data.accessToken,
-      scope: data.scope,
-      expiresAt,
-      approvedArguments: data.approvedArguments,
-      tool: data.tool,
+      auth: data.auth || data.authentication,
       grant: data.grant,
     };
   }
 
   /**
-   * Execute a FLOOR tool via the platform's zero-trust governance sequence:
-   * Discovery -> Access evaluation -> (optional approval polling) -> Execute authorization -> External MCP invocation.
+   * Execute a FLOOR tool via the platform's 5-step zero-trust governance sequence:
+   * Discovery -> Access evaluation -> Execute authorization -> External MCP invocation -> Return result.
    */
   public async executeFloorTool(
     toolId: string,
     args: Record<string, unknown> = {},
-    options: {
-      reason?: string;
-      invocationId?: string;
-      waitForApproval?: boolean;
-      approvalTimeoutMs?: number;
-      useAccessEndpoint?: boolean;
-    } = {}
+    options: { reason?: string; invocationId?: string } = {}
   ): Promise<FloorToolInvokeResult> {
     if (!toolId?.trim()) {
       throw new AamarvaValidationError('toolId is required.');
@@ -1852,43 +1091,38 @@ export class Aamarva {
 
     let invocationId = options.invocationId;
 
-    if (!invocationId) {
+    if (!hasGrant && !invocationId) {
       const invRes = await this.createFloorInvocation(toolId.trim(), {
-        reason: options.reason || (hasGrant ? 'Authorized execution run' : 'Agent requested execution'),
+        reason: options.reason || 'Agent requested execution',
         arguments: args,
       });
 
-      if (invRes.status === 'executed' && invRes.directResult !== undefined) {
-        return {
-          status: 'executed',
-          invocationId: invRes.invocationId || undefined,
-          toolId: toolId.trim(),
-          result: invRes.directResult,
-          serverUrl: tool.serverUrl,
-        };
-      }
-
       if (invRes.status === 'pending') {
-        if (options.waitForApproval && (invRes.requestId || invRes.invocationId)) {
-          const approvedStatus = await this.waitForFloorRequestApproval(
-            invRes.requestId || invRes.invocationId,
-            { timeoutMs: options.approvalTimeoutMs }
-          );
-          invocationId = approvedStatus.invocationId || invRes.invocationId;
-        } else {
-          throw new AamarvaError(
-            `Agent is not authorized to execute tool "${toolId}". Access request ${invRes.requestId || invRes.invocationId} is pending human approval.`,
-            { code: 'FLOOR_ACCESS_DENIED' }
-          );
-        }
-      } else if (['denied', 'rejected', 'revoked', 'expired'].includes(invRes.status)) {
+        throw new AamarvaError(
+          `Agent is not authorized to execute tool "${toolId}". Access request ${invRes.requestId || invRes.invocationId} is pending human approval.`,
+          { code: 'FLOOR_ACCESS_DENIED' }
+        );
+      }
+      if (['denied', 'rejected', 'revoked', 'expired'].includes(invRes.status)) {
         throw new AamarvaError(
           `Agent access to tool "${toolId}" was denied (status: ${invRes.status}).`,
           { code: 'FLOOR_ACCESS_DENIED' }
         );
-      } else {
-        invocationId = invRes.invocationId;
       }
+      invocationId = invRes.invocationId;
+      if (!invocationId) {
+        throw new AamarvaError('FLOOR invocation creation failed to return a valid invocationId.', {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+    }
+
+    if (!invocationId) {
+      const invRes = await this.createFloorInvocation(toolId.trim(), {
+        reason: options.reason || 'Authorized execution run',
+        arguments: args,
+      });
+      invocationId = invRes.invocationId;
     }
 
     if (!invocationId) {
@@ -1897,12 +1131,8 @@ export class Aamarva {
       });
     }
 
-    // Step C & D: Obtain execution authorization & credentials from platform
-    const authDetails = await this.obtainFloorExecutionAuthorization(invocationId, {
-      arguments: args,
-      reason: options.reason,
-      useAccessEndpoint: options.useAccessEndpoint,
-    });
+    // Step C & D: Obtain execution authorization from platform
+    const authDetails = await this.obtainFloorExecutionAuthorization(invocationId, { arguments: args });
 
     if (authDetails.status !== 'approved') {
       throw new AamarvaError(`FLOOR execution denied: status is '${authDetails.status}'.`, {
@@ -1917,19 +1147,14 @@ export class Aamarva {
       );
     }
 
-    // Step E: Actual MCP tool execution over verified, SSRF-guarded connection
-    const execArgs = authDetails.approvedArguments && Object.keys(args).length === 0
-      ? authDetails.approvedArguments
-      : args;
-
+    // Step E: Actual MCP tool execution over verified connection
     const mcpResult = await invokeExternalMcpTool({
       serverUrl: authDetails.serverUrl,
       toolId: toolId.trim(),
-      args: execArgs,
-      auth: authDetails.auth as McpExecutionAuthConfig,
+      args,
+      auth: authDetails.auth,
       inputSchema: tool.inputSchema,
       fetchFn: this.http.getFetch(),
-      allowInsecureHttpForLocalhost: this.allowInsecureLocalhostMcpHttp,
     });
 
     return {
@@ -1964,10 +1189,7 @@ export class Aamarva {
       // Fall through to invocation
     }
 
-    const inv = await this.createFloorInvocation(toolId.trim(), {
-      reason,
-      requestType: 'access',
-    });
+    const inv = await this.createFloorInvocation(toolId.trim(), { reason });
     return {
       status: inv.status || 'pending',
       requestId: inv.requestId || inv.invocationId,
@@ -2008,3 +1230,5 @@ export class Aamarva {
     return (response.data as Record<string, unknown>) || (response as unknown as Record<string, unknown>);
   }
 }
+
+

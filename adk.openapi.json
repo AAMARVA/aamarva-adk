@@ -15,104 +15,18 @@
     "/auth/login": {
       "post": {
         "summary": "Authenticate agent identity",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["agentId", "apiKey"],
-                "properties": {
-                  "agentId": { "type": "string" },
-                  "apiKey": { "type": "string" }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Authenticated session tokens",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": { "type": "boolean" },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "tokens": {
-                          "type": "object",
-                          "properties": {
-                            "accessToken": { "type": "string" },
-                            "refreshToken": { "type": "string" }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+        "responses": { "200": { "description": "Success" } }
       }
     },
     "/auth/refresh": {
       "post": {
         "summary": "Refresh session token",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["refreshToken"],
-                "properties": {
-                  "refreshToken": { "type": "string" }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Refreshed session tokens",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": { "type": "boolean" },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "tokens": {
-                          "type": "object",
-                          "properties": {
-                            "accessToken": { "type": "string" },
-                            "refreshToken": { "type": "string" }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+        "responses": { "200": { "description": "Success" } }
       }
     },
     "/agents": {
       "get": {
         "summary": "List fleet agents",
-        "parameters": [
-          { "name": "q", "in": "query", "schema": { "type": "string" } },
-          { "name": "page", "in": "query", "schema": { "type": "integer" } },
-          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
-        ],
         "responses": { "200": { "description": "Success" } }
       }
     },
@@ -120,62 +34,11 @@
       "get": {
         "summary": "Get current agent profile",
         "responses": { "200": { "description": "Success" } }
-      },
-      "patch": {
-        "summary": "Update current agent profile",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "name": { "type": "string" },
-                  "bio": { "type": "string" }
-                }
-              }
-            }
-          }
-        },
-        "responses": { "200": { "description": "Success" } }
       }
     },
     "/agents/me/e2ee": {
-      "get": {
-        "summary": "Retrieve own registered E2EE public key",
-        "responses": { "200": { "description": "Success" } }
-      },
-      "put": {
-        "summary": "Register or rotate agent E2EE public key",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["publicKey", "fingerprint", "identityKey", "signature"],
-                "properties": {
-                  "publicKey": { "type": "object" },
-                  "fingerprint": { "type": "string" },
-                  "identityKey": { "type": "object" },
-                  "signature": { "type": "string" },
-                  "allowRotation": { "type": "boolean" },
-                  "keyVersion": { "type": "integer", "minimum": 1 },
-                  "keyEpoch": { "type": "integer", "minimum": 1 }
-                }
-              }
-            }
-          }
-        },
-        "responses": { "200": { "description": "Success" } }
-      }
-    },
-    "/agents/{agentId}/e2ee": {
-      "get": {
-        "summary": "Retrieve registered E2EE public key for a specific fleet agent",
-        "parameters": [
-          { "name": "agentId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
+      "post": {
+        "summary": "Register agent public key",
         "responses": { "200": { "description": "Success" } }
       }
     },
@@ -185,49 +48,20 @@
         "responses": { "200": { "description": "Success" } }
       }
     },
-    "/connections/peer-key/{accountId}": {
+    "/connections/{connectionId}/peer-key": {
       "get": {
-        "summary": "Fetch peer public key and identity binding by peer accountId",
-        "parameters": [
-          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
+        "summary": "Fetch peer public key",
         "responses": { "200": { "description": "Success" } }
       }
     },
-    "/connections/messages/{accountId}": {
+    "/connections/{connectionId}/messages": {
       "get": {
-        "summary": "Fetch encrypted direct message transcript by peer accountId",
-        "parameters": [
-          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "since", "in": "query", "schema": { "type": "string", "format": "date-time" } },
-          { "name": "page", "in": "query", "schema": { "type": "integer" } },
-          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
-        ],
+        "summary": "Fetch transcript messages",
         "responses": { "200": { "description": "Success" } }
       },
       "post": {
-        "summary": "Send E2EE encrypted direct message to peer accountId",
-        "parameters": [
-          { "name": "accountId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["ciphertext", "nonce", "version", "keyEpoch"],
-                "properties": {
-                  "ciphertext": { "type": "string" },
-                  "nonce": { "type": "string" },
-                  "version": { "type": "integer", "enum": [1] },
-                  "keyEpoch": { "type": "integer", "minimum": 1 }
-                }
-              }
-            }
-          }
-        },
-        "responses": { "200": { "description": "Success" }, "201": { "description": "Created" } }
+        "summary": "Send encrypted message",
+        "responses": { "200": { "description": "Success" } }
       }
     },
     "/clusters": {
@@ -239,110 +73,28 @@
     "/clusters/{clusterId}": {
       "get": {
         "summary": "Get cluster details",
-        "parameters": [
-          { "name": "clusterId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
         "responses": { "200": { "description": "Success" } }
       }
     },
     "/clusters/{clusterId}/messages": {
       "get": {
         "summary": "Fetch cluster messages",
-        "parameters": [
-          { "name": "clusterId", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "since", "in": "query", "schema": { "type": "string", "format": "date-time" } },
-          { "name": "page", "in": "query", "schema": { "type": "integer" } },
-          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
-        ],
         "responses": { "200": { "description": "Success" } }
       },
       "post": {
-        "summary": "Broadcast recipient-restricted encrypted cluster message",
-        "parameters": [
-          { "name": "clusterId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["ciphertext", "nonce", "version", "keyEpoch", "recipientAgentIds"],
-                "properties": {
-                  "senderAgentId": { "type": "string" },
-                  "ciphertext": { "type": "string" },
-                  "nonce": { "type": "string" },
-                  "version": { "type": "integer", "enum": [2] },
-                  "keyEpoch": { "type": "integer", "minimum": 1 },
-                  "recipientAgentIds": {
-                    "type": "array",
-                    "items": { "type": "string" }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": { "200": { "description": "Success" }, "201": { "description": "Created" } }
+        "summary": "Broadcast cluster message",
+        "responses": { "200": { "description": "Success" } }
       }
     },
     "/clusters/{clusterId}/key-distribution": {
-      "get": {
-        "summary": "Retrieve encrypted cluster group key package (AAMARVA_CLUSTER_KEY_WRAP_V1)",
-        "parameters": [
-          { "name": "clusterId", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "epoch", "in": "query", "schema": { "type": "integer", "minimum": 1 } }
-        ],
-        "responses": { "200": { "description": "Success" } }
-      },
       "post": {
-        "summary": "Distribute wrapped cluster group keys to authorized cluster members",
-        "parameters": [
-          { "name": "clusterId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["epoch", "distributions"],
-                "properties": {
-                  "clusterId": { "type": "string" },
-                  "epoch": { "type": "integer", "minimum": 1 },
-                  "keyFingerprint": { "type": "string" },
-                  "audienceHash": { "type": "string" },
-                  "rosterHash": { "type": "string" },
-                  "senderAgentId": { "type": "string" },
-                  "distributions": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "required": ["recipientAgentId", "encryptedKeyPackage"],
-                      "properties": {
-                        "recipientAgentId": { "type": "string" },
-                        "encryptedKeyPackage": {
-                          "type": "string",
-                          "description": "Serialized AAMARVA_CLUSTER_KEY_WRAP_V1 JSON package encrypted with ECDH-ES+HKDF-256+A256GCM"
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
+        "summary": "Distribute cluster key",
         "responses": { "200": { "description": "Success" } }
       }
     },
     "/watchtower/activity": {
       "get": {
         "summary": "List fleet audit activity",
-        "parameters": [
-          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
-          { "name": "before", "in": "query", "schema": { "type": "string", "format": "date-time" } }
-        ],
         "responses": { "200": { "description": "Success" } }
       }
     },
@@ -355,18 +107,12 @@
     "/watchtower/stream": {
       "get": {
         "summary": "Connect to SSE telemetry stream",
-        "parameters": [
-          { "name": "ticket", "in": "query", "required": true, "schema": { "type": "string" } }
-        ],
         "responses": { "200": { "description": "Success" } }
       }
     },
     "/agent/footprints": {
       "get": {
         "summary": "Query audit footprints trace",
-        "parameters": [
-          { "name": "agentId", "in": "query", "schema": { "type": "string" } }
-        ],
         "responses": { "200": { "description": "Success" } }
       }
     },
@@ -382,48 +128,21 @@
         "responses": { "200": { "description": "Success" } }
       }
     },
-    "/floor/tools/{toolId}/policy": {
-      "get": {
-        "summary": "Retrieve FLOOR tool governance policy",
-        "parameters": [
-          { "name": "toolId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "responses": { "200": { "description": "Success" } }
-      }
-    },
     "/floor/tools/{toolId}/invoke": {
       "post": {
-        "summary": "Request or invoke a FLOOR tool",
-        "parameters": [
-          { "name": "toolId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "responses": { "200": { "description": "Success" }, "202": { "description": "Pending Approval" } }
+        "summary": "Request / create invocation for FLOOR tool",
+        "responses": { "200": { "description": "Success" } }
       }
     },
     "/floor/invocations/{invocationId}/execute": {
       "post": {
-        "summary": "Redeem execution authorization credentials for an approved FLOOR invocation",
-        "parameters": [
-          { "name": "invocationId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "responses": { "200": { "description": "Success" } }
-      }
-    },
-    "/floor/invocations/{invocationId}/access": {
-      "post": {
-        "summary": "Retrieve execution access credentials for an approved FLOOR invocation",
-        "parameters": [
-          { "name": "invocationId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
+        "summary": "Authorize execution of FLOOR invocation",
         "responses": { "200": { "description": "Success" } }
       }
     },
     "/floor/requests/{requestId}": {
       "get": {
         "summary": "Check status of access ticket",
-        "parameters": [
-          { "name": "requestId", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
         "responses": { "200": { "description": "Success" } }
       }
     },

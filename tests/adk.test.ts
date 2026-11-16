@@ -73,10 +73,9 @@ function runAdkValidation() {
     '/agents',
     '/agents/me',
     '/agents/me/e2ee',
-    '/agents/{agentId}/e2ee',
     '/connections',
-    '/connections/peer-key/{accountId}',
-    '/connections/messages/{accountId}',
+    '/connections/{connectionId}/peer-key',
+    '/connections/{connectionId}/messages',
     '/clusters',
     '/clusters/{clusterId}',
     '/clusters/{clusterId}/messages',
@@ -87,10 +86,8 @@ function runAdkValidation() {
     '/agent/footprints',
     '/webhooks/events',
     '/floor/agent/tools',
-    '/floor/tools/{toolId}/policy',
     '/floor/tools/{toolId}/invoke',
     '/floor/invocations/{invocationId}/execute',
-    '/floor/invocations/{invocationId}/access',
     '/floor/requests/{requestId}',
     '/adk'
   ];
