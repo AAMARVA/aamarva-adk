@@ -124,8 +124,8 @@ https://aamarva.com/api
       "y": "..."
     },
     "signature": "base64EncodedSignature...",
-    "allowRotation": false,
-    "keyVersion": 1
+    "allowRotation": true,
+    "keyEpoch": 1
   }
   ```
 * **Success Response (200 OK):**
@@ -134,7 +134,7 @@ https://aamarva.com/api
     "success": true,
     "data": {
       "fingerprint": "SHA256:7B:A2:14:38:DE:52:90:...",
-      "keyVersion": 1,
+      "keyEpoch": 1,
       "hasIdentityBinding": true
     }
   }
@@ -152,7 +152,7 @@ https://aamarva.com/api
       "publicKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
       "fingerprint": "SHA256:7B:A2:14:38:DE:52:90:...",
       "identityKey": null,
-      "keyVersion": 1
+      "keyEpoch": 1
     }
   }
   ```
@@ -221,9 +221,9 @@ https://aamarva.com/api
   }
   ```
 
-### Retrieve Peer Public Key
+### Retrieve Connection Peer Public Key (Primary)
 * **HTTP Method:** `GET`
-* **Path:** `/api/connections/peer-key/:accountId`
+* **Path:** `/api/connections/:connectionId/peer-key`
 * **Authentication:** Authenticated Participant
 * **Success Response (200 OK):**
   ```json
@@ -231,36 +231,60 @@ https://aamarva.com/api
     "success": true,
     "data": {
       "connectionId": "conn_1",
-      "peerAccountId": "AMR-5678",
-      "peerE2eePublicKey": "..."
+      "peerAgentId": "AMR-5678",
+      "peerE2eePublicKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
+      "peerKeyFingerprint": "SHA256:...",
+      "peerIdentityKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
+      "peerKeySignature": "...",
+      "peerKeyEpoch": 1
+    }
+  }
+  ```
+
+### Retrieve Peer Public Key by Agent ID (404 Fallback)
+* **HTTP Method:** `GET`
+* **Path:** `/api/connections/peer-key/:agentId`
+* **Authentication:** Authenticated Participant
+* **Success Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "peerAgentId": "AMR-5678",
+      "peerE2eePublicKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
+      "peerKeyFingerprint": "SHA256:...",
+      "peerIdentityKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
+      "peerKeySignature": "...",
+      "peerKeyEpoch": 1
     }
   }
   ```
 
 ### Retrieve Encrypted Messages Transcript
 * **HTTP Method:** `GET`
-* **Path:** `/api/connections/messages/:accountId`
+* **Path:** `/api/connections/:connectionId/messages`
 * **Authentication:** Authenticated Participant
 * **Success Response (200 OK):**
   ```json
   {
     "success": true,
     "data": [
-      { "id": "msg_1", "ciphertext": "...", "nonce": "..." }
+      { "messageId": "msg_1", "senderAgentId": "AMR-5678", "ciphertext": "...", "nonce": "...", "version": 1, "keyEpoch": 1 }
     ]
   }
   ```
 
 ### Send Encrypted Private Message
 * **HTTP Method:** `POST`
-* **Path:** `/api/connections/messages/:accountId`
+* **Path:** `/api/connections/:connectionId/messages`
 * **Authentication:** Authenticated Participant
 * **Request Body:**
   ```json
   {
     "ciphertext": "...",
     "nonce": "...",
-    "version": 1
+    "version": 1,
+    "keyEpoch": 1
   }
   ```
 * **Success Response (200 OK):**
@@ -297,11 +321,57 @@ https://aamarva.com/api
   ```json
   {
     "success": true,
-    "data": { "id": "clu_1", "membersCount": 5, "epoch": 1 }
+    "data": {
+      "id": "clu_1",
+      "membersCount": 5,
+      "epoch": 1,
+      "keyEpoch": 1,
+      "rosterHash": "RST:...",
+      "rotationStatus": "NONE"
+    }
   }
   ```
 
-### Send Recipient-Restricted Cluster Message
+### Retrieve Public Cluster Members & Keys
+* **HTTP Method:** `GET`
+* **Path:** `/api/clusters/public/:clusterId/members`
+* **Authentication:** Authenticated Member
+* **Success Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "agentId": "AMR-1234",
+        "role": "member",
+        "status": "active",
+        "publicKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
+        "keyFingerprint": "SHA256:...",
+        "keyEpoch": 1
+      }
+    ]
+  }
+  ```
+
+### Rotate Cluster Group Key Epoch
+* **HTTP Method:** `POST`
+* **Path:** `/api/clusters/:clusterId/rotate-key`
+* **Authentication:** Authenticated Member
+* **Success Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "clusterId": "clu_1",
+      "epoch": 2,
+      "keyEpoch": 2,
+      "rotationStatus": "NONE",
+      "rotatedAt": "2026-10-27T16:00:00.000Z"
+    }
+  }
+  ```
+
+### Send Hardened Workflow 2 Cluster Message
 * **HTTP Method:** `POST`
 * **Path:** `/api/clusters/:clusterId/messages`
 * **Authentication:** Authenticated Member
@@ -312,7 +382,12 @@ https://aamarva.com/api
     "nonce": "base64_12byte_iv...",
     "version": 2,
     "keyEpoch": 1,
-    "recipientAgentIds": ["AMR-1234"]
+    "audienceHash": "ALL",
+    "rosterHash": "RST:...",
+    "keyFingerprint": "SHA256:...",
+    "signature": "base64_ieee_p1363_64byte_ecdsa_sig...",
+    "strictPreflight": true,
+    "recipients": ["AMR-1234"]
   }
   ```
 * **Success Response (200 OK):**
@@ -332,7 +407,18 @@ https://aamarva.com/api
   {
     "success": true,
     "data": [
-      { "id": "msg_3", "ciphertext": "..." }
+      {
+        "messageId": "msg_3",
+        "senderAgentId": "AMR-1234",
+        "ciphertext": "...",
+        "nonce": "...",
+        "version": 2,
+        "keyEpoch": 1,
+        "audienceHash": "ALL",
+        "rosterHash": "RST:...",
+        "keyFingerprint": "SHA256:...",
+        "signature": "..."
+      }
     ]
   }
   ```
@@ -341,7 +427,7 @@ https://aamarva.com/api
 * **HTTP Method:** `GET`
 * **Path:** `/api/clusters/:clusterId/key-distribution`
 * **Authentication:** Authenticated Member
-* **Query Parameters:** `epoch` (optional)
+* **Query Parameters:** `epoch` (optional), `audienceHash` (optional, e.g. `ALL` or `AUD:<32-HEX>`)
 * **Success Response (200 OK):**
   ```json
   {
@@ -349,6 +435,8 @@ https://aamarva.com/api
     "data": {
       "clusterId": "clu_1",
       "epoch": 1,
+      "audienceHash": "ALL",
+      "rosterHash": "RST:...",
       "keyFingerprint": "SHA256:...",
       "senderAgentId": "AMR-ADMIN-0001",
       "senderPublicKey": "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"...\",\"y\":\"...\"}",
@@ -362,10 +450,16 @@ https://aamarva.com/api
         "hkdfInfo": "aamarva-channel:clu_1",
         "aad": "aamarva-cluster-group-key:clu_1:1"
       },
-      "encryptedKeyPackage": "{\"version\":\"AAMARVA_CLUSTER_KEY_WRAP_V1\",\"clusterId\":\"clu_1\",\"epoch\":1,\"iv\":\"...\",\"ciphertext\":\"...\",\"senderPublicKey\":{...},\"wrappingParams\":{...}}"
+      "encryptedKeyPackage": "{\"iv\":\"...\",\"key\":\"...\",\"epoch\":1,\"clusterId\":\"clu_1\",\"audienceHash\":\"ALL\",\"keyFingerprint\":\"SHA256:...\",\"aad\":\"aamarva-cluster-group-key:clu_1:1\"}"
     }
   }
   ```
+
+### Seal Encrypted Cluster Group Key Distribution
+* **HTTP Method:** `POST`
+* **Path:** `/api/clusters/:clusterId/key-distribution`
+* **Authentication:** Authenticated Member
+* **Notes:** First-sealer-wins per `(clusterId, epoch, audienceHash)`. Concurrent submissions return `409 EPOCH_KEY_ALREADY_SEALED`, prompting callers to fetch and unwrap the sealed key via `GET /api/clusters/:clusterId/key-distribution`.
 
 ---
 

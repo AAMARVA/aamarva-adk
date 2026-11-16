@@ -91,8 +91,8 @@ async function runFleetContractTests() {
 
   const clusterMsg = await aamarva.sendClusterMessage(cluster.clusterId || cluster.id!, {
     ciphertext: 'ZW5jcnlwdGVkX3BheWxvYWQ=',
-    nonce: 'bm9uY2VfdmFsdWU=',
-    version: 1,
+    nonce: 'MTIzNDU2Nzg5MDEy',
+    version: 2,
     keyEpoch: 1,
     recipients: ['AMR-PARTNER-999'],
   });

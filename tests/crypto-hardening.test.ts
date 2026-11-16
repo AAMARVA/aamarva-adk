@@ -4,12 +4,29 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {
+  WORKFLOW_HKDF_SALT,
   generateECKeyPair,
   exportPublicKeyJWK,
+  normalizeAgentId,
+  canonicalMemberSet,
   computeKeyFingerprint,
+  computeGroupKeyFingerprint,
+  computeRosterHash,
+  computeAudienceHash,
   verifyPeerKey,
+  createDirectMessageAadV1,
   encryptMessageWithKeys,
   decryptMessageWithKeys,
+  generateClusterKey,
+  createClusterWrapAadV2,
+  createClusterMessageAadV2,
+  createClusterSigningPayloadV2,
+  signClusterMessageV2,
+  verifyClusterMessageSignatureV2,
+  wrapClusterKeyForRecipient,
+  unwrapClusterKey,
+  encryptClusterMessagePayload,
+  decryptClusterMessagePayload,
   InMemoryKeyStore,
   FileSystemKeyStore,
   setKeyStore,
@@ -384,6 +401,231 @@ async function runCryptoHardeningTests() {
   );
   assert.strictEqual(capturedBody.content, undefined);
   console.log('✓ Plaintext leak tests passed: original plaintext NEVER present in request payloads.');
+
+  // Test 13: Workflow 1 HKDF-SHA256 & Canonical AAD Exact Wire Verification
+  assert.strictEqual(WORKFLOW_HKDF_SALT, 'aamarva-e2ee-channel-v1');
+  const wf1ConnId = 'conn_wf1_exact_001';
+  const wf1Plain = 'Exact Workflow 1 wire format payload';
+  const wf1Env = encryptMessageWithKeys(
+    wf1Plain,
+    wf1ConnId,
+    aliceKeyPair.privateKey,
+    bobPubPem,
+    bobFingerprint,
+    'AMR-BOB',
+    bobIdentitySignature,
+    bobIdentityJwk,
+    1,
+    'amr-alice'
+  );
+  // Manually decrypt using raw Node crypto HKDF + canonical AAD to prove spec compliance
+  const rawSecret = crypto.diffieHellman({
+    privateKey: bobKeyPair.privateKey,
+    publicKey: crypto.createPublicKey(alicePubPem),
+  });
+  const rawAesKey = crypto.hkdfSync(
+    'sha256',
+    rawSecret,
+    Buffer.from('aamarva-e2ee-channel-v1', 'utf8'),
+    Buffer.from(`aamarva-channel:${wf1ConnId}`, 'utf8'),
+    32
+  );
+  const rawIv = Buffer.from(wf1Env.nonce, 'base64');
+  const rawCombined = Buffer.from(wf1Env.ciphertext, 'base64');
+  const rawDecipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(rawAesKey), rawIv);
+  rawDecipher.setAAD(Buffer.from(createDirectMessageAadV1(wf1ConnId, 'AMR-ALICE'), 'utf8'));
+  rawDecipher.setAuthTag(rawCombined.subarray(rawCombined.length - 16));
+  const manualPlain = Buffer.concat([
+    rawDecipher.update(rawCombined.subarray(0, rawCombined.length - 16)),
+    rawDecipher.final(),
+  ]).toString('utf8');
+  assert.strictEqual(manualPlain, wf1Plain);
+
+  // Mismatched senderAgentId in Workflow 1 AAD MUST fail
+  assert.throws(
+    () =>
+      decryptMessageWithKeys(
+        wf1Env,
+        wf1ConnId,
+        bobKeyPair.privateKey,
+        alicePubPem,
+        aliceFingerprint,
+        'AMR-ALICE',
+        aliceIdentitySignature,
+        aliceIdentityJwk,
+        'AMR-EVE'
+      ),
+    (err: any) => err?.code === 'MESSAGE_DECRYPTION_FAILED'
+  );
+  console.log('✓ Workflow 1 HKDF-SHA256 + canonical AAD exact wire verification passed.');
+
+  // Test 14: Workflow 2 Audience Hash, Roster Hash, Group Key Wrap/Unwrap & IEEE P1363 Signing
+  assert.strictEqual(normalizeAgentId('  amr-alpha-01 '), 'AMR-ALPHA-01');
+  assert.deepStrictEqual(
+    canonicalMemberSet(['amr-b', 'AMR-A', 'amr-b', ' AMR-C ']),
+    ['AMR-A', 'AMR-B', 'AMR-C']
+  );
+
+  const roster1 = computeRosterHash(['AMR-B', 'AMR-A', 'AMR-C']);
+  const roster2 = computeRosterHash(['amr-c', 'amr-a', 'amr-b', 'AMR-A']);
+  assert.ok(/^RST:[0-9A-F]{32}$/.test(roster1), 'Roster hash must match RST:<32-HEX>');
+  assert.strictEqual(roster1, roster2, 'Roster hash must be order-independent and canonical');
+
+  // Audience ALL vs targeted AUD:<32-HEX>
+  const activeRoster = ['AMR-MASTER', 'AMR-ALICE', 'AMR-BOB'];
+  assert.strictEqual(computeAudienceHash([], activeRoster), 'ALL');
+  assert.strictEqual(computeAudienceHash(['AMR-BOB', 'AMR-MASTER', 'AMR-ALICE'], activeRoster), 'ALL');
+  const audSub1 = computeAudienceHash(['AMR-BOB', 'AMR-ALICE'], activeRoster);
+  const audSub2 = computeAudienceHash(['amr-alice', 'amr-bob'], activeRoster);
+  assert.ok(/^AUD:[0-9A-F]{32}$/.test(audSub1), 'Subgroup audience hash must match AUD:<32-HEX>');
+  assert.strictEqual(audSub1, audSub2, 'Audience hash must be order-independent and canonical');
+
+  assert.strictEqual(
+    createClusterWrapAadV2('clu_1', 2, 'ALL'),
+    'aamarva-cluster-group-key:clu_1:2'
+  );
+  assert.strictEqual(
+    createClusterWrapAadV2('clu_1', 2, audSub1),
+    `aamarva-cluster-group-key:clu_1:2:${audSub1}`
+  );
+  assert.strictEqual(
+    createClusterMessageAadV2('clu_1', 'amr-alice', 2, 'ALL'),
+    'AAMARVA:E2EE:v2:clu_1:AMR-ALICE:2'
+  );
+  assert.strictEqual(
+    createClusterMessageAadV2('clu_1', 'amr-alice', 2, audSub1),
+    `AAMARVA:E2EE:v2:clu_1:AMR-ALICE:2:${audSub1}`
+  );
+
+  // Wrap & Unwrap subgroup key + cross-audience rejection + fingerprint mismatch check
+  const clusterSymKey = generateClusterKey();
+  const groupFp = computeGroupKeyFingerprint(clusterSymKey);
+  assert.ok(/^SHA256:([0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(groupFp));
+
+  const wrappedSub = wrapClusterKeyForRecipient(clusterSymKey, bobPubPem, aliceKeyPair.privateKey, {
+    clusterId: 'clu_1',
+    epoch: 2,
+    audienceHash: audSub1,
+    rosterHash: roster1,
+    keyFingerprint: groupFp,
+    senderAgentId: 'AMR-ALICE',
+    recipientAgentId: 'AMR-BOB',
+  });
+  const unwrappedSub = unwrapClusterKey(
+    wrappedSub.encryptedKeyPackage,
+    wrappedSub.nonce,
+    bobKeyPair.privateKey,
+    alicePubPem,
+    {
+      clusterId: 'clu_1',
+      epoch: 2,
+      audienceHash: audSub1,
+      expectedKeyFingerprint: groupFp,
+    }
+  );
+  assert.deepStrictEqual(unwrappedSub, clusterSymKey);
+
+  // Wrong expectedKeyFingerprint fails
+  assert.throws(
+    () =>
+      unwrapClusterKey(wrappedSub.encryptedKeyPackage, wrappedSub.nonce, bobKeyPair.privateKey, alicePubPem, {
+        clusterId: 'clu_1',
+        epoch: 2,
+        audienceHash: audSub1,
+        expectedKeyFingerprint: 'SHA256:' + Array(32).fill('00').join(':'),
+      }),
+    (err: any) => err?.code === 'CLUSTER_KEY_FINGERPRINT_MISMATCH'
+  );
+
+  // Tampering wrapped AAD metadata rejects unwrap
+  const tamperedPkg = { ...wrappedSub.encryptedKeyPackage, aad: 'aamarva-cluster-group-key:clu_1:2' };
+  assert.throws(
+    () =>
+      unwrapClusterKey(tamperedPkg, wrappedSub.nonce, bobKeyPair.privateKey, alicePubPem, {
+        clusterId: 'clu_1',
+        epoch: 2,
+        audienceHash: 'ALL',
+      }),
+    (err: any) => err?.code === 'CLUSTER_KEY_UNWRAP_FAILED'
+  );
+
+  // Message encrypt/decrypt + IEEE P1363 64-byte WebCrypto-compatible ECDSA verification
+  const clEnc = encryptClusterMessagePayload('Subgroup directive 42', clusterSymKey, 'clu_1', 2, audSub1, 'AMR-ALICE');
+  assert.strictEqual(
+    decryptClusterMessagePayload(clEnc.ciphertext, clEnc.nonce, clusterSymKey, 'clu_1', 2, 2, audSub1, 'AMR-ALICE'),
+    'Subgroup directive 42'
+  );
+  assert.throws(
+    () => decryptClusterMessagePayload(clEnc.ciphertext, clEnc.nonce, clusterSymKey, 'clu_1', 2, 2, 'ALL', 'AMR-ALICE'),
+    (err: any) => err?.code === 'CLUSTER_MESSAGE_DECRYPTION_FAILED'
+  );
+
+  const signingParams = {
+    clusterId: 'clu_1',
+    keyEpoch: 2,
+    senderAgentId: 'AMR-ALICE',
+    audienceHash: audSub1,
+    rosterHash: roster1,
+    sequence: 7,
+    keyFingerprint: groupFp,
+    nonce: clEnc.nonce,
+    ciphertext: clEnc.ciphertext,
+  };
+  const p1363Sig = signClusterMessageV2(aliceKeyPair.privateKey, signingParams);
+  assert.strictEqual(Buffer.from(p1363Sig, 'base64').length, 64, 'ECDSA v2 signature must be raw 64-byte IEEE P1363');
+  assert.strictEqual(verifyClusterMessageSignatureV2(alicePubPem, signingParams, p1363Sig), true);
+  assert.strictEqual(
+    verifyClusterMessageSignatureV2(alicePubPem, { ...signingParams, sequence: 8 }, p1363Sig),
+    false,
+    'Tampered sequence must invalidate ECDSA signature'
+  );
+
+  // Cross-verify raw 64-byte IEEE P1363 signature with WebCrypto subtle.verify
+  const subtleKey = await globalThis.crypto.subtle.importKey(
+    'jwk',
+    aliceIdentityJwk as any,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['verify']
+  );
+  const subtleOk = await globalThis.crypto.subtle.verify(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    subtleKey,
+    Buffer.from(p1363Sig, 'base64'),
+    Buffer.from(createClusterSigningPayloadV2(signingParams), 'utf8')
+  );
+  assert.strictEqual(subtleOk, true, 'WebCrypto subtle.verify must accept 64-byte IEEE P1363 signature');
+
+  // Epoch-archived identity key isolation + active key fallback
+  const epochDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aamarva-epoch-'));
+  const epochStore = new FileSystemKeyStore(epochDir);
+  setKeyStore(epochStore);
+  const kpEp1 = generateECKeyPair();
+  const kpEp2 = generateECKeyPair();
+  epochStore.savePrivateKey(kpEp1.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), 'AMR-EPOCH-TEST_epoch_1');
+  epochStore.savePrivateKey(kpEp2.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), 'AMR-EPOCH-TEST_epoch_2');
+  const ep1 = getLocalIdentityKeyPair('AMR-EPOCH-TEST', 1);
+  const ep2 = getLocalIdentityKeyPair('AMR-EPOCH-TEST', 2);
+  const epActive = getLocalIdentityKeyPair('AMR-EPOCH-TEST', 99); // unarchived epoch falls back to active key
+  assert.strictEqual(
+    computeKeyFingerprint(exportPublicKeyJWK(ep1.publicKey)),
+    computeKeyFingerprint(exportPublicKeyJWK(kpEp1.publicKey))
+  );
+  assert.strictEqual(
+    computeKeyFingerprint(exportPublicKeyJWK(ep2.publicKey)),
+    computeKeyFingerprint(exportPublicKeyJWK(kpEp2.publicKey))
+  );
+  assert.notStrictEqual(
+    computeKeyFingerprint(exportPublicKeyJWK(ep1.publicKey)),
+    computeKeyFingerprint(exportPublicKeyJWK(ep2.publicKey))
+  );
+  assert.strictEqual(
+    computeKeyFingerprint(exportPublicKeyJWK(epActive.publicKey)),
+    computeKeyFingerprint(exportPublicKeyJWK(getLocalIdentityKeyPair('AMR-EPOCH-TEST').publicKey))
+  );
+  resetLocalIdentityKeyPair();
+  fs.rmSync(epochDir, { recursive: true, force: true });
+  console.log('✓ Workflow 2 hashes, subgroup key wrapping, IEEE P1363 signing & epoch key archival verified.');
 
   console.log('--- ALL CRYPTO HARDENING TESTS PASSED ---');
 }

@@ -137,6 +137,7 @@ export interface LoginOptions {
 export interface UpdateProfileOptions {
   name?: string;
   bio?: string;
+  avatar?: string;
 }
 
 export interface ECJWK {
@@ -182,6 +183,34 @@ export interface PeerKeyInfo {
   agentId?: string;
 }
 
+export interface ClusterMember {
+  agentId: string;
+  name?: string;
+  role?: string;
+  status?: string;
+  isActive?: boolean;
+  publicKey?: ECJWK | string;
+  identityKey?: ECJWK | string;
+  keyFingerprint?: string;
+  keySignature?: string;
+  keyEpoch?: number;
+}
+
+export interface RotateClusterKeyOptions {
+  reason?: string;
+  reasonCode?: string;
+  currentEpoch?: number;
+}
+
+export interface RotateClusterKeyResponse {
+  clusterId: string;
+  epoch: number;
+  keyEpoch: number;
+  rotationStatus?: string;
+  rotatedAt?: string;
+  message?: string;
+}
+
 export interface Cluster {
   id?: string;
   clusterId?: string;
@@ -191,6 +220,11 @@ export interface Cluster {
   ownerAgentId?: string;
   membersCount?: number;
   members?: string[];
+  epoch?: number;
+  keyEpoch?: number;
+  keyFingerprint?: string;
+  rosterHash?: string;
+  rotationStatus?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -203,7 +237,13 @@ export interface ClusterMessage {
   nonce: string;
   version?: number;
   keyEpoch?: number;
+  audienceHash?: string;
+  rosterHash?: string;
+  keyFingerprint?: string;
+  signature?: string;
+  sequence?: string | number;
   recipients?: string[];
+  recipientAgentIds?: string[];
   createdAt: string;
 }
 
@@ -223,7 +263,14 @@ export interface SendClusterMessageOptions {
   nonce: string;
   version?: number;
   keyEpoch?: number;
+  audienceHash?: string;
+  rosterHash?: string;
+  keyFingerprint?: string;
+  signature?: string;
+  strictPreflight?: boolean;
+  sequence?: string | number;
   recipients?: string[];
+  recipientAgentIds?: string[];
   senderAgentId?: string;
 }
 
@@ -261,13 +308,23 @@ export interface FloorTool {
     required?: string[];
     [key: string]: unknown;
   };
-  accessStatus: 'authorized' | 'pending' | 'required' | 'revoked' | string;
+  accessStatus: 'authorized' | 'unauthorized' | 'pending' | 'required' | 'revoked' | string;
+  requestId?: string;
 }
 
 export interface FloorToolInvokeOptions {
-  arguments: Record<string, unknown>;
+  arguments?: Record<string, unknown>;
   reason?: string;
   requestType?: 'execute' | 'access_request' | string;
+}
+
+export interface ExecuteFloorToolOptions {
+  reason?: string;
+  invocationId?: string;
+  requestId?: string;
+  waitForApproval?: boolean;
+  pollIntervalMs?: number;
+  pollTimeoutMs?: number;
 }
 
 export interface FloorToolInvokeResult {
@@ -294,6 +351,9 @@ export interface FloorExecutionAuthorization {
   toolId: string;
   status: 'approved' | string;
   serverUrl: string;
+  agentId?: string;
+  expiresAt?: string;
+  approvedArguments?: Record<string, unknown>;
   auth?: {
     type?: string;
     token?: string;
@@ -305,6 +365,7 @@ export interface FloorExecutionAuthorization {
   };
   grant?: {
     id?: string;
+    grantId?: string;
     agentId?: string;
     toolId?: string;
     status?: string;
@@ -316,7 +377,7 @@ export interface FloorExecutionAuthorization {
 
 export interface FloorAccessRequestStatus {
   requestId: string;
-  status: 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired' | string;
+  status: 'pending' | 'approved' | 'denied' | 'rejected' | 'revoked' | 'expired' | string;
   toolId?: string;
   invocationId?: string;
   agentId?: string;
@@ -331,11 +392,20 @@ export interface GetAgentsOptions {
   limit?: number;
 }
 
+export interface GetConnectionsOptions {
+  page?: number;
+  limit?: number;
+}
+
+export interface GetClusterKeyDistributionOptions {
+  epoch?: number;
+  audienceHash?: string;
+}
+
 export interface AgentE2eeKeyResponse {
   publicKey?: ECJWK | string;
   fingerprint?: string;
   identityKey?: ECJWK | string;
-  keyVersion?: number;
   keyEpoch?: number;
   allowRotation?: boolean;
   [key: string]: unknown;
@@ -344,11 +414,17 @@ export interface AgentE2eeKeyResponse {
 export interface ClusterKeyDistributionResponse {
   clusterId?: string;
   epoch?: number;
+  audienceHash?: string;
+  rosterHash?: string;
   keyFingerprint?: string;
   senderAgentId?: string;
+  senderPublicKey?: ECJWK | string;
   recipientAgentId?: string;
+  recipientKeyFingerprint?: string;
+  recipientKeyEpoch?: number;
+  recipientKeyMismatch?: boolean;
   wrappingParams?: Record<string, unknown>;
-  encryptedKeyPackage?: string;
+  encryptedKeyPackage?: string | Record<string, unknown>;
   [key: string]: unknown;
 }
 

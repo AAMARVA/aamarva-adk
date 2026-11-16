@@ -42,6 +42,19 @@ class Message:
     raw: Optional[str] = None
 
 @dataclass
+class ClusterMember:
+    agentId: str
+    name: Optional[str] = None
+    role: Optional[str] = None
+    status: Optional[str] = None
+    isActive: Optional[bool] = None
+    publicKey: Optional[Any] = None
+    identityKey: Optional[Any] = None
+    keyFingerprint: Optional[str] = None
+    keyEpoch: Optional[int] = None
+    keySignature: Optional[str] = None
+
+@dataclass
 class Cluster:
     name: str
     id: Optional[str] = None
@@ -51,6 +64,11 @@ class Cluster:
     ownerAgentId: Optional[str] = None
     membersCount: Optional[int] = None
     members: Optional[List[str]] = None
+    epoch: Optional[int] = None
+    keyEpoch: Optional[int] = None
+    keyFingerprint: Optional[str] = None
+    rosterHash: Optional[str] = None
+    rotationStatus: Optional[str] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
 
@@ -64,7 +82,13 @@ class ClusterMessage:
     createdAt: str
     version: Optional[int] = None
     keyEpoch: Optional[int] = None
+    audienceHash: Optional[str] = None
+    rosterHash: Optional[str] = None
+    keyFingerprint: Optional[str] = None
+    signature: Optional[str] = None
+    sequence: Optional[Union[str, int]] = None
     recipients: Optional[List[str]] = None
+    recipientAgentIds: Optional[List[str]] = None
 
 @dataclass
 class WatchtowerActivity:
@@ -89,6 +113,7 @@ class FloorTool:
     description: str
     inputSchema: Dict[str, Any]
     accessStatus: str
+    requestId: Optional[str] = None
 
 @dataclass
 class FloorToolInvokeResult:
@@ -105,6 +130,7 @@ class FloorAccessRequestStatus:
     requestId: str
     status: str
     toolId: Optional[str] = None
+    invocationId: Optional[str] = None
     agentId: Optional[str] = None
     reason: Optional[str] = None
     createdAt: Optional[str] = None

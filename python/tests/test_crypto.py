@@ -17,6 +17,7 @@ except ImportError:
 
 from aamarva import Aamarva, AamarvaConnection
 from aamarva.crypto import (
+    WORKFLOW_HKDF_SALT,
     export_public_key_jwk,
     sign_identity_binding,
     KeyStore,
@@ -27,12 +28,28 @@ from aamarva.crypto import (
     reset_local_identity_key,
     get_local_identity_key,
     get_local_public_key_pem,
+    normalize_agent_id,
+    canonical_member_set,
     compute_key_fingerprint,
+    compute_group_key_fingerprint,
+    compute_roster_hash,
+    compute_audience_hash,
     verify_peer_key,
+    create_direct_message_aad_v1,
     encrypt_message_with_keys,
     decrypt_message_with_keys,
     create_identity_binding_string,
     verify_identity_binding,
+    generate_cluster_key,
+    create_cluster_wrap_aad_v2,
+    create_cluster_message_aad_v2,
+    create_cluster_signing_payload_v2,
+    sign_cluster_message_v2,
+    verify_cluster_message_signature_v2,
+    wrap_cluster_key_for_recipient,
+    unwrap_cluster_key,
+    encrypt_cluster_message,
+    decrypt_cluster_message,
 )
 from aamarva.normalize import normalize_message
 from aamarva.errors import AamarvaError
@@ -270,7 +287,7 @@ class TestCryptoSecurityHardening(unittest.TestCase):
         client = Aamarva(agent_id="test-agent", api_key="test-key")
         captured_body = {}
 
-        def mock_req(method, path, auth=False, params=None, json_data=None):
+        def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
             if path == "/agents/me/e2ee":
                 return {"success": True}
             if path == "/connections/conn-leak/peer-key":
@@ -312,6 +329,146 @@ class TestCryptoSecurityHardening(unittest.TestCase):
         conn.send(conn_secret)
         self.assertNotIn(conn_secret, json.dumps(captured_body))
         self.assertIn("ciphertext", captured_body)
+
+    def test_workflow1_hkdf_and_sender_aad(self):
+        self.assertEqual(WORKFLOW_HKDF_SALT, "aamarva-e2ee-channel-v1")
+        env = encrypt_message_with_keys(
+            "Workflow 1 sender-bound message",
+            "conn_wf1",
+            self.alice_priv,
+            self.bob_pub_pem,
+            self.bob_fp,
+            "AMR-BOB",
+            self.bob_sig,
+            self.bob_identity_pub_jwk,
+            key_epoch=1,
+            sender_agent_id="amr-alice",
+        )
+        plain = decrypt_message_with_keys(
+            env,
+            "conn_wf1",
+            self.bob_priv,
+            self.alice_pub_pem,
+            self.alice_fp,
+            "AMR-ALICE",
+            self.alice_sig,
+            self.alice_identity_pub_jwk,
+            sender_agent_id="AMR-ALICE",
+        )
+        self.assertEqual(plain, "Workflow 1 sender-bound message")
+
+        with self.assertRaises(AamarvaError) as ctx:
+            decrypt_message_with_keys(
+                env,
+                "conn_wf1",
+                self.bob_priv,
+                self.alice_pub_pem,
+                self.alice_fp,
+                "AMR-ALICE",
+                self.alice_sig,
+                self.alice_identity_pub_jwk,
+                sender_agent_id="AMR-EVE",
+            )
+        self.assertEqual(ctx.exception.code, "MESSAGE_DECRYPTION_FAILED")
+
+    def test_workflow2_cluster_crypto_and_ieee_p1363_signing(self):
+        cluster_id = "clu_py_wf2"
+        roster = ["AMR-MASTER", "AMR-ALICE", "AMR-BOB"]
+        rst = compute_roster_hash(roster)
+        aud = compute_audience_hash(["AMR-ALICE", "AMR-BOB"], roster)
+        self.assertTrue(rst.startswith("RST:"))
+        self.assertTrue(aud.startswith("AUD:"))
+
+        group_key = generate_cluster_key()
+        group_fp = compute_group_key_fingerprint(group_key)
+        wrapped = wrap_cluster_key_for_recipient(
+            cluster_key=group_key,
+            recipient_public_key=self.bob_pub_pem,
+            sender_private_key=self.alice_priv,
+            cluster_id=cluster_id,
+            epoch=2,
+            audience_hash=aud,
+            roster_hash=rst,
+            key_fingerprint=group_fp,
+            sender_agent_id="AMR-ALICE",
+            recipient_agent_id="AMR-BOB",
+        )
+        unwrapped = unwrap_cluster_key(
+            wrapped["encryptedKeyPackage"],
+            wrapped["nonce"],
+            self.bob_priv,
+            self.alice_pub_pem,
+            cluster_id=cluster_id,
+            epoch=2,
+            audience_hash=aud,
+            expected_key_fingerprint=group_fp,
+        )
+        self.assertEqual(unwrapped, group_key)
+
+        with self.assertRaises(AamarvaError) as fp_ctx:
+            unwrap_cluster_key(
+                wrapped["encryptedKeyPackage"],
+                wrapped["nonce"],
+                self.bob_priv,
+                self.alice_pub_pem,
+                cluster_id=cluster_id,
+                epoch=2,
+                audience_hash=aud,
+                expected_key_fingerprint="SHA256:" + ":".join(["00"] * 32),
+            )
+        self.assertEqual(fp_ctx.exception.code, "CLUSTER_KEY_FINGERPRINT_MISMATCH")
+
+        enc = encrypt_cluster_message("Subgroup message", group_key, cluster_id, epoch=2, audience_hash=aud, sender_agent_id="AMR-ALICE")
+        dec = decrypt_cluster_message(enc["ciphertext"], enc["nonce"], group_key, cluster_id, epoch=2, audience_hash=aud, sender_agent_id="AMR-ALICE")
+        self.assertEqual(dec, "Subgroup message")
+
+        with self.assertRaises(AamarvaError) as aud_ctx:
+            decrypt_cluster_message(enc["ciphertext"], enc["nonce"], group_key, cluster_id, epoch=2, audience_hash="ALL", sender_agent_id="AMR-ALICE")
+        self.assertEqual(aud_ctx.exception.code, "CLUSTER_MESSAGE_DECRYPTION_FAILED")
+
+        sig = sign_cluster_message_v2(
+            self.alice_priv,
+            cluster_id,
+            2,
+            "AMR-ALICE",
+            aud,
+            rst,
+            5,
+            group_fp,
+            enc["nonce"],
+            enc["ciphertext"],
+        )
+        self.assertEqual(len(base64.b64decode(sig)), 64)
+        self.assertTrue(
+            verify_cluster_message_signature_v2(
+                self.alice_pub_pem,
+                cluster_id,
+                2,
+                "AMR-ALICE",
+                aud,
+                rst,
+                5,
+                group_fp,
+                enc["nonce"],
+                enc["ciphertext"],
+                sig,
+            )
+        )
+        self.assertFalse(
+            verify_cluster_message_signature_v2(
+                self.alice_pub_pem,
+                cluster_id,
+                2,
+                "AMR-ALICE",
+                aud,
+                rst,
+                6,
+                group_fp,
+                enc["nonce"],
+                enc["ciphertext"],
+                sig,
+            )
+        )
 
 
 if __name__ == "__main__":

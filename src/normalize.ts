@@ -181,6 +181,8 @@ export function normalizeCluster(raw: unknown): Cluster {
   }
 
   const obj = raw as Record<string, unknown>;
+  const rawEpoch = obj.epoch !== undefined ? obj.epoch : obj.keyEpoch !== undefined ? obj.keyEpoch : obj.key_epoch;
+  const epoch = typeof rawEpoch === 'number' ? rawEpoch : typeof rawEpoch === 'string' && !isNaN(Number(rawEpoch)) ? Number(rawEpoch) : undefined;
   return {
     id: String(obj.id || obj.clusterId || ''),
     clusterId: String(obj.clusterId || obj.id || ''),
@@ -189,7 +191,14 @@ export function normalizeCluster(raw: unknown): Cluster {
     ownerUserId: typeof obj.ownerUserId === 'string' ? obj.ownerUserId : typeof obj.owner_user_id === 'string' ? obj.owner_user_id : undefined,
     ownerAgentId: typeof obj.ownerAgentId === 'string' ? obj.ownerAgentId : typeof obj.owner_agent_id === 'string' ? obj.owner_agent_id : undefined,
     membersCount: typeof obj.membersCount === 'number' ? obj.membersCount : typeof obj.members_count === 'number' ? obj.members_count : undefined,
-    members: Array.isArray(obj.members) ? obj.members.map(String) : undefined,
+    members: Array.isArray(obj.members)
+      ? obj.members.map((m) => (typeof m === 'object' && m !== null ? String((m as any).agentId || (m as any).id || '') : String(m))).filter(Boolean)
+      : undefined,
+    epoch,
+    keyEpoch: epoch,
+    keyFingerprint: typeof obj.keyFingerprint === 'string' ? obj.keyFingerprint : typeof obj.key_fingerprint === 'string' ? obj.key_fingerprint : undefined,
+    rosterHash: typeof obj.rosterHash === 'string' ? obj.rosterHash : typeof obj.roster_hash === 'string' ? obj.roster_hash : undefined,
+    rotationStatus: typeof obj.rotationStatus === 'string' ? obj.rotationStatus : typeof obj.rotation_status === 'string' ? obj.rotation_status : undefined,
     createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   };
@@ -208,13 +217,15 @@ export function normalizeFloorTool(raw: unknown): FloorTool {
 
   const obj = raw as Record<string, unknown>;
   const schema = (obj.inputSchema || obj.input_schema || obj.parameters || { type: 'object' }) as Record<string, unknown>;
+  const reqId = obj.requestId || obj.request_id || obj.pendingRequestId || obj.pending_request_id;
 
   return {
     id: String(obj.id || obj.toolId || obj.tool_id || ''),
     name: String(obj.name || ''),
     description: String(obj.description || ''),
     inputSchema: typeof schema === 'object' && schema !== null ? schema : { type: 'object' },
-    accessStatus: String(obj.accessStatus || obj.access_status || obj.status || 'required'),
+    accessStatus: String(obj.accessStatus || obj.access_status || obj.status || 'required').trim().toLowerCase(),
+    ...(typeof reqId === 'string' && reqId.trim() ? { requestId: reqId.trim() } : {}),
   };
 }
 
@@ -227,10 +238,12 @@ export function normalizeFloorRequestStatus(raw: unknown): FloorAccessRequestSta
   }
 
   const obj = raw as Record<string, unknown>;
+  const invId = obj.invocationId ?? obj.invocation_id;
   return {
     requestId: String(obj.requestId || obj.request_id || obj.id || ''),
-    status: String(obj.status || 'pending'),
+    status: String(obj.status || 'pending').trim().toLowerCase(),
     toolId: typeof obj.toolId === 'string' ? obj.toolId : typeof obj.tool_id === 'string' ? obj.tool_id : undefined,
+    invocationId: typeof invId === 'string' && invId.trim() ? invId.trim() : undefined,
     agentId: typeof obj.agentId === 'string' ? obj.agentId : typeof obj.agent_id === 'string' ? obj.agent_id : undefined,
     reason: typeof obj.reason === 'string' ? obj.reason : undefined,
     createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,

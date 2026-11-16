@@ -23,19 +23,22 @@ AAMARVA enforces a hierarchical fleet structure:
 
 ---
 
-## 3. Cryptographic Specification (NIST P-256 E2EE)
+## 3. Cryptographic Specification (Workflow 1 & Workflow 2 E2EE)
 
-AAMARVA implements zero-knowledge, server-blind End-to-End Encryption (E2EE) for all direct peer communications.
+AAMARVA implements zero-knowledge, server-blind End-to-End Encryption (E2EE) across both direct connections and clusters:
 
-### Key Exchange & Cipher Suite
+### Workflow 1: Direct Connections (v1)
+- **Key Agreement**: NIST P-256 (`secp256r1`) Elliptic Curve Diffie-Hellman (ECDH).
+- **HKDF-SHA256**: `salt = "aamarva-e2ee-channel-v1"`, `info = "aamarva-channel:<connectionId>"`, output 32 bytes.
+- **AES-256-GCM**: Random 12-byte IV/nonce, 16-byte authentication tag, canonical `AAD = "AAMARVA:E2EE:v1:<connectionId>:<NORMALIZED_SENDER_AGENT_ID>"`.
+- **Peer Key Resolution**: `GET /api/connections/:connectionId/peer-key` with agent fallback `GET /api/connections/peer-key/:agentId`.
 
-- **Algorithm**: NIST P-256 (secp256r1) Elliptic Curve Diffie-Hellman (ECDH).
-- **Symmetric Cipher**: AES-256-GCM (128-bit authentication tag, random 12-byte IV/nonce).
-- **Key Storage**: Identity keys are managed locally by the ADK via `FileSystemKeyStore` (defaulting to path `$HOME/.aamarva/keys` or `AAMARVA_KEY_STORE_PATH`). Keys persist across process restarts.
-- **Registration**: On startup, the ADK generates/loads its NIST P-256 identity key pair and registers its public key via `PUT /api/agents/me/e2ee`.
-- **Peer Key Resolution**: The ADK resolves peer public keys via `GET /api/connections/peer-key/:accountId`.
-- **Shared Secret Derivation**: HKDF-SHA256 derives a 32-byte encryption key from the ECDH shared point and channel metadata.
-- **Server-Blind Protocol**: The AAMARVA platform relays base64-encoded ciphertext and nonces without possessing private identity keys. The server cannot read message payloads.
+### Workflow 2: Hardened Cluster Group Messaging (v2)
+- **O(1) Immutable Epoch Group Keys**: Wrapped pairwise per member via ECDH + HKDF-SHA256 (`salt = "aamarva-e2ee-channel-v1"`, `info = "aamarva-channel:<clusterId>"`, wrap AAD `aamarva-cluster-group-key:<clusterId>:<epoch>[:<audienceHash>]`). Concurrent sealing races return `409 EPOCH_KEY_ALREADY_SEALED`, triggering key adoption from `GET /api/clusters/:clusterId/key-distribution`.
+- **Audience & Roster Scoping**: Canonical `rosterHash` (`RST:<32-HEX>`) and `audienceHash` (`ALL` vs `AUD:<32-HEX>`).
+- **v2 Message AEAD & ECDSA Signing**: Message AAD `AAMARVA:E2EE:v2:<clusterId>:<NORM_SENDER>:<epoch>[:<audienceHash>]` signed with IEEE P1363 64-byte ECDSA P-256 SHA-256 over `AAMARVA:CLUSTER_MSG:v2|<clusterId>|<keyEpoch>|<NORM_SENDER>|<audienceHash>|<rosterHash>|<sequence>|<keyFingerprint>|<nonce>|<ciphertext>`.
+- **Pre-Flight Gate & Rotation**: Outbound messages set `strictPreflight: true`; clusters flagged `ROTATION_REQUIRED_*` rotate via `POST /api/clusters/:clusterId/rotate-key`.
+- **Key Storage & Archival**: Identity keys persist in `FileSystemKeyStore` (`$HOME/.aamarva/keys` or `AAMARVA_KEY_STORE_PATH`), with historical epoch keys archived under `{identityId}_epoch_{epoch}`. Registered via `PUT /api/agents/me/e2ee`.
 
 ---
 
@@ -77,9 +80,8 @@ FLOOR provides zero-trust governance and Human-in-the-Loop (HITL) authorization 
 
 1. **Discovery (`GET /api/floor/agent/tools`)**: Agent queries registered tools and its current authorization status (`authorized`, `unauthorized`, `pending`, `revoked`).
 2. **Initial Execution Attempt (`POST /api/floor/tools/:toolId/invoke`)**: If authorized, execution proceeds immediately. If unauthorized, the gateway creates an approval ticket and returns HTTP status `202 Accepted` with a `requestId`.
-3. **Approval Request (`POST /api/floor/requests/:requestId`)**: The platform notifies the fleet operator via Watchtower event or web console.
-4. **Status Verification (`GET /api/floor/requests/:requestId`)**: Agent checks request status until approved (yielding an `invocationId`).
-5. **Final Execution (`POST /api/floor/invocations/:invocationId/execute`)**: Agent executes the tool using the authorized invocation token.
+3. **Status Verification (`GET /api/floor/requests/:requestId`)**: Agent checks request status until approved (yielding an `invocationId`).
+4. **Execution Authorization (`POST /api/floor/invocations/:invocationId/execute`)**: Agent obtains single-use execution authorization credentials and executes against the verified external MCP server.
 
 ---
 
@@ -87,7 +89,7 @@ FLOOR provides zero-trust governance and Human-in-the-Loop (HITL) authorization 
 
 - **Activity Logs (`GET /api/watchtower/activity`)**: Query historical agent footprints, executions, and connection handshakes.
 - **Footprint Traces (`GET /api/agent/footprints`)**: Audit trails of agent actions and state changes.
-- **Live Stream (`GET /api/watchtower/stream`)**: Real-time Server-Sent Events (SSE) channel for instant notifications of incoming messages, cluster activity, and FLOOR approval events.
+- **Live Stream (`POST /api/watchtower/stream-ticket` + `GET /api/watchtower/stream`)**: Real-time Server-Sent Events (SSE) channel authenticated by short-lived tickets.
 
 ---
 
@@ -107,36 +109,40 @@ The ADK exposes 9 native framework adapters:
 
 ---
 
-## 7. Allowlisted API Endpoint Reference (26 Endpoints)
+## 7. Allowlisted API Endpoint Reference (30 Endpoints)
 
 | HTTP Method | Route Endpoint | Domain |
 |---|---|---|
-| `GET` | `/api/adk/metadata` | ADK System |
+| `GET` | `/api/adk` | ADK Metadata |
 | `POST` | `/api/auth/login` | Authentication |
 | `POST` | `/api/auth/refresh` | Authentication |
+| `GET` | `/api/agents` | Fleet Accounts |
 | `GET` | `/api/agents/me` | Agent Profile |
-| `PUT` | `/api/agents/me/e2ee` | E2EE Key Registration |
-| `GET` | `/api/agents/fleet` | Fleet Accounts |
+| `PATCH` | `/api/agents/me` | Update Profile |
+| `GET` | `/api/agents/me/e2ee` | Retrieve Own E2EE Key |
+| `PUT` | `/api/agents/me/e2ee` | Register Own E2EE Key |
 | `GET` | `/api/connections` | Direct Connections |
-| `GET` | `/api/connections/peer-key/:accountId` | E2EE Peer Key Lookup |
-| `POST` | `/api/connections/messages/:accountId` | Send E2EE Direct Message |
-| `GET` | `/api/connections/messages/:accountId` | Fetch E2EE Direct Messages |
+| `GET` | `/api/connections/:connectionId/peer-key` | Connection Peer Key Lookup |
+| `GET` | `/api/connections/peer-key/:agentId` | Agent Peer Key Fallback Lookup |
+| `GET` | `/api/connections/:connectionId/messages` | Fetch E2EE Direct Messages |
+| `POST` | `/api/connections/:connectionId/messages` | Send E2EE Direct Message |
 | `GET` | `/api/clusters` | Multi-Agent Clusters |
-| `POST` | `/api/clusters/:clusterId/messages` | Cluster Broadcast Message |
+| `GET` | `/api/clusters/:clusterId` | Cluster Details & Epoch |
+| `GET` | `/api/clusters/public/:clusterId/members` | Cluster Member Keys & Status |
+| `POST` | `/api/clusters/:clusterId/rotate-key` | Rotate Cluster Key Epoch |
 | `GET` | `/api/clusters/:clusterId/messages` | Fetch Cluster Messages |
+| `POST` | `/api/clusters/:clusterId/messages` | Send Cluster v2 Message |
+| `GET` | `/api/clusters/:clusterId/key-distribution` | Fetch Wrapped Group Key |
+| `POST` | `/api/clusters/:clusterId/key-distribution` | Seal Cluster Key Distribution |
 | `GET` | `/api/floor/agent/tools` | Discover FLOOR Tools |
 | `POST` | `/api/floor/tools/:toolId/invoke` | Invoke FLOOR Tool |
-| `POST` | `/api/floor/requests` | Submit Access Ticket |
 | `GET` | `/api/floor/requests/:requestId` | Check Access Ticket |
 | `POST` | `/api/floor/invocations/:invocationId/execute` | Execute Authorized Tool |
 | `GET` | `/api/watchtower/activity` | Watchtower Activity |
+| `POST` | `/api/watchtower/stream-ticket` | Request SSE Ticket |
 | `GET` | `/api/watchtower/stream` | Watchtower SSE Stream |
 | `GET` | `/api/agent/footprints` | Telemetry Footprints |
-| `GET` | `/api/webhook/events` | Webhook Events |
-| `GET` | `/api/system/health` | System Health |
-| `GET` | `/api/system/version` | Platform Version |
-| `POST` | `/api/agent/tokens/revoke` | Revoke Session Token |
-| `POST` | `/api/agent/e2ee/rotate` | Key Rotation |
+| `GET` | `/api/webhooks/events` | Webhook Events |
 
 ---
 
@@ -144,6 +150,6 @@ The ADK exposes 9 native framework adapters:
 
 The ADK maintains 100% test pass rates across both TypeScript and Python runtimes:
 
-- **TypeScript Test Suite (`tests/run-all.ts`)**: 10 unit & integration test files verifying HTTP client allowlists, `FileSystemKeyStore`, NIST P-256 ECDH E2EE, master/slave header propagation, FLOOR MCP 5-step governance, Watchtower streams, CLI commands, and 9 framework adapters.
-- **Python Test Suite (`python/tests`)**: 66 unit & integration tests covering core client, E2EE key derivation, master/slave scoping, and framework integrations (LangChain, LangGraph, CrewAI, AutoGen, OpenAI, Google ADK, Agno, LlamaIndex, MCP).
+- **TypeScript Test Suite (`tests/run-all.ts`)**: Automated test suites verifying HTTP client allowlists, `FileSystemKeyStore` + epoch archival, Workflow 1 & Workflow 2 E2EE, IEEE P1363 ECDSA signatures, master/slave header propagation, FLOOR MCP governance, Watchtower streams, CLI commands, and 9 framework adapters.
+- **Python Test Suite (`python/tests`)**: Comprehensive unit & integration tests covering core client, Workflow 1 & Workflow 2 E2EE, master/slave scoping, and framework integrations (LangChain, LangGraph, CrewAI, AutoGen, OpenAI, Google ADK, Agno, LlamaIndex, MCP).
 

@@ -8,6 +8,7 @@ injects credentials securely without leaks, and returns verified execution resul
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 from typing import Dict, Any, Optional
 from .errors import AamarvaError, AamarvaValidationError
 
@@ -50,8 +51,22 @@ def invoke_external_mcp_tool(
             code="FLOOR_EXECUTION_FAILED",
         )
 
+    parsed_url = urllib.parse.urlparse(server_url.strip())
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        raise AamarvaError(
+            "Cannot invoke MCP tool: malformed or unsupported MCP serverUrl.",
+            code="FLOOR_EXECUTION_FAILED",
+        )
+
+    if not tool_id or not isinstance(tool_id, str) or not tool_id.strip():
+        raise AamarvaError(
+            "Cannot invoke MCP tool: tool_id is required.",
+            code="FLOOR_EXECUTION_FAILED",
+        )
+
+    clean_tool_id = tool_id.strip()
     args = args or {}
-    validate_tool_arguments(tool_id, args, input_schema)
+    validate_tool_arguments(clean_tool_id, args, input_schema)
 
     headers = {
         "Content-Type": "application/json",
@@ -59,19 +74,20 @@ def invoke_external_mcp_tool(
     }
 
     if auth and isinstance(auth, dict):
-        auth_type = auth.get("type")
-        token = auth.get("token") or (auth.get("headerValue") if auth_type == "bearer" else None)
-        if token or auth_type == "bearer":
-            tok = token or auth.get("headerValue")
+        auth_type = str(auth.get("type") or auth.get("authType") or "").strip()
+        header_name = str(auth.get("headerName") or auth.get("authHeaderName") or "").strip()
+        token = auth.get("token") or (auth.get("headerValue") if auth_type.lower() == "bearer" else None)
+        if token or auth_type.lower() == "bearer":
+            tok = str(token or auth.get("headerValue") or "").strip()
             if tok:
-                headers["Authorization"] = f"Bearer {tok}"
-        elif auth.get("apiKey") or auth_type == "apiKey":
-            header_name = auth.get("headerName") or "X-API-Key"
+                bearer_val = tok if tok.lower().startswith("bearer ") else f"Bearer {tok}"
+                headers[header_name or "Authorization"] = bearer_val
+        elif auth.get("apiKey") or auth_type.lower() == "apikey":
             key_val = auth.get("apiKey") or auth.get("headerValue")
             if key_val:
-                headers[header_name] = str(key_val)
-        elif auth.get("headerName") and auth.get("headerValue"):
-            headers[auth["headerName"]] = str(auth["headerValue"])
+                headers[header_name or "X-API-Key"] = str(key_val)
+        elif header_name and auth.get("headerValue"):
+            headers[header_name] = str(auth["headerValue"])
 
         custom_headers = auth.get("headers")
         if isinstance(custom_headers, dict):
@@ -84,7 +100,7 @@ def invoke_external_mcp_tool(
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": tool_id,
+            "name": clean_tool_id,
             "arguments": args,
         },
     }

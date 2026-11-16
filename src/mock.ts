@@ -152,11 +152,74 @@ export function createMockDataStore(): MockDataStore {
 }
 
 export function createMockFetch(store: MockDataStore = createMockDataStore()): typeof fetch {
+  let currentAgentId = store.agents[0]?.agentId || 'AMR-1111-2222';
+
+  const ensurePeerKeyForAgent = (agentId: string) => {
+    const existing = store.e2eeKeys[`peer:${agentId}`] || store.e2eeKeys[agentId];
+    if (existing) {
+      if (existing.peerE2eePublicKey) return existing;
+      if (existing.publicKey) {
+        return {
+          peerE2eePublicKey: existing.publicKey,
+          peerKeyFingerprint: existing.fingerprint,
+          peerIdentityKey: existing.identityKey || existing.publicKey,
+          peerKeySignature: existing.signature,
+          peerKeyEpoch: existing.keyEpoch || 1,
+          peerAgentId: agentId,
+          publicKey: existing.publicKey,
+          fingerprint: existing.fingerprint,
+          identityKey: existing.identityKey || existing.publicKey,
+          signature: existing.signature,
+          keyEpoch: existing.keyEpoch || 1,
+          agentId,
+        };
+      }
+    }
+    const peerKp = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const peerJwk = exportPublicKeyJWK(peerKp.publicKey);
+    const peerFp = computeKeyFingerprint(peerJwk);
+    const peerSig = signIdentityBinding(peerKp.privateKey, agentId, peerFp);
+    const record = {
+      peerE2eePublicKey: peerJwk,
+      peerKeyFingerprint: peerFp,
+      peerIdentityKey: peerJwk,
+      peerKeySignature: peerSig,
+      peerKeyEpoch: 1,
+      peerAgentId: agentId,
+      publicKey: peerJwk,
+      fingerprint: peerFp,
+      identityKey: peerJwk,
+      signature: peerSig,
+      keyEpoch: 1,
+      agentId,
+    };
+    store.e2eeKeys[`peer:${agentId}`] = record;
+    return record;
+  };
+
   return (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const urlStr = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : (input as { url?: string })?.url || String(input));
     const url = new URL(urlStr, 'https://aamarva.com');
     const method = (init?.method || 'GET').toUpperCase();
     const pathname = url.pathname.replace('/api', '');
+
+    let targetAgentHeader = '';
+    if (init?.headers) {
+      if (typeof (init.headers as Headers).get === 'function') {
+        targetAgentHeader = (init.headers as Headers).get('x-target-agent-id') || '';
+      } else if (Array.isArray(init.headers)) {
+        const found = init.headers.find(([k]) => k.toLowerCase() === 'x-target-agent-id');
+        if (found) targetAgentHeader = found[1];
+      } else {
+        for (const [k, v] of Object.entries(init.headers as Record<string, string>)) {
+          if (k.toLowerCase() === 'x-target-agent-id') {
+            targetAgentHeader = String(v || '');
+            break;
+          }
+        }
+      }
+    }
+    const effectiveAgentId = (targetAgentHeader || currentAgentId).trim();
 
     let body: Record<string, unknown> | null = null;
     if (init?.body && typeof init.body === 'string') {
@@ -236,6 +299,7 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       if (!agentId || !apiKey) {
         return json(401, { success: false, error: 'Invalid credentials' });
       }
+      currentAgentId = String(agentId).trim();
       return json(200, {
         success: true,
         data: {
@@ -288,10 +352,21 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
         return json(200, { success: true, data: agent });
       }
       if (method === 'PATCH') {
+        const hdrs = init?.headers;
+        const targetHeader =
+          hdrs instanceof Headers
+            ? hdrs.get('x-target-agent-id')
+            : Array.isArray(hdrs)
+            ? hdrs.find(([k]) => k.toLowerCase() === 'x-target-agent-id')?.[1]
+            : (hdrs as Record<string, string> | undefined)?.['x-target-agent-id'];
+        if (body?.avatar !== undefined && targetHeader) {
+          return json(403, { success: false, error: 'Slave accounts cannot update avatar.' });
+        }
         const agent = store.agents[0];
         if (agent) {
-          if (body?.name) agent.name = String(body.name);
-          if (body?.bio) agent.bio = String(body.bio);
+          if (body?.name !== undefined) agent.name = String(body.name);
+          if (body?.bio !== undefined) agent.bio = String(body.bio);
+          if (body?.avatar !== undefined) agent.avatar = String(body.avatar);
         }
         return json(200, { success: true, data: agent });
       }
@@ -323,19 +398,27 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
     // Register or Get local E2EE key
     if (pathname === '/agents/me/e2ee') {
       if (method === 'GET') {
-        const agentId = store.agents[0]?.agentId || 'AMR-1111-2222';
-        const keyData = store.e2eeKeys[agentId] || {
+        const keyData = store.e2eeKeys[currentAgentId] || store.e2eeKeys[store.agents[0]?.agentId || 'AMR-1111-2222'] || {
           publicKey: { kty: 'EC', crv: 'P-256', x: 'mock_x', y: 'mock_y' },
           fingerprint: 'SHA256:mock_fp_123',
           identityKey: { kty: 'EC', crv: 'P-256', x: 'mock_x', y: 'mock_y' },
-          keyVersion: 1,
+          allowRotation: true,
           keyEpoch: 1,
         };
         return json(200, { success: true, data: keyData });
       }
-      if (method === 'PUT' || method === 'POST') {
-        const agentId = store.agents[0]?.agentId || 'AMR-1111-2222';
-        store.e2eeKeys[agentId] = body;
+      if (method === 'PUT') {
+        store.e2eeKeys[currentAgentId] = body;
+        store.e2eeKeys[`peer:${currentAgentId}`] = {
+          ...(body || {}),
+          peerE2eePublicKey: (body as any)?.publicKey,
+          peerKeyFingerprint: (body as any)?.fingerprint,
+          peerIdentityKey: (body as any)?.identityKey || (body as any)?.publicKey,
+          peerKeySignature: (body as any)?.signature,
+          peerKeyEpoch: (body as any)?.keyEpoch || 1,
+          peerAgentId: currentAgentId,
+          agentId: currentAgentId,
+        };
         return json(200, { success: true, message: 'E2EE key registered' });
       }
     }
@@ -373,29 +456,43 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
           message: `Tool ${toolId} not found.`,
         });
       }
+      const toolStatus = (tool.accessStatus || '').toLowerCase();
+      if (['revoked', 'denied', 'rejected'].includes(toolStatus)) {
+        return json(403, {
+          success: false,
+          status: toolStatus,
+          error: 'FLOOR_ACCESS_DENIED',
+          message: `Access to tool ${toolId} is ${toolStatus}.`,
+        });
+      }
       const invocationId = 'inv_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
-      const isApproved = tool.accessStatus === 'authorized' || tool.accessStatus === 'granted' || tool.accessStatus === 'approved';
+      const isApproved = toolStatus === 'authorized' || toolStatus === 'granted' || toolStatus === 'approved';
       const status = isApproved ? 'approved' : 'pending';
       store.floorInvocations[invocationId] = {
         invocationId,
         toolId,
+        agentId: effectiveAgentId,
         status,
         arguments: body?.arguments || {},
         reason: body?.reason,
       };
       store.floorRequests[invocationId] = {
         requestId: invocationId,
+        invocationId: isApproved ? invocationId : undefined,
+        agentId: effectiveAgentId,
         status,
         toolId,
         reason: body?.reason,
         createdAt: new Date().toISOString(),
       };
-      return json(200, {
+      return json(isApproved ? 200 : 202, {
         success: true,
+        status,
         data: {
           invocationId,
           requestId: invocationId,
           toolId,
+          agentId: effectiveAgentId,
           status,
           message: isApproved ? 'Invocation authorized.' : 'Access request submitted for approval.',
         },
@@ -406,11 +503,30 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
     const floorExecInvocationMatch = pathname.match(/^\/floor\/invocations\/([^/]+)\/execute$/);
     if (floorExecInvocationMatch && method === 'POST') {
       const invocationId = decodeURIComponent(floorExecInvocationMatch[1]);
-      const inv = store.floorInvocations[invocationId] || {
-        invocationId,
-        toolId: 'tool_sec_edgar',
-        status: 'approved',
-      };
+      const inv = store.floorInvocations[invocationId];
+      if (!inv) {
+        return json(404, {
+          success: false,
+          error: 'FLOOR_INVOCATION_NOT_FOUND',
+          message: `Invocation ${invocationId} not found.`,
+        });
+      }
+      if (inv.agentId && inv.agentId.toUpperCase() !== effectiveAgentId.toUpperCase()) {
+        return json(403, {
+          success: false,
+          error: 'FLOOR_ACCESS_DENIED',
+          message: `Invocation does not belong to target agent context.`,
+        });
+      }
+      const tool = store.floorTools.find((t) => t.id === inv.toolId);
+      if (tool && ['revoked', 'denied', 'rejected'].includes((tool.accessStatus || '').toLowerCase())) {
+        return json(403, {
+          success: false,
+          status: tool.accessStatus,
+          error: 'FLOOR_ACCESS_DENIED',
+          message: `Tool access has been ${tool.accessStatus}.`,
+        });
+      }
       if (inv.status !== 'approved') {
         return json(403, {
           success: false,
@@ -422,12 +538,14 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
           message: `Invocation is ${inv.status}.`,
         });
       }
+      const expiresAt = new Date(Date.now() + 3600000).toISOString();
       return json(200, {
         success: true,
         data: {
           status: 'approved',
           invocationId,
           toolId: inv.toolId,
+          agentId: inv.agentId || effectiveAgentId,
           serverUrl: store.mcpServerUrl || 'https://aamarva.com/api/mcp',
           auth: {
             type: 'bearer',
@@ -435,8 +553,11 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
           },
           grant: {
             grantId: 'grant_' + Date.now(),
+            agentId: inv.agentId || effectiveAgentId,
+            toolId: inv.toolId,
+            status: 'active',
             scope: 'read:sec_edgar',
-            expiresAt: new Date(Date.now() + 3600000).toISOString(),
+            expiresAt,
           },
         },
       });
@@ -467,7 +588,16 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
 
     // Connections List
     if (pathname === '/connections' && method === 'GET') {
-      return json(200, { success: true, data: store.connections });
+      const pageParam = url.searchParams.get('page');
+      const limitParam = url.searchParams.get('limit');
+      let result = [...store.connections];
+      if (pageParam || limitParam) {
+        const page = Math.max(1, parseInt(pageParam || '1', 10) || 1);
+        const limit = Math.max(1, parseInt(limitParam || String(result.length || 20), 10) || 20);
+        const start = (page - 1) * limit;
+        result = result.slice(start, start + limit);
+      }
+      return json(200, { success: true, data: result });
     }
 
     // Single Connection details or close
@@ -490,7 +620,17 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       }
     }
 
-    // Peer Key Endpoint
+    // Agent Peer Key Lookup Endpoint: GET /connections/peer-key/:agentId
+    const agentPeerKeyMatch = pathname.match(/^\/connections\/peer-key\/([^/]+)$/);
+    if (agentPeerKeyMatch && method === 'GET') {
+      const targetAgentId = decodeURIComponent(agentPeerKeyMatch[1]);
+      return json(200, {
+        success: true,
+        data: ensurePeerKeyForAgent(targetAgentId),
+      });
+    }
+
+    // Connection Peer Key Endpoint: GET /connections/:connectionId/peer-key
     const peerKeyMatch = pathname.match(/^\/connections\/([^/]+)\/peer-key$/);
     if (peerKeyMatch && method === 'GET') {
       const connectionId = peerKeyMatch[1];
@@ -498,18 +638,7 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       const peerAgentId = conn?.agentId || 'AMR-PEER-ECDH';
 
       if (!store.e2eeKeys[connectionId]) {
-        const peerKp = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-        const peerJwk = exportPublicKeyJWK(peerKp.publicKey);
-        const peerFp = computeKeyFingerprint(peerJwk);
-        const peerSig = signIdentityBinding(peerKp.privateKey, peerAgentId, peerFp);
-        store.e2eeKeys[connectionId] = {
-          peerE2eePublicKey: peerJwk,
-          peerKeyFingerprint: peerFp,
-          peerIdentityKey: peerJwk,
-          peerKeySignature: peerSig,
-          peerKeyEpoch: 1,
-          peerAgentId,
-        };
+        store.e2eeKeys[connectionId] = ensurePeerKeyForAgent(peerAgentId);
       }
 
       return json(200, {
@@ -529,7 +658,7 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
         const newMsg = {
           messageId: 'msg_' + Math.random().toString(36).substring(2, 9),
           connectionId,
-          senderAgentId: 'AMR-1111-2222',
+          senderAgentId: String(body?.senderAgentId || currentAgentId || 'AMR-1111-2222'),
           ciphertext: body?.ciphertext,
           nonce: body?.nonce,
           version: body?.version || 1,
@@ -582,6 +711,51 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       }
     }
 
+    // Public Cluster Members
+    const clusterMembersMatch = pathname.match(/^\/clusters\/public\/([^/]+)\/members$/);
+    if (clusterMembersMatch && method === 'GET') {
+      const clusterId = decodeURIComponent(clusterMembersMatch[1]);
+      const cluster = store.clusters.find((cl) => cl.id === clusterId || cl.clusterId === clusterId);
+      const memberIds =
+        store.clusterMembers[clusterId] ||
+        (Array.isArray(cluster?.members) ? cluster!.members.map((m: any) => (typeof m === 'string' ? m : m.agentId)) : []);
+      const members = memberIds.map((aid) => {
+        const pk = ensurePeerKeyForAgent(aid);
+        return {
+          agentId: aid,
+          role: 'member',
+          status: 'active',
+          publicKey: pk.publicKey,
+          keyFingerprint: pk.fingerprint,
+          keyEpoch: pk.keyEpoch || 1,
+        };
+      });
+      return json(200, { success: true, data: members });
+    }
+
+    // Rotate Cluster Key
+    const clusterRotateMatch = pathname.match(/^\/clusters\/([^/]+)\/rotate-key$/);
+    if (clusterRotateMatch && method === 'POST') {
+      const clusterId = decodeURIComponent(clusterRotateMatch[1]);
+      const cluster = store.clusters.find((cl) => cl.id === clusterId || cl.clusterId === clusterId);
+      const nextEpoch = Number(cluster?.epoch || cluster?.keyEpoch || 1) + 1;
+      if (cluster) {
+        cluster.epoch = nextEpoch;
+        cluster.keyEpoch = nextEpoch;
+        cluster.rotationStatus = 'NONE';
+      }
+      return json(200, {
+        success: true,
+        data: {
+          clusterId,
+          epoch: nextEpoch,
+          keyEpoch: nextEpoch,
+          rotationStatus: 'NONE',
+          rotatedAt: new Date().toISOString(),
+        },
+      });
+    }
+
     // Cluster Messages
     const clusterMessagesMatch = pathname.match(/^\/clusters\/([^/]+)\/messages$/);
     if (clusterMessagesMatch) {
@@ -590,7 +764,30 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
         return json(200, { success: true, data: store.clusterMessages[clusterId] || [] });
       }
       if (method === 'POST') {
-        const senderAgentId = String(body?.senderAgentId || 'AMR-1111-2222');
+        const senderAgentId = String(body?.senderAgentId || currentAgentId || 'AMR-1111-2222');
+        const keyEpoch = Number(body?.keyEpoch || 1);
+        const audienceHash = String(body?.audienceHash || 'ALL');
+        if (body?.strictPreflight === true) {
+          const distKey = `${clusterId}:${keyEpoch}:${audienceHash}`;
+          const sealed = store.clusterKeyDistributions?.[distKey];
+          if (sealed) {
+            if (sealed.keyFingerprint && body?.keyFingerprint && sealed.keyFingerprint !== body.keyFingerprint) {
+              return json(400, {
+                success: false,
+                code: 'PREFLIGHT_KEY_FINGERPRINT_MISMATCH',
+                error: 'Key fingerprint does not match sealed cluster key for this epoch/audience.',
+              });
+            }
+            if (sealed.rosterHash && body?.rosterHash && sealed.rosterHash !== body.rosterHash) {
+              return json(409, {
+                success: false,
+                code: 'ROSTER_HASH_MISMATCH',
+                error: 'Roster hash mismatch; cluster membership changed.',
+              });
+            }
+          }
+        }
+
         const msg = {
           messageId: 'msg_cl_' + Date.now(),
           clusterId,
@@ -598,8 +795,14 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
           ciphertext: body?.ciphertext,
           nonce: body?.nonce,
           version: body?.version || 1,
-          keyEpoch: body?.keyEpoch || 1,
+          keyEpoch,
+          audienceHash: body?.audienceHash,
+          rosterHash: body?.rosterHash,
+          keyFingerprint: body?.keyFingerprint,
+          signature: body?.signature,
+          sequence: body?.sequence,
           recipients: body?.recipients,
+          recipientAgentIds: body?.recipientAgentIds,
           createdAt: new Date().toISOString(),
         };
         if (!store.clusterMessages[clusterId]) {
@@ -616,31 +819,58 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
       const clusterId = clusterKeyDistMatch[1];
       if (method === 'POST') {
         store.clusterKeyDistributions = store.clusterKeyDistributions || {};
+        const epoch = Number(body?.epoch || 1);
+        const audienceHash = String(body?.audienceHash || 'ALL');
+        const scopedKey = `${clusterId}:${epoch}:${audienceHash}`;
+        const existing = store.clusterKeyDistributions[scopedKey];
+        if (
+          existing &&
+          existing.keyFingerprint &&
+          body?.keyFingerprint &&
+          existing.keyFingerprint !== body.keyFingerprint
+        ) {
+          return json(409, {
+            success: false,
+            code: 'EPOCH_KEY_ALREADY_SEALED',
+            error: 'EPOCH_KEY_ALREADY_SEALED',
+            message: `Epoch key ${epoch} for scope ${audienceHash} is already sealed.`,
+          });
+        }
+        store.clusterKeyDistributions[scopedKey] = body;
         store.clusterKeyDistributions[clusterId] = body;
         return json(200, {
           success: true,
           data: {
             clusterId,
+            epoch,
+            audienceHash,
             status: 'distributed',
           },
         });
       }
       if (method === 'GET') {
         const epochStr = url.searchParams.get('epoch');
+        const audienceHash = url.searchParams.get('audienceHash');
         const epoch = epochStr ? parseInt(epochStr, 10) : 1;
-        const saved = store.clusterKeyDistributions?.[clusterId];
-        const keyPackage = saved?.keyPackages?.[0];
+        const scopedKey = `${clusterId}:${epoch}:${audienceHash || 'ALL'}`;
+        const saved = store.clusterKeyDistributions?.[scopedKey] || store.clusterKeyDistributions?.[clusterId];
+        const pkgs: any[] = Array.isArray(saved?.keyPackages) ? saved.keyPackages : [];
+        const matchingPkg =
+          pkgs.find((p) => String(p.recipientAgentId || '').toUpperCase() === currentAgentId.toUpperCase()) ||
+          pkgs[0];
         return json(200, {
           success: true,
           data: {
             clusterId,
             epoch,
-            keyFingerprint: 'SHA256:mock_group_key_fp',
+            ...(audienceHash ? { audienceHash } : saved?.audienceHash ? { audienceHash: saved.audienceHash } : {}),
+            ...(saved?.rosterHash ? { rosterHash: saved.rosterHash } : {}),
+            keyFingerprint: saved?.keyFingerprint || matchingPkg?.keyFingerprint || 'SHA256:mock_group_key_fp',
             senderAgentId: saved?.senderAgentId || 'AMR-0000-MASTER',
-            recipientAgentId: keyPackage?.recipientAgentId || 'AMR-1111-2222',
-            wrappingParams: keyPackage?.wrappingParams || { alg: 'ECDH-ES+A256KW' },
-            encryptedKeyPackage: keyPackage?.encryptedKeyPackage || 'mock_wrapped_group_key_base64',
-            nonce: keyPackage?.nonce || 'mock_nonce_b64',
+            recipientAgentId: matchingPkg?.recipientAgentId || currentAgentId || 'AMR-1111-2222',
+            wrappingParams: matchingPkg?.wrappingParams || { alg: 'ECDH-ES+A256KW' },
+            encryptedKeyPackage: matchingPkg?.encryptedKeyPackage || 'mock_wrapped_group_key_base64',
+            nonce: matchingPkg?.nonce || 'mock_nonce_b64',
           },
         });
       }

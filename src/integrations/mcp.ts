@@ -124,11 +124,24 @@ export class AamarvaMcpServer {
           properties: {
             toolId: { type: 'string', description: 'Identifier of the tool to execute.' },
             arguments: { type: 'object', description: 'Input arguments conforming to tool schema.' },
+            requestId: { type: 'string', description: 'Optional pending access request ID to check or resume.' },
+            invocationId: { type: 'string', description: 'Optional approved invocation ID.' },
+            waitForApproval: { type: 'boolean', description: 'Optional flag to poll pending HITL approval before failing.' },
           },
           required: ['toolId', 'arguments'],
         },
-        handler: async (args: { toolId: string; arguments: Record<string, any> }) =>
-          client.executeFloorTool(args.toolId, args.arguments),
+        handler: async (args: {
+          toolId: string;
+          arguments: Record<string, any>;
+          requestId?: string;
+          invocationId?: string;
+          waitForApproval?: boolean;
+        }) =>
+          client.executeFloorTool(args.toolId, args.arguments, {
+            requestId: args.requestId,
+            invocationId: args.invocationId,
+            waitForApproval: args.waitForApproval,
+          }),
       },
       {
         name: 'aamarva_send_message',
@@ -158,27 +171,62 @@ export class AamarvaMcpServer {
       },
       {
         name: 'aamarva_cluster_send_message',
-        description: 'Send an encrypted message to a cluster with recipient restrictions.',
+        description:
+          'Send an end-to-end encrypted message to a cluster (Workflow 2) either from plaintext or pre-encrypted envelope.',
         inputSchema: {
           type: 'object',
           properties: {
             clusterId: { type: 'string', description: 'Target cluster ID.' },
-            ciphertext: { type: 'string', description: 'Encrypted ciphertext payload.' },
-            nonce: { type: 'string', description: 'Cryptographic nonce IV.' },
+            plaintext: { type: 'string', description: 'Plaintext message to encrypt using Workflow 2 group E2EE.' },
+            ciphertext: { type: 'string', description: 'Pre-encrypted ciphertext payload.' },
+            nonce: { type: 'string', description: 'Cryptographic 12-byte Base64 nonce IV.' },
+            keyEpoch: { type: 'number', description: 'Cluster key epoch (>= 1).' },
+            audienceHash: { type: 'string', description: 'Optional ALL or AUD:<32-hex> scope.' },
+            rosterHash: { type: 'string', description: 'Optional RST:<32-hex> roster hash.' },
+            keyFingerprint: { type: 'string', description: 'Optional SHA-256 group key fingerprint.' },
+            signature: { type: 'string', description: 'Optional IEEE P1363 ECDSA v2 envelope signature.' },
+            strictPreflight: { type: 'boolean', description: 'Enable server pre-flight validation.' },
             recipients: {
               type: 'array',
               items: { type: 'string' },
               description: 'Optional authorized recipient agent IDs.',
             },
           },
-          required: ['clusterId', 'ciphertext', 'nonce'],
+          required: ['clusterId'],
         },
-        handler: async (args: { clusterId: string; ciphertext: string; nonce: string; recipients?: string[] }) =>
-          client.sendClusterMessage(args.clusterId, {
-            ciphertext: args.ciphertext,
-            nonce: args.nonce,
+        handler: async (args: {
+          clusterId: string;
+          plaintext?: string;
+          ciphertext?: string;
+          nonce?: string;
+          keyEpoch?: number;
+          audienceHash?: string;
+          rosterHash?: string;
+          keyFingerprint?: string;
+          signature?: string;
+          strictPreflight?: boolean;
+          recipients?: string[];
+        }) => {
+          if (typeof args.plaintext === 'string' && args.plaintext.length > 0 && !args.ciphertext) {
+            return client.sendEncryptedClusterMessage(args.clusterId, args.plaintext, {
+              recipients: args.recipients,
+              epoch: args.keyEpoch,
+              audienceHash: args.audienceHash,
+              rosterHash: args.rosterHash,
+            });
+          }
+          return client.sendClusterMessage(args.clusterId, {
+            ciphertext: args.ciphertext || '',
+            nonce: args.nonce || '',
+            keyEpoch: args.keyEpoch,
+            audienceHash: args.audienceHash,
+            rosterHash: args.rosterHash,
+            keyFingerprint: args.keyFingerprint,
+            signature: args.signature,
+            strictPreflight: args.strictPreflight,
             recipients: args.recipients,
-          }),
+          });
+        },
       },
       {
         name: 'aamarva_watchtower_activity',

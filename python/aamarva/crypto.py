@@ -3,16 +3,19 @@ import json
 import hashlib
 import base64
 from abc import ABC, abstractmethod
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Union, Dict, Any, Iterable, List
 
 try:
     from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
     from cryptography.hazmat.primitives import serialization, hashes
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     HAS_CRYPTOGRAPHY = True
 except ImportError:
     ec = None
+    decode_dss_signature = None
+    encode_dss_signature = None
     serialization = None
     hashes = None
     HKDF = None
@@ -125,18 +128,19 @@ def reset_local_identity_key() -> None:
     _active_key_store = InMemoryKeyStore()
 
 
-def get_local_identity_key(identity_id: str = "default") -> Any:
+def get_local_identity_key(identity_id: str = "default", epoch: Optional[int] = None) -> Any:
     _require_cryptography()
     global _cached_identity_keys, _active_key_store
-    if identity_id in _cached_identity_keys:
-        return _cached_identity_keys[identity_id]
+    effective_id = f"{identity_id}_epoch_{epoch}" if epoch is not None else identity_id
+    if effective_id in _cached_identity_keys:
+        return _cached_identity_keys[effective_id]
 
-    stored_pem = _active_key_store.load_private_key(identity_id)
+    stored_pem = _active_key_store.load_private_key(effective_id)
     if stored_pem and isinstance(stored_pem, str) and stored_pem.strip():
         try:
             priv = serialization.load_pem_private_key(stored_pem.encode('utf-8'), password=None)
             if isinstance(priv, ec.EllipticCurvePrivateKey):
-                _cached_identity_keys[identity_id] = priv
+                _cached_identity_keys[effective_id] = priv
                 return priv
             raise AamarvaError("Stored key is not an EC private key.", code="IDENTITY_KEY_INVALID")
         except Exception as err:
@@ -146,6 +150,9 @@ def get_local_identity_key(identity_id: str = "default") -> Any:
                 f"Failed to load stored identity key: key is corrupt or invalid format: {str(err)}",
                 code="IDENTITY_KEY_INVALID"
             )
+
+    if epoch is not None:
+        return get_local_identity_key(identity_id)
 
     priv = ec.generate_private_key(ec.SECP256R1())
     _cached_identity_keys[identity_id] = priv
@@ -158,8 +165,8 @@ def get_local_identity_key(identity_id: str = "default") -> Any:
     return priv
 
 
-def get_local_public_key_pem(identity_id: str = "default") -> str:
-    priv = get_local_identity_key(identity_id)
+def get_local_public_key_pem(identity_id: str = "default", epoch: Optional[int] = None) -> str:
+    priv = get_local_identity_key(identity_id, epoch=epoch)
     pub = priv.public_key()
     return pub.public_bytes(
         encoding=serialization.Encoding.PEM,
@@ -253,6 +260,15 @@ def import_public_key(key: Any) -> Any:
     raise AamarvaError("Invalid public key format provided.", code="INVALID_PEER_KEY")
 
 
+def normalize_agent_id(agent_id: Optional[str]) -> str:
+    return str(agent_id or "").strip().lstrip("@").strip().upper()
+
+
+def canonical_member_set(agent_ids: Iterable[str]) -> List[str]:
+    cleaned = {normalize_agent_id(aid) for aid in agent_ids}
+    return sorted(aid for aid in cleaned if aid)
+
+
 def compute_key_fingerprint(key: Any) -> str:
     """
     Exact fingerprint calculation: SHA-256 hash of canonical P-256 JWK.
@@ -262,9 +278,6 @@ def compute_key_fingerprint(key: Any) -> str:
         
         # Build canonical dict
         jwk_dict = export_public_key_jwk(pub)
-        
-        import json
-        import hashlib
         
         canonical_dict = {
             "crv": "P-256",
@@ -282,6 +295,35 @@ def compute_key_fingerprint(key: Any) -> str:
         raise AamarvaError(f"Failed to compute key fingerprint: {str(err)}", code="PEER_KEY_VERIFICATION_FAILED")
 
 
+def compute_group_key_fingerprint(raw_key: bytes) -> str:
+    """
+    Compute full SHA-256 fingerprint of raw 32-byte AES cluster group key.
+    Format: SHA256:AA:BB:CC:...
+    """
+    hash_hex = hashlib.sha256(raw_key).hexdigest().upper()
+    formatted = ':'.join(hash_hex[i:i+2] for i in range(0, len(hash_hex), 2))
+    return f"SHA256:{formatted}"
+
+
+def compute_roster_hash(active_ids: Iterable[str]) -> str:
+    canonical = canonical_member_set(active_ids)
+    hash_hex = hashlib.sha256(','.join(canonical).encode('utf-8')).hexdigest().upper()
+    return f"RST:{hash_hex[:32]}"
+
+
+def compute_audience_hash(recipient_ids: Iterable[str], all_active_ids: Iterable[str]) -> str:
+    canon_rec = canonical_member_set(recipient_ids)
+    canon_all = canonical_member_set(all_active_ids)
+    if not canon_rec:
+        return "ALL"
+    if canon_all:
+        rec_set = set(canon_rec)
+        if all(aid in rec_set for aid in canon_all):
+            return "ALL"
+    hash_hex = hashlib.sha256(','.join(canon_rec).encode('utf-8')).hexdigest().upper()
+    return f"AUD:{hash_hex[:32]}"
+
+
 def create_identity_binding_string(agent_id: str, fingerprint: str) -> str:
     """
     Construct the canonical identity binding string expected by AAMARVA:
@@ -291,7 +333,7 @@ def create_identity_binding_string(agent_id: str, fingerprint: str) -> str:
         raise AamarvaError("agent_id is required for identity key binding.", code="IDENTITY_KEY_INVALID")
     if not fingerprint or not isinstance(fingerprint, str) or not fingerprint.strip():
         raise AamarvaError("fingerprint is required for identity key binding.", code="IDENTITY_KEY_INVALID")
-    return f"AAMARVA-KEY-BINDING:v1:{agent_id.strip().upper()}:{fingerprint.strip()}"
+    return f"AAMARVA-KEY-BINDING:v1:{normalize_agent_id(agent_id)}:{fingerprint.strip()}"
 
 
 def sign_identity_binding(private_key: Any, agent_id: str, fingerprint: str) -> str:
@@ -389,6 +431,9 @@ def derive_shared_secret(local_priv, peer_key: Any) -> bytes:
         raise AamarvaError(f"Failed to perform ECDH shared secret derivation: {str(err)}", code="MESSAGE_ENCRYPTION_FAILED")
 
 
+WORKFLOW_HKDF_SALT = "aamarva-e2ee-channel-v1"
+
+
 def derive_connection_aes_key(shared_secret: bytes, connection_id: str) -> bytes:
     if not connection_id:
         raise AamarvaError("Connection ID is required for key derivation.", code="MESSAGE_ENCRYPTION_FAILED")
@@ -396,11 +441,16 @@ def derive_connection_aes_key(shared_secret: bytes, connection_id: str) -> bytes
         return HKDF(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=connection_id.encode('utf-8'),
-            info=b"aamarva-e2ee-v1",
+            salt=WORKFLOW_HKDF_SALT.encode('utf-8'),
+            info=f"aamarva-channel:{connection_id}".encode('utf-8'),
         ).derive(shared_secret)
     except Exception as err:
         raise AamarvaError(f"Failed to derive AES key via HKDF: {str(err)}", code="MESSAGE_ENCRYPTION_FAILED")
+
+
+def create_direct_message_aad_v1(connection_id: str, sender_agent_id: Optional[str] = None) -> str:
+    norm_sender = normalize_agent_id(sender_agent_id) or "AGENT"
+    return f"AAMARVA:E2EE:v1:{connection_id}:{norm_sender}"
 
 
 def encrypt_message_with_keys(
@@ -412,7 +462,8 @@ def encrypt_message_with_keys(
     peer_agent_id: str,
     peer_signature: str,
     peer_identity_key: Any,
-    key_epoch: int = 1
+    key_epoch: int = 1,
+    sender_agent_id: Optional[str] = None,
 ) -> dict:
     if not isinstance(plaintext, str):
         raise AamarvaError("Message payload must be a string.", code="MESSAGE_ENCRYPTION_FAILED")
@@ -422,7 +473,8 @@ def encrypt_message_with_keys(
 
     nonce = os.urandom(12)
     aesgcm = AESGCM(aes_key)
-    ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext.encode('utf-8'), connection_id.encode('utf-8'))
+    aad = create_direct_message_aad_v1(connection_id, sender_agent_id).encode('utf-8')
+    ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext.encode('utf-8'), aad)
 
     return {
         "ciphertext": base64.b64encode(ciphertext_with_tag).decode('utf-8'),
@@ -440,7 +492,8 @@ def decrypt_message_with_keys(
     expected_fingerprint: str,
     peer_agent_id: str,
     peer_signature: str,
-    peer_identity_key: Any
+    peer_identity_key: Any,
+    sender_agent_id: Optional[str] = None,
 ) -> str:
     if not isinstance(envelope, dict) or not envelope.get("ciphertext") or not envelope.get("nonce"):
         raise AamarvaError("Invalid encrypted message envelope: missing ciphertext or nonce.", code="MESSAGE_INVALID_ENVELOPE")
@@ -456,8 +509,10 @@ def decrypt_message_with_keys(
         if len(combined) < 16:
             raise AamarvaError("Ciphertext is too short or malformed (missing auth tag).", code="MESSAGE_INVALID_ENVELOPE")
 
+        resolved_sender = sender_agent_id if sender_agent_id is not None else envelope.get("senderAgentId")
+        aad = create_direct_message_aad_v1(connection_id, resolved_sender).encode('utf-8')
         aesgcm = AESGCM(aes_key)
-        plaintext_bytes = aesgcm.decrypt(nonce, combined, connection_id.encode('utf-8'))
+        plaintext_bytes = aesgcm.decrypt(nonce, combined, aad)
         return plaintext_bytes.decode('utf-8')
     except Exception as err:
         if isinstance(err, AamarvaError):
@@ -473,7 +528,7 @@ def decrypt_message(envelope: dict, connection_id: str, agent_id_a: str = "", ag
     raise AamarvaError("Use connection.get_messages() with E2EE key exchange.", code="MESSAGE_DECRYPTION_FAILED")
 
 
-# Cluster Key Distribution & Group Encryption
+# Workflow 2: Cluster Group Key Distribution, Wrapping, AAD & ECDSA Signing
 def generate_cluster_key() -> bytes:
     """
     Generate a 256-bit symmetric key for cluster encryption.
@@ -482,47 +537,251 @@ def generate_cluster_key() -> bytes:
     return os.urandom(32)
 
 
+def create_cluster_wrap_aad_v2(cluster_id: str, epoch: int = 1, audience_hash: str = "ALL") -> str:
+    scope = f":{audience_hash}" if audience_hash and audience_hash != "ALL" else ""
+    return f"aamarva-cluster-group-key:{cluster_id}:{epoch}{scope}"
+
+
+def create_cluster_message_aad_v2(
+    cluster_id: str,
+    sender_agent_id: Optional[str] = None,
+    epoch: int = 1,
+    audience_hash: str = "ALL",
+) -> str:
+    norm_sender = normalize_agent_id(sender_agent_id) or "AGENT"
+    scope = f":{audience_hash}" if audience_hash and audience_hash != "ALL" else ""
+    return f"AAMARVA:E2EE:v2:{cluster_id}:{norm_sender}:{epoch}{scope}"
+
+
+def create_cluster_signing_payload_v2(
+    cluster_id: str,
+    key_epoch: int,
+    sender_agent_id: str,
+    audience_hash: Optional[str],
+    roster_hash: str,
+    sequence: Optional[Union[str, int]],
+    key_fingerprint: str,
+    nonce: str,
+    ciphertext: str,
+) -> str:
+    seq_str = "" if sequence is None else str(sequence)
+    return "|".join([
+        "AAMARVA:CLUSTER_MSG:v2",
+        cluster_id.strip(),
+        str(key_epoch),
+        normalize_agent_id(sender_agent_id),
+        audience_hash or "ALL",
+        roster_hash,
+        seq_str,
+        key_fingerprint,
+        nonce,
+        ciphertext,
+    ])
+
+
+def sign_cluster_message_v2(
+    private_key: Any,
+    cluster_id: str,
+    key_epoch: int,
+    sender_agent_id: str,
+    audience_hash: Optional[str],
+    roster_hash: str,
+    sequence: Optional[Union[str, int]],
+    key_fingerprint: str,
+    nonce: str,
+    ciphertext: str,
+) -> str:
+    """
+    Sign a Workflow 2 cluster message using ECDSA P-256 SHA-256 returning IEEE P1363 64-byte (r || s) Base64.
+    """
+    _require_cryptography()
+    payload = create_cluster_signing_payload_v2(
+        cluster_id=cluster_id,
+        key_epoch=key_epoch,
+        sender_agent_id=sender_agent_id,
+        audience_hash=audience_hash,
+        roster_hash=roster_hash,
+        sequence=sequence,
+        key_fingerprint=key_fingerprint,
+        nonce=nonce,
+        ciphertext=ciphertext,
+    )
+    try:
+        priv = private_key
+        if isinstance(private_key, str):
+            priv = serialization.load_pem_private_key(private_key.encode('utf-8'), password=None)
+        der_sig = priv.sign(payload.encode('utf-8'), ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(der_sig)
+        raw_sig = r.to_bytes(32, byteorder='big') + s.to_bytes(32, byteorder='big')
+        return base64.b64encode(raw_sig).decode('utf-8')
+    except Exception as err:
+        raise AamarvaError(f"Failed to sign cluster message: {str(err)}", code="CLUSTER_MESSAGE_SIGN_FAILED")
+
+
+def verify_cluster_message_signature_v2(
+    sender_public_key: Any,
+    cluster_id: str,
+    key_epoch: int,
+    sender_agent_id: str,
+    audience_hash: Optional[str],
+    roster_hash: str,
+    sequence: Optional[Union[str, int]],
+    key_fingerprint: str,
+    nonce: str,
+    ciphertext: str,
+    signature_b64: str,
+) -> bool:
+    _require_cryptography()
+    if not signature_b64 or not isinstance(signature_b64, str):
+        return False
+    payload = create_cluster_signing_payload_v2(
+        cluster_id=cluster_id,
+        key_epoch=key_epoch,
+        sender_agent_id=sender_agent_id,
+        audience_hash=audience_hash,
+        roster_hash=roster_hash,
+        sequence=sequence,
+        key_fingerprint=key_fingerprint,
+        nonce=nonce,
+        ciphertext=ciphertext,
+    )
+    try:
+        pub = import_public_key(sender_public_key)
+        sig_bytes = base64.b64decode(signature_b64)
+        if len(sig_bytes) == 64:
+            r = int.from_bytes(sig_bytes[:32], byteorder='big')
+            s = int.from_bytes(sig_bytes[32:], byteorder='big')
+            der_sig = encode_dss_signature(r, s)
+            pub.verify(der_sig, payload.encode('utf-8'), ec.ECDSA(hashes.SHA256()))
+        else:
+            pub.verify(sig_bytes, payload.encode('utf-8'), ec.ECDSA(hashes.SHA256()))
+        return True
+    except Exception:
+        return False
+
+
 def wrap_cluster_key_for_recipient(
     cluster_key: bytes,
     recipient_public_key: Any,
     sender_private_key: Any,
+    cluster_id: str = "default",
+    epoch: int = 1,
+    audience_hash: str = "ALL",
+    roster_hash: Optional[str] = None,
+    key_fingerprint: Optional[str] = None,
+    sender_agent_id: Optional[str] = None,
+    sender_public_key: Optional[Any] = None,
+    recipient_agent_id: Optional[str] = None,
+    recipient_key_fingerprint: Optional[str] = None,
+    recipient_key_epoch: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Wrap cluster symmetric key for a recipient using ECDH-ES+A256GCM.
+    Wrap cluster symmetric key for a recipient using Workflow 2 HKDF-SHA256 and AES-256-GCM AAD.
     """
     _require_cryptography()
     recipient_pub = import_public_key(recipient_public_key)
     sender_priv = sender_private_key if isinstance(sender_private_key, ec.EllipticCurvePrivateKey) else get_local_identity_key()
 
+    hkdf_salt = WORKFLOW_HKDF_SALT
+    hkdf_info = f"aamarva-channel:{cluster_id}"
+    wrap_aad = create_cluster_wrap_aad_v2(cluster_id, epoch, audience_hash or "ALL")
+    resolved_fp = key_fingerprint or compute_group_key_fingerprint(cluster_key)
+
     shared_secret = sender_priv.exchange(ec.ECDH(), recipient_pub)
     wrap_key = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=b"",
-        info=b"AAMARVA-CLUSTER-KEY-WRAP",
+        salt=hkdf_salt.encode('utf-8'),
+        info=hkdf_info.encode('utf-8'),
     ).derive(shared_secret)
 
     iv = os.urandom(12)
     aesgcm = AESGCM(wrap_key)
-    ciphertext_with_tag = aesgcm.encrypt(iv, cluster_key, None)
+    ciphertext_with_tag = aesgcm.encrypt(iv, cluster_key, wrap_aad.encode('utf-8'))
+    ct_b64 = base64.b64encode(ciphertext_with_tag).decode("utf-8")
+    iv_b64 = base64.b64encode(iv).decode("utf-8")
+
+    sender_pub_jwk = sender_public_key or export_public_key_jwk(sender_priv.public_key())
+    package_obj: Dict[str, Any] = {
+        "iv": iv_b64,
+        "key": ct_b64,
+        "epoch": epoch,
+        "clusterId": cluster_id,
+        "audienceHash": audience_hash or "ALL",
+        "keyFingerprint": resolved_fp,
+        "aad": wrap_aad,
+        "hkdfSalt": hkdf_salt,
+        "hkdfInfo": hkdf_info,
+    }
+    if roster_hash:
+        package_obj["rosterHash"] = roster_hash
+    if sender_agent_id:
+        package_obj["senderAgentId"] = sender_agent_id
+    if sender_pub_jwk:
+        package_obj["senderPublicKey"] = sender_pub_jwk
+    if recipient_agent_id:
+        package_obj["recipientAgentId"] = recipient_agent_id
+    if recipient_key_fingerprint:
+        package_obj["recipientKeyFingerprint"] = recipient_key_fingerprint
+    if recipient_key_epoch is not None:
+        package_obj["recipientKeyEpoch"] = recipient_key_epoch
 
     return {
-        "encryptedKeyPackage": base64.b64encode(ciphertext_with_tag).decode("utf-8"),
-        "nonce": base64.b64encode(iv).decode("utf-8"),
-        "wrappingParams": {"alg": "ECDH-ES+A256GCM"},
+        "encryptedKeyPackage": package_obj,
+        "nonce": iv_b64,
+        "ciphertext": ct_b64,
+        "keyFingerprint": resolved_fp,
+        "aad": wrap_aad,
+        "wrappingParams": {
+            "algorithm": "ECDH-ES+HKDF-256+A256GCM",
+            "alg": "ECDH-ES+A256GCM",
+            "curve": "P-256",
+            "hkdfHash": "SHA-256",
+            "hkdfSalt": hkdf_salt,
+            "hkdfInfo": hkdf_info,
+            "aad": wrap_aad,
+        },
     }
 
 
 def unwrap_cluster_key(
-    encrypted_key_package_b64: str,
+    encrypted_key_package: Union[str, Dict[str, Any]],
     nonce_b64: str,
     recipient_private_key: Any,
     sender_public_key: Any,
+    cluster_id: str = "default",
+    epoch: int = 1,
+    audience_hash: str = "ALL",
+    expected_key_fingerprint: Optional[str] = None,
+    aad: Optional[str] = None,
+    hkdf_salt: Optional[str] = None,
+    hkdf_info: Optional[str] = None,
 ) -> bytes:
     """
-    Unwrap cluster symmetric key using recipient private key and sender public key.
+    Unwrap cluster symmetric key using Workflow 2 HKDF-SHA256, AAD, and fingerprint verification.
     """
     _require_cryptography()
+    pkg_obj: Optional[Dict[str, Any]] = None
+    if isinstance(encrypted_key_package, dict):
+        pkg_obj = encrypted_key_package
+    elif isinstance(encrypted_key_package, str) and encrypted_key_package.strip().startswith('{'):
+        try:
+            pkg_obj = json.loads(encrypted_key_package)
+        except Exception:
+            pkg_obj = None
+
+    ct_b64 = str((pkg_obj or {}).get("key") or (pkg_obj or {}).get("ciphertext") or (encrypted_key_package if isinstance(encrypted_key_package, str) else ""))
+    iv_b64 = str((pkg_obj or {}).get("iv") or nonce_b64 or "")
+    if not ct_b64 or not iv_b64:
+        raise AamarvaError("Cluster key package is missing ciphertext or iv/nonce.", code="CLUSTER_KEY_UNWRAP_FAILED")
+
+    resolved_cluster_id = str((pkg_obj or {}).get("clusterId") or cluster_id)
+    resolved_epoch = int((pkg_obj or {}).get("epoch") or epoch)
+    resolved_audience = str((pkg_obj or {}).get("audienceHash") or audience_hash or "ALL")
+    resolved_salt = str((pkg_obj or {}).get("hkdfSalt") or hkdf_salt or WORKFLOW_HKDF_SALT)
+    resolved_info = str((pkg_obj or {}).get("hkdfInfo") or hkdf_info or f"aamarva-channel:{resolved_cluster_id}")
+    resolved_aad = str((pkg_obj or {}).get("aad") or aad or create_cluster_wrap_aad_v2(resolved_cluster_id, resolved_epoch, resolved_audience))
+
     sender_pub = import_public_key(sender_public_key)
     recipient_priv = recipient_private_key if isinstance(recipient_private_key, ec.EllipticCurvePrivateKey) else get_local_identity_key()
 
@@ -530,21 +789,32 @@ def unwrap_cluster_key(
     wrap_key = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=b"",
-        info=b"AAMARVA-CLUSTER-KEY-WRAP",
+        salt=resolved_salt.encode('utf-8'),
+        info=resolved_info.encode('utf-8'),
     ).derive(shared_secret)
 
     try:
-        iv = base64.b64decode(nonce_b64)
-        combined = base64.b64decode(encrypted_key_package_b64)
+        iv = base64.b64decode(iv_b64)
+        combined = base64.b64decode(ct_b64)
         if len(combined) < 16:
             raise AamarvaError("Cluster key package is too short or malformed.", code="CLUSTER_KEY_UNWRAP_FAILED")
         aesgcm = AESGCM(wrap_key)
-        return aesgcm.decrypt(iv, combined, None)
+        raw_key = aesgcm.decrypt(iv, combined, resolved_aad.encode('utf-8') if resolved_aad else None)
     except Exception as err:
         if isinstance(err, AamarvaError):
             raise err
         raise AamarvaError(f"Failed to unwrap cluster key: {str(err)}", code="CLUSTER_KEY_UNWRAP_FAILED")
+
+    fp_check = expected_key_fingerprint or ((pkg_obj or {}).get("keyFingerprint") if isinstance((pkg_obj or {}).get("keyFingerprint"), str) else None)
+    if fp_check and fp_check.startswith("SHA256:") and len(fp_check.split(":")) == 33:
+        actual_fp = compute_group_key_fingerprint(raw_key)
+        if actual_fp != fp_check:
+            raise AamarvaError(
+                f"Cluster group key fingerprint mismatch: expected {fp_check}, got {actual_fp}.",
+                code="CLUSTER_KEY_FINGERPRINT_MISMATCH",
+            )
+
+    return raw_key
 
 
 def encrypt_cluster_message(
@@ -552,9 +822,11 @@ def encrypt_cluster_message(
     cluster_key: bytes,
     cluster_id: str,
     epoch: int = 1,
+    audience_hash: str = "ALL",
+    sender_agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Encrypt cluster message using symmetric cluster key and AES-256-GCM.
+    Encrypt cluster message using symmetric cluster key and AES-256-GCM with Workflow 2 AAD.
     """
     _require_cryptography()
     if not isinstance(plaintext, str):
@@ -562,7 +834,7 @@ def encrypt_cluster_message(
 
     iv = os.urandom(12)
     aesgcm = AESGCM(cluster_key)
-    aad = f"{cluster_id}:{epoch}:v2".encode("utf-8")
+    aad = create_cluster_message_aad_v2(cluster_id, sender_agent_id, epoch, audience_hash or "ALL").encode("utf-8")
     ciphertext_with_tag = aesgcm.encrypt(iv, plaintext.encode("utf-8"), aad)
 
     return {
@@ -570,6 +842,7 @@ def encrypt_cluster_message(
         "nonce": base64.b64encode(iv).decode("utf-8"),
         "version": 2,
         "keyEpoch": epoch,
+        "audienceHash": audience_hash or "ALL",
     }
 
 
@@ -580,9 +853,11 @@ def decrypt_cluster_message(
     cluster_id: str,
     epoch: int = 1,
     version: int = 2,
+    audience_hash: str = "ALL",
+    sender_agent_id: Optional[str] = None,
 ) -> str:
     """
-    Decrypt cluster message using symmetric cluster key and AES-256-GCM.
+    Decrypt cluster message using symmetric cluster key and AES-256-GCM with Workflow 2 AAD.
     """
     _require_cryptography()
     try:
@@ -592,7 +867,7 @@ def decrypt_cluster_message(
             raise AamarvaError("Cluster ciphertext is too short or malformed.", code="CLUSTER_MESSAGE_DECRYPTION_FAILED")
 
         aesgcm = AESGCM(cluster_key)
-        aad = f"{cluster_id}:{epoch}:v{version}".encode("utf-8")
+        aad = create_cluster_message_aad_v2(cluster_id, sender_agent_id, epoch, audience_hash or "ALL").encode("utf-8")
         decrypted_bytes = aesgcm.decrypt(iv, combined, aad)
         return decrypted_bytes.decode("utf-8")
     except Exception as err:

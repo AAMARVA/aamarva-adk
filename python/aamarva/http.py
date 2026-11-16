@@ -24,17 +24,19 @@ APPROVED_ENDPOINT_PATTERNS = [
     ("PATCH", re.compile(r"^/agents/me$")),
     ("GET", re.compile(r"^/agents/me/e2ee$")),
     ("PUT", re.compile(r"^/agents/me/e2ee$")),
-    ("POST", re.compile(r"^/agents/me/e2ee$")),
     ("GET", re.compile(r"^/connections$")),
     ("GET", re.compile(r"^/connections/[^/]+/peer-key$")),
+    ("GET", re.compile(r"^/connections/peer-key/[^/]+$")),
     ("GET", re.compile(r"^/connections/[^/]+/messages$")),
     ("POST", re.compile(r"^/connections/[^/]+/messages$")),
     ("GET", re.compile(r"^/clusters$")),
     ("GET", re.compile(r"^/clusters/[^/]+$")),
+    ("GET", re.compile(r"^/clusters/public/[^/]+/members$")),
     ("GET", re.compile(r"^/clusters/[^/]+/messages$")),
     ("POST", re.compile(r"^/clusters/[^/]+/messages$")),
     ("GET", re.compile(r"^/clusters/[^/]+/key-distribution$")),
     ("POST", re.compile(r"^/clusters/[^/]+/key-distribution$")),
+    ("POST", re.compile(r"^/clusters/[^/]+/rotate-key$")),
     ("GET", re.compile(r"^/floor/agent/tools$")),
     ("POST", re.compile(r"^/floor/tools/[^/]+/invoke$")),
     ("GET", re.compile(r"^/floor/requests/[^/]+$")),
@@ -63,18 +65,26 @@ class HttpClient:
         base_url: Optional[str] = None,
         agent_id: Optional[str] = None,
         api_key: Optional[str] = None,
+        target_agent_id: Optional[str] = None,
         timeout_ms: int = 15000,
         max_retries: int = 3,
     ):
         self.base_url = (base_url or os.getenv("AAMARVA_BASE_URL") or "https://aamarva.com/api").rstrip("/")
         self.agent_id = agent_id or os.getenv("AAMARVA_AGENT_ID")
         self.api_key = api_key or os.getenv("AAMARVA_API_KEY")
+        self.target_agent_id = target_agent_id or os.getenv("AAMARVA_TARGET_AGENT_ID")
         self.timeout = timeout_ms / 1000.0
         self.max_retries = max_retries
 
         self.access_token: Optional[str] = None
         self.refresh_token: Optional[str] = None
         self.on_auth_success = None
+
+    def set_target_agent_id(self, target_agent_id: Optional[str]) -> None:
+        self.target_agent_id = target_agent_id
+
+    def get_target_agent_id(self) -> Optional[str]:
+        return self.target_agent_id
 
     def set_credentials(
         self,
@@ -167,6 +177,8 @@ class HttpClient:
         headers = {}
         if auth and self.access_token:
             headers["Authorization"] = f"Bearer {self.access_token}"
+        if self.target_agent_id:
+            headers["x-target-agent-id"] = self.target_agent_id
 
         if json_data is not None:
             headers["Content-Type"] = "application/json"

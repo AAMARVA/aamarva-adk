@@ -107,6 +107,9 @@ class AamarvaMcpServer:
                         "properties": {
                             "toolId": {"type": "string", "description": "Identifier of the tool to execute."},
                             "arguments": {"type": "object", "description": "Input arguments conforming to tool schema."},
+                            "requestId": {"type": "string", "description": "Optional pending access request ID to check or resume."},
+                            "invocationId": {"type": "string", "description": "Optional approved invocation ID."},
+                            "waitForApproval": {"type": "boolean", "description": "Optional flag to poll pending HITL approval before failing."},
                         },
                         "required": ["toolId", "arguments"],
                     },
@@ -136,20 +139,27 @@ class AamarvaMcpServer:
                 ),
                 types.Tool(
                     name="aamarva_cluster_send_message",
-                    description="Send an encrypted message to a cluster with recipient restrictions.",
+                    description="Send an end-to-end encrypted message to a cluster (Workflow 2) from plaintext or pre-encrypted envelope.",
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "clusterId": {"type": "string", "description": "Target cluster ID."},
-                            "ciphertext": {"type": "string", "description": "Encrypted ciphertext payload."},
-                            "nonce": {"type": "string", "description": "Cryptographic nonce IV."},
+                            "plaintext": {"type": "string", "description": "Plaintext message to encrypt using Workflow 2 group E2EE."},
+                            "ciphertext": {"type": "string", "description": "Pre-encrypted ciphertext payload."},
+                            "nonce": {"type": "string", "description": "Cryptographic 12-byte Base64 nonce IV."},
+                            "keyEpoch": {"type": "number", "description": "Cluster key epoch (>= 1)."},
+                            "audienceHash": {"type": "string", "description": "Optional ALL or AUD:<32-hex> scope."},
+                            "rosterHash": {"type": "string", "description": "Optional RST:<32-hex> roster hash."},
+                            "keyFingerprint": {"type": "string", "description": "Optional SHA-256 group key fingerprint."},
+                            "signature": {"type": "string", "description": "Optional IEEE P1363 ECDSA v2 envelope signature."},
+                            "strictPreflight": {"type": "boolean", "description": "Enable server pre-flight validation."},
                             "recipients": {
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": "Optional authorized recipient agent IDs.",
                             },
                         },
-                        "required": ["clusterId", "ciphertext", "nonce"],
+                        "required": ["clusterId"],
                     },
                 ),
                 types.Tool(
@@ -205,18 +215,40 @@ class AamarvaMcpServer:
                 elif name == "aamarva_floor_check_status":
                     res = self.client.get_floor_request_status(args.get("requestId"))
                 elif name == "aamarva_floor_execute_tool":
-                    res = self.client.execute_floor_tool(args.get("toolId"), args.get("arguments", {}))
+                    res = self.client.execute_floor_tool(
+                        args.get("toolId"),
+                        args.get("arguments", {}),
+                        invocation_id=args.get("invocationId"),
+                        request_id=args.get("requestId"),
+                        wait_for_approval=bool(args.get("waitForApproval", False)),
+                    )
                 elif name == "aamarva_send_message":
                     res = self.client.send_message(args.get("connectionId"), args.get("content"))
                 elif name == "aamarva_get_messages":
                     res = self.client.get_messages(args.get("connectionId"))
                 elif name == "aamarva_cluster_send_message":
-                    res = self.client.send_cluster_message(
-                        args.get("clusterId"),
-                        args.get("ciphertext"),
-                        args.get("nonce"),
-                        recipients=args.get("recipients"),
-                    )
+                    if isinstance(args.get("plaintext"), str) and args.get("plaintext") and not args.get("ciphertext"):
+                        res = self.client.send_encrypted_cluster_message(
+                            args.get("clusterId"),
+                            args.get("plaintext"),
+                            recipients=args.get("recipients"),
+                            epoch=args.get("keyEpoch"),
+                            audience_hash=args.get("audienceHash"),
+                            roster_hash=args.get("rosterHash"),
+                        )
+                    else:
+                        res = self.client.send_cluster_message(
+                            args.get("clusterId"),
+                            args.get("ciphertext", ""),
+                            args.get("nonce", ""),
+                            key_epoch=args.get("keyEpoch") or 1,
+                            recipients=args.get("recipients"),
+                            audience_hash=args.get("audienceHash"),
+                            roster_hash=args.get("rosterHash"),
+                            key_fingerprint=args.get("keyFingerprint"),
+                            signature=args.get("signature"),
+                            strict_preflight=args.get("strictPreflight"),
+                        )
                 elif name == "aamarva_watchtower_activity":
                     res = self.client.get_watchtower_activity(args.get("limit"))
                 elif name == "aamarva_agent_footprints":

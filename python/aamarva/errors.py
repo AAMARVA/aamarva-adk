@@ -1,10 +1,11 @@
 class AamarvaError(Exception):
-    def __init__(self, message: str, code: str = "AAMARVA_ERROR", status_code: int = None, hint: str = None):
+    def __init__(self, message: str, code: str = "AAMARVA_ERROR", status_code: int = None, hint: str = None, details: object = None):
         super().__init__(message)
         self.message = message
         self.code = code
         self.status_code = status_code
         self.hint = hint
+        self.details = details
 
     def __str__(self):
         res = f"{self.__class__.__name__} [{self.code}]: {self.message}"

@@ -63,8 +63,28 @@ export async function invokeExternalMcpTool(params: McpExecuteParams): Promise<a
     });
   }
 
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(serverUrl.trim());
+  } catch {
+    throw new AamarvaError('Cannot invoke MCP tool: malformed MCP serverUrl.', {
+      code: 'FLOOR_EXECUTION_FAILED',
+    });
+  }
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new AamarvaError('Cannot invoke MCP tool: unsupported MCP serverUrl scheme.', {
+      code: 'FLOOR_EXECUTION_FAILED',
+    });
+  }
+
+  if (!toolId || typeof toolId !== 'string' || !toolId.trim()) {
+    throw new AamarvaError('Cannot invoke MCP tool: toolId is required.', {
+      code: 'FLOOR_EXECUTION_FAILED',
+    });
+  }
+
   // 1. Validate tool arguments against schema
-  validateToolArguments(toolId, args, inputSchema);
+  validateToolArguments(toolId.trim(), args, inputSchema);
 
   // 2. Build secure request headers (credentials are never logged or leaked)
   const headers: Record<string, string> = {
@@ -72,20 +92,24 @@ export async function invokeExternalMcpTool(params: McpExecuteParams): Promise<a
     Accept: 'application/json, text/event-stream, */*',
   };
 
-  if (auth) {
-    if (auth.token || auth.type === 'bearer') {
-      const token = auth.token || auth.headerValue;
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
+  if (auth && typeof auth === 'object') {
+    const authAny = auth as Record<string, unknown>;
+    const authType = String(auth.type || authAny.authType || '').trim();
+    const headerName = String(auth.headerName || authAny.authHeaderName || '').trim();
+
+    if (auth.token || authType.toLowerCase() === 'bearer') {
+      const rawToken = String(auth.token || auth.headerValue || '').trim();
+      if (rawToken) {
+        const bearerVal = /^bearer\s+/i.test(rawToken) ? rawToken : `Bearer ${rawToken}`;
+        headers[headerName || 'Authorization'] = bearerVal;
       }
-    } else if (auth.apiKey || auth.type === 'apiKey') {
-      const headerName = auth.headerName || 'X-API-Key';
-      const keyVal = auth.apiKey || auth.headerValue;
+    } else if (auth.apiKey || authType.toLowerCase() === 'apikey') {
+      const keyVal = String(auth.apiKey || auth.headerValue || '').trim();
       if (keyVal) {
-        headers[headerName] = keyVal;
+        headers[headerName || 'X-API-Key'] = keyVal;
       }
-    } else if (auth.headerName && auth.headerValue) {
-      headers[auth.headerName] = auth.headerValue;
+    } else if (headerName && auth.headerValue) {
+      headers[headerName] = String(auth.headerValue);
     }
 
     if (auth.headers && typeof auth.headers === 'object') {
@@ -103,7 +127,7 @@ export async function invokeExternalMcpTool(params: McpExecuteParams): Promise<a
     id: 1,
     method: 'tools/call',
     params: {
-      name: toolId,
+      name: toolId.trim(),
       arguments: args,
     },
   };
@@ -117,15 +141,14 @@ export async function invokeExternalMcpTool(params: McpExecuteParams): Promise<a
 
   let response: Response;
   try {
-    response = await execFetch(serverUrl, {
+    response = await execFetch(parsedUrl.toString(), {
       method: 'POST',
       headers,
       body: JSON.stringify(jsonRpcPayload),
     });
   } catch (netErr: any) {
-    throw new AamarvaError(`Failed to reach MCP server at endpoint: ${netErr.message}`, {
+    throw new AamarvaError(`Failed to reach external MCP server: ${netErr?.message || 'network error'}`, {
       code: 'MCP_SERVER_UNREACHABLE',
-      cause: netErr,
     });
   }
 

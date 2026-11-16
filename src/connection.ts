@@ -35,6 +35,85 @@ export class AamarvaConnection {
     this.http = http;
   }
 
+  private resolveMyAgentId(): string {
+    const httpAny = this.http as any;
+    const fromGetter = typeof httpAny?.getAgentId === 'function' ? httpAny.getAgentId() : undefined;
+    const fromProp = typeof httpAny?.agentId === 'string' ? httpAny.agentId : undefined;
+    return (fromGetter || fromProp || 'me').trim() || 'me';
+  }
+
+  private async fetchVerifiedPeerKey(expectedPeerAgentId?: string): Promise<{
+    rawPeerKey: any;
+    peerFp: string | undefined;
+    peerEpoch: number;
+    peerIdentityKey: any;
+    peerSignature: string | undefined;
+    actualPeerAgentId: string;
+  }> {
+    let peerRes: any;
+    try {
+      peerRes = await this.http.request<any>({
+        method: 'GET',
+        path: `/connections/${encodeURIComponent(this.connectionId)}/peer-key`,
+        auth: true,
+      });
+    } catch (primaryErr: any) {
+      const targetId = (expectedPeerAgentId || this.agentId || '').trim();
+      const statusCode = primaryErr?.statusCode ?? primaryErr?.status;
+      if (targetId && (statusCode === 404 || primaryErr?.code === 'NOT_FOUND')) {
+        peerRes = await this.http.request<any>({
+          method: 'GET',
+          path: `/connections/peer-key/${encodeURIComponent(targetId)}`,
+          auth: true,
+        });
+      } else {
+        throw primaryErr;
+      }
+    }
+
+    const peerData = peerRes.data || peerRes || {};
+    const rawPeerKey = peerData.peerE2eePublicKey || peerData.e2eePublicKey || peerData.publicKey;
+    const peerFp = peerData.peerKeyFingerprint || peerData.keyFingerprint || peerData.fingerprint;
+    const peerIdentityKey = peerData.peerIdentityKey || peerData.identityKey;
+    const peerSignature = peerData.peerKeySignature || peerData.signature;
+    const peerEpoch = Number(peerData.peerKeyEpoch ?? peerData.keyEpoch ?? 1);
+    const actualPeerAgentId = peerData.peerAgentId || peerData.agentId;
+
+    if (!rawPeerKey) {
+      throw new AamarvaError('Peer public key unavailable for connection.', {
+        code: 'PEER_KEY_UNAVAILABLE',
+      });
+    }
+
+    if (!actualPeerAgentId) {
+      throw new AamarvaError('Missing peerAgentId in peer key response.', {
+        code: 'PEER_KEY_VERIFICATION_FAILED',
+      });
+    }
+    if (expectedPeerAgentId && actualPeerAgentId.trim().toUpperCase() !== expectedPeerAgentId.trim().toUpperCase()) {
+      throw new AamarvaError('Peer identity mismatch for public key binding.', {
+        code: 'PEER_KEY_VERIFICATION_FAILED',
+      });
+    }
+
+    if (!peerIdentityKey || !peerSignature) {
+      throw new AamarvaError('Missing peer identity binding material.', {
+        code: 'PEER_KEY_VERIFICATION_FAILED',
+      });
+    }
+
+    verifyPeerKey(rawPeerKey, peerFp, actualPeerAgentId, peerSignature, peerIdentityKey);
+
+    return {
+      rawPeerKey,
+      peerFp,
+      peerEpoch,
+      peerIdentityKey,
+      peerSignature,
+      actualPeerAgentId,
+    };
+  }
+
   /**
    * Send an encrypted private message to the connected peer agent using E2EE
    * @param options Message string or object with message/content property
@@ -47,7 +126,7 @@ export class AamarvaConnection {
       });
     }
 
-    const myAgentId = (typeof (this.http as any)?.getAgentId === 'function' ? (this.http as any).getAgentId() : undefined) || 'me';
+    const myAgentId = this.resolveMyAgentId();
     const localKp = getLocalIdentityKeyPair(myAgentId);
     const localPubJwk = exportPublicKeyJWK(localKp.publicKey);
     const localFp = computeKeyFingerprint(localPubJwk);
@@ -75,53 +154,11 @@ export class AamarvaConnection {
       });
     }
 
-    // 2. Fetch peer public key
-    let rawPeerKey: any;
-    let peerFp: string | undefined;
-    let peerEpoch: number = 1;
-    let peerIdentityKey: any;
-    let peerSignature: string | undefined;
-    let actualPeerAgentId: string | undefined;
-
+    // 2. Fetch and verify peer public key
+    const expectedPeerAgentId = (typeof options === 'object' && options.peerAgentId) || this.agentId;
+    let peerInfo;
     try {
-      const peerRes = await this.http.request<any>({
-        method: 'GET',
-        path: `/connections/${this.connectionId}/peer-key`,
-        auth: true,
-      });
-      const peerData = peerRes.data || peerRes || {};
-      rawPeerKey = peerData.peerE2eePublicKey;
-      peerFp = peerData.peerKeyFingerprint;
-      peerIdentityKey = peerData.peerIdentityKey;
-      peerSignature = peerData.peerKeySignature;
-      peerEpoch = Number(peerData.peerKeyEpoch ?? 1);
-      actualPeerAgentId = peerData.peerAgentId;
-
-      if (!rawPeerKey) {
-        throw new AamarvaError('Peer public key unavailable for connection.', {
-          code: 'PEER_KEY_UNAVAILABLE',
-        });
-      }
-
-      const expectedPeerAgentId = (typeof options === 'object' && options.peerAgentId) || this.agentId;
-      if (!actualPeerAgentId) {
-        throw new AamarvaError('Missing peerAgentId in peer key response.', {
-          code: 'PEER_KEY_VERIFICATION_FAILED',
-        });
-      }
-      if (expectedPeerAgentId && actualPeerAgentId.trim().toUpperCase() !== expectedPeerAgentId.trim().toUpperCase()) {
-        throw new AamarvaError('Peer identity mismatch for public key binding.', {
-          code: 'PEER_KEY_VERIFICATION_FAILED',
-        });
-      }
-
-      if (!peerIdentityKey || !peerSignature) {
-        throw new AamarvaError('Missing peer identity binding material.', {
-          code: 'PEER_KEY_VERIFICATION_FAILED',
-        });
-      }
-
-      verifyPeerKey(rawPeerKey, peerFp, actualPeerAgentId, peerSignature, peerIdentityKey);
+      peerInfo = await this.fetchVerifiedPeerKey(expectedPeerAgentId);
     } catch (err: any) {
       if (err instanceof AamarvaError) throw err;
       throw new AamarvaError(`Failed to fetch peer public key: ${err.message}`, {
@@ -130,11 +167,22 @@ export class AamarvaConnection {
       });
     }
 
-    const envelope = encryptMessageWithKeys(content, this.connectionId, localKp.privateKey, rawPeerKey, peerFp, actualPeerAgentId, peerSignature, peerIdentityKey, peerEpoch);
+    const envelope = encryptMessageWithKeys(
+      content,
+      this.connectionId,
+      localKp.privateKey,
+      peerInfo.rawPeerKey,
+      peerInfo.peerFp,
+      peerInfo.actualPeerAgentId,
+      peerInfo.peerSignature,
+      peerInfo.peerIdentityKey,
+      peerInfo.peerEpoch,
+      myAgentId
+    );
 
     const response = await this.http.request<unknown>({
       method: 'POST',
-      path: `/connections/${this.connectionId}/messages`,
+      path: `/connections/${encodeURIComponent(this.connectionId)}/messages`,
       body: envelope,
       auth: true,
     });
@@ -148,49 +196,9 @@ export class AamarvaConnection {
    * Retrieve normalized and decrypted message list for this connection channel
    */
   public async getMessages(options: { page?: number; limit?: number } = {}): Promise<Message[]> {
-    let rawPeerKey: any;
-    let peerFp: string | undefined;
-    let peerIdentityKey: any;
-    let peerSignature: string | undefined;
-    let actualPeerAgentId: string | undefined;
-
+    let peerInfo;
     try {
-      const peerRes = await this.http.request<any>({
-        method: 'GET',
-        path: `/connections/${this.connectionId}/peer-key`,
-        auth: true,
-      });
-      const peerData = peerRes.data || peerRes || {};
-      rawPeerKey = peerData.peerE2eePublicKey;
-      peerFp = peerData.peerKeyFingerprint;
-      peerIdentityKey = peerData.peerIdentityKey;
-      peerSignature = peerData.peerKeySignature;
-      actualPeerAgentId = peerData.peerAgentId;
-
-      if (!rawPeerKey) {
-        throw new AamarvaError('Peer public key unavailable for connection.', {
-          code: 'PEER_KEY_UNAVAILABLE',
-        });
-      }
-
-      if (!actualPeerAgentId) {
-        throw new AamarvaError('Missing peerAgentId in peer key response.', {
-          code: 'PEER_KEY_VERIFICATION_FAILED',
-        });
-      }
-      if (this.agentId && actualPeerAgentId.trim().toUpperCase() !== this.agentId.trim().toUpperCase()) {
-        throw new AamarvaError('Peer identity mismatch for public key binding.', {
-          code: 'PEER_KEY_VERIFICATION_FAILED',
-        });
-      }
-
-      if (!peerIdentityKey || !peerSignature) {
-        throw new AamarvaError('Missing peer identity binding material.', {
-          code: 'PEER_KEY_VERIFICATION_FAILED',
-        });
-      }
-
-      verifyPeerKey(rawPeerKey, peerFp, actualPeerAgentId, peerSignature, peerIdentityKey);
+      peerInfo = await this.fetchVerifiedPeerKey(this.agentId);
     } catch (err: any) {
       if (err instanceof AamarvaError) throw err;
       throw new AamarvaError(`Failed to fetch peer public key for decryption: ${err.message}`, {
@@ -201,7 +209,7 @@ export class AamarvaConnection {
 
     const response = await this.http.request<unknown[]>({
       method: 'GET',
-      path: `/connections/${this.connectionId}/messages`,
+      path: `/connections/${encodeURIComponent(this.connectionId)}/messages`,
       query: {
         page: options.page || 1,
         limit: options.limit || 50,
@@ -210,23 +218,29 @@ export class AamarvaConnection {
     });
 
     const rawList = Array.isArray(response.data) ? response.data : [];
-
-    const myAgentId = (typeof (this.http as any)?.getAgentId === 'function' ? (this.http as any).getAgentId() : undefined) || 'me';
-    const localKp = getLocalIdentityKeyPair(myAgentId);
+    const myAgentId = this.resolveMyAgentId();
 
     return rawList.map((item) => {
       const msg = normalizeMessage(item, this.connectionId);
       if (msg.ciphertext && msg.nonce) {
         try {
+          const localKp = getLocalIdentityKeyPair(myAgentId, msg.keyEpoch && msg.keyEpoch > 1 ? msg.keyEpoch : undefined);
           msg.content = decryptMessageWithKeys(
-            { ciphertext: msg.ciphertext, nonce: msg.nonce, version: msg.version, keyEpoch: msg.keyEpoch },
+            {
+              ciphertext: msg.ciphertext,
+              nonce: msg.nonce,
+              version: msg.version,
+              keyEpoch: msg.keyEpoch,
+              senderAgentId: msg.senderAgentId,
+            },
             this.connectionId,
             localKp.privateKey,
-            rawPeerKey,
-            peerFp,
-            actualPeerAgentId,
-            peerSignature,
-            peerIdentityKey
+            peerInfo.rawPeerKey,
+            peerInfo.peerFp,
+            peerInfo.actualPeerAgentId,
+            peerInfo.peerSignature,
+            peerInfo.peerIdentityKey,
+            msg.senderAgentId || peerInfo.actualPeerAgentId
           );
         } catch (err: any) {
           throw new AamarvaError(`Failed to decrypt incoming message: ${err.message}`, {

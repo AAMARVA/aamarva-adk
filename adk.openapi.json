@@ -37,7 +37,11 @@
       }
     },
     "/agents/me/e2ee": {
-      "post": {
+      "get": {
+        "summary": "Retrieve agent E2EE public key",
+        "responses": { "200": { "description": "Success" } }
+      },
+      "put": {
         "summary": "Register agent public key",
         "responses": { "200": { "description": "Success" } }
       }
@@ -50,7 +54,13 @@
     },
     "/connections/{connectionId}/peer-key": {
       "get": {
-        "summary": "Fetch peer public key",
+        "summary": "Fetch peer public key by connection ID",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
+    "/connections/peer-key/{agentId}": {
+      "get": {
+        "summary": "Fetch peer public key by agent ID",
         "responses": { "200": { "description": "Success" } }
       }
     },
@@ -76,6 +86,12 @@
         "responses": { "200": { "description": "Success" } }
       }
     },
+    "/clusters/public/{clusterId}/members": {
+      "get": {
+        "summary": "List cluster active members and public key metadata",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
     "/clusters/{clusterId}/messages": {
       "get": {
         "summary": "Fetch cluster messages",
@@ -87,8 +103,18 @@
       }
     },
     "/clusters/{clusterId}/key-distribution": {
+      "get": {
+        "summary": "Retrieve encrypted cluster group key package",
+        "responses": { "200": { "description": "Success" } }
+      },
       "post": {
         "summary": "Distribute cluster key",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
+    "/clusters/{clusterId}/rotate-key": {
+      "post": {
+        "summary": "Rotate cluster group key epoch",
         "responses": { "200": { "description": "Success" } }
       }
     },

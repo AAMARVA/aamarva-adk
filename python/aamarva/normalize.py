@@ -129,6 +129,17 @@ def normalize_cluster(raw: Any) -> Cluster:
     if not isinstance(raw, dict):
         return Cluster(name="", createdAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
 
+    raw_epoch = raw.get("epoch") if raw.get("epoch") is not None else (raw.get("keyEpoch") if raw.get("keyEpoch") is not None else raw.get("key_epoch"))
+    epoch = int(raw_epoch) if isinstance(raw_epoch, (int, float, str)) and str(raw_epoch).isdigit() else None
+    raw_members = raw.get("members")
+    members = None
+    if isinstance(raw_members, list):
+        members = [
+            str(m.get("agentId") or m.get("id") or "") if isinstance(m, dict) else str(m)
+            for m in raw_members
+        ]
+        members = [m for m in members if m]
+
     return Cluster(
         id=str(raw.get("id") or raw.get("clusterId") or ""),
         clusterId=str(raw.get("clusterId") or raw.get("id") or ""),
@@ -137,7 +148,12 @@ def normalize_cluster(raw: Any) -> Cluster:
         ownerUserId=raw.get("ownerUserId") or raw.get("owner_user_id"),
         ownerAgentId=raw.get("ownerAgentId") or raw.get("owner_agent_id"),
         membersCount=raw.get("membersCount") or raw.get("members_count"),
-        members=raw.get("members"),
+        members=members,
+        epoch=epoch,
+        keyEpoch=epoch,
+        keyFingerprint=raw.get("keyFingerprint") or raw.get("key_fingerprint"),
+        rosterHash=raw.get("rosterHash") or raw.get("roster_hash"),
+        rotationStatus=raw.get("rotationStatus") or raw.get("rotation_status"),
         createdAt=raw.get("createdAt"),
         updatedAt=raw.get("updatedAt"),
     )
@@ -147,22 +163,26 @@ def normalize_floor_tool(raw: Any) -> FloorTool:
         return FloorTool(id="", name="", description="", inputSchema={}, accessStatus="required")
 
     schema = raw.get("inputSchema") or raw.get("input_schema") or raw.get("parameters") or {"type": "object"}
+    req_id = raw.get("requestId") or raw.get("request_id") or raw.get("pendingRequestId") or raw.get("pending_request_id")
     return FloorTool(
         id=str(raw.get("id") or raw.get("toolId") or raw.get("tool_id") or ""),
         name=str(raw.get("name") or ""),
         description=str(raw.get("description") or ""),
         inputSchema=schema if isinstance(schema, dict) else {"type": "object"},
-        accessStatus=str(raw.get("accessStatus") or raw.get("access_status") or raw.get("status") or "required"),
+        accessStatus=str(raw.get("accessStatus") or raw.get("access_status") or raw.get("status") or "required").strip().lower(),
+        requestId=str(req_id).strip() if isinstance(req_id, str) and req_id.strip() else None,
     )
 
 def normalize_floor_request_status(raw: Any) -> FloorAccessRequestStatus:
     if not isinstance(raw, dict):
         return FloorAccessRequestStatus(requestId="", status="pending")
 
+    inv_id = raw.get("invocationId") or raw.get("invocation_id")
     return FloorAccessRequestStatus(
         requestId=str(raw.get("requestId") or raw.get("request_id") or raw.get("id") or ""),
-        status=str(raw.get("status") or "pending"),
+        status=str(raw.get("status") or "pending").strip().lower(),
         toolId=raw.get("toolId") or raw.get("tool_id"),
+        invocationId=str(inv_id).strip() if isinstance(inv_id, str) and inv_id.strip() else None,
         agentId=raw.get("agentId") or raw.get("agent_id"),
         reason=raw.get("reason"),
         createdAt=raw.get("createdAt"),
