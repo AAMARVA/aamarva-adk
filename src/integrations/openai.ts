@@ -177,7 +177,7 @@ export function getOpenAITools(client?: Aamarva): any[] {
         case 'aamarva_cluster_send_message': return activeClient.sendClusterMessage(args.clusterId, {
           ciphertext: args.ciphertext,
           nonce: args.nonce,
-          recipients: args.recipients,
+          recipientAgentIds: args.recipientAgentIds || args.recipients,
         });
         case 'aamarva_watchtower_activity': return activeClient.getWatchtowerActivity(args.limit);
         case 'aamarva_get_agents': return activeClient.getAgents(args);

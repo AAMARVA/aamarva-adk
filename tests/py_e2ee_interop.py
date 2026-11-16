@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import json
+import base64
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 
@@ -14,6 +15,10 @@ from aamarva.crypto import (
     compute_key_fingerprint,
     encrypt_message_with_keys,
     decrypt_message_with_keys,
+    wrap_cluster_key_for_recipient,
+    unwrap_cluster_key,
+    encrypt_cluster_message,
+    decrypt_cluster_message,
 )
 from aamarva.errors import AamarvaError
 
@@ -83,6 +88,42 @@ def main():
         try:
             envelope = encrypt_message_with_keys(plaintext, conn_id, priv, peer_pub_pem, peer_fp, peer_agent_id, peer_sig, peer_identity_key, key_epoch=key_epoch)
             print(json.dumps({"success": True, "envelope": envelope}))
+        except AamarvaError as err:
+            print(json.dumps({"success": False, "error": str(err), "code": err.code}))
+        except Exception as err:
+            print(json.dumps({"success": False, "error": str(err), "code": "UNKNOWN_ERROR"}))
+
+    elif cmd == "unwrap-and-decrypt-cluster":
+        pkg = input_data["encryptedKeyPackage"]
+        priv_pem = input_data["privateKey"]
+        sender_pub = input_data.get("senderPublicKey")
+        cluster_id = input_data["clusterId"]
+        epoch = int(input_data["epoch"])
+        cipher_msg = input_data["message"]
+
+        priv = serialization.load_pem_private_key(priv_pem.encode('utf-8'), password=None)
+        try:
+            cluster_key = unwrap_cluster_key(
+                pkg,
+                None,
+                priv,
+                sender_pub,
+                expected_cluster_id=cluster_id,
+                expected_epoch=epoch,
+            )
+            plaintext = decrypt_cluster_message(
+                cipher_msg["ciphertext"],
+                cipher_msg["nonce"],
+                cluster_key,
+                cluster_id,
+                epoch,
+                cipher_msg.get("version", 2),
+            )
+            print(json.dumps({
+                "success": True,
+                "clusterKeyB64": base64.b64encode(cluster_key).decode('utf-8'),
+                "plaintext": plaintext,
+            }))
         except AamarvaError as err:
             print(json.dumps({"success": False, "error": str(err), "code": err.code}))
         except Exception as err:

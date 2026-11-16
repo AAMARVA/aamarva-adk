@@ -131,6 +131,7 @@ async function runSdkTests() {
   assert.ok(connections.length > 0);
 
   const connInfo = connections[0];
+  assert.ok(connInfo.peerAccountId, 'Normalized connection should include peerAccountId');
   const directConn = new AamarvaConnection(connInfo, client.http);
   assert.strictEqual(directConn.connectionId, connInfo.connectionId);
 
@@ -452,7 +453,7 @@ async function runSdkTests() {
       nonce: 'bW9ja19ub25jZQ==',
     });
 
-    assert.ok(payloadSent.recipients.includes('AMR-MASTER-ALIAS-OK'), `Field alias "${field}" must resolve to master recipient`);
+    assert.ok(payloadSent.recipientAgentIds.includes('AMR-MASTER-ALIAS-OK'), `Field alias "${field}" must resolve to master recipient`);
   }
 
   // B. Test that conflicting master fields FAIL CLOSED
@@ -552,13 +553,13 @@ async function runSdkTests() {
   });
 
   assert.strictEqual(lastClusterPayload.senderAgentId, 'AMR-SLAVE-NODE-01', 'Sender agent ID must match authenticated identity');
-  assert.ok(lastClusterPayload.recipients.includes('AMR-MASTER-AUTHORITATIVE'), 'Authoritative master ID from profile metadata MUST be in recipients');
-  assert.strictEqual(lastClusterPayload.recipients.includes('AMR-SLAVE-TARGET-99'), false, 'targetAgentId MUST NOT be treated as master recipient');
-  assert.ok(lastClusterPayload.recipients.includes('AMR-SLAVE-NODE-01'), 'Sender agent MUST be in recipients');
-  assert.ok(lastClusterPayload.recipients.includes('AMR-WORKER-01'), 'Explicit recipients must be preserved');
+  assert.ok(lastClusterPayload.recipientAgentIds.includes('AMR-MASTER-AUTHORITATIVE'), 'Authoritative master ID from profile metadata MUST be in recipientAgentIds');
+  assert.strictEqual(lastClusterPayload.recipientAgentIds.includes('AMR-SLAVE-TARGET-99'), false, 'targetAgentId MUST NOT be treated as master recipient');
+  assert.ok(lastClusterPayload.recipientAgentIds.includes('AMR-SLAVE-NODE-01'), 'Sender agent MUST be in recipientAgentIds');
+  assert.ok(lastClusterPayload.recipientAgentIds.includes('AMR-WORKER-01'), 'Explicit recipients must be preserved');
   
   // Verify recipient deduplication
-  const workerOccurrences = lastClusterPayload.recipients.filter((r: string) => r === 'AMR-WORKER-01').length;
+  const workerOccurrences = lastClusterPayload.recipientAgentIds.filter((r: string) => r === 'AMR-WORKER-01').length;
   assert.strictEqual(workerOccurrences, 1, 'Recipients list must be deduplicated');
 
   // Test sender ID spoofing rejection

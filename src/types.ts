@@ -2,6 +2,15 @@
  * Core type definitions for the AAMARVA Fleet-Only Agent Development Kit (ADK)
  */
 
+export type AgentLifecycleState =
+  | 'unauthenticated'
+  | 'authenticated'
+  | 'effective_identity_resolved'
+  | 'local_keys_loaded'
+  | 'keys_registered'
+  | 'verified'
+  | 'e2ee_ready';
+
 export interface Agent {
   agentId: string;
   name: string;
@@ -10,6 +19,10 @@ export interface Agent {
   status?: string;
   avatar?: string;
   avatarUrl?: string;
+  role?: string;
+  isMaster?: boolean;
+  isSlave?: boolean;
+  verificationStatus?: string;
   masterId?: string;
   masterAgentId?: string;
   ownerAgentId?: string;
@@ -22,6 +35,7 @@ export interface Connection {
   connectionId: string;
   agentId: string;
   peerAgentId?: string;
+  peerAccountId?: string;
   connectedAgentName?: string;
   status: 'active' | 'closed' | string;
   createdAt: string;
@@ -54,6 +68,7 @@ export interface Footprint {
   action: string;
   details?: string;
   target?: string;
+  agentId?: string;
   timestamp: string;
 }
 
@@ -73,6 +88,11 @@ export interface ApiResponse<T = unknown> {
   error?: string | { code?: string; message?: string; retryable?: boolean };
   code?: string;
   isRawText?: boolean;
+  ticket?: string;
+  expiresAt?: string;
+  streamUrl?: string;
+  status?: string;
+  requestId?: string;
 }
 
 export interface AuthTokens {
@@ -110,6 +130,8 @@ export interface AamarvaConfig {
   fetch?: typeof fetch;
   /** Auto-authenticate on first protected request if agentId & apiKey are provided (default: true) */
   autoLogin?: boolean;
+  /** Explicit opt-in to allow insecure http:// MCP server URLs on localhost/127.0.0.1/::1 (default: false) */
+  allowInsecureHttpForLocalhost?: boolean;
 }
 
 export interface SendMessageOptions {
@@ -153,23 +175,48 @@ export interface E2eeRegistrationPayload {
   identityKey: ECJWK;
   signature: string;
   allowRotation?: boolean;
+  keyVersion?: number;
   keyEpoch?: number;
 }
 
+export interface PeerEpochKeyEntry {
+  keyEpoch?: number;
+  keyVersion?: number;
+  epoch?: number;
+  publicKey?: ECJWK | string;
+  e2eePublicKey?: ECJWK | string;
+  peerE2eePublicKey?: ECJWK | string;
+  fingerprint?: string;
+  keyFingerprint?: string;
+  peerKeyFingerprint?: string;
+  signature?: string;
+  keySignature?: string;
+  peerKeySignature?: string;
+  identityKey?: ECJWK | string;
+  peerIdentityKey?: ECJWK | string;
+  [key: string]: unknown;
+}
+
 export interface PeerKeyResponse {
+  connectionId?: string;
+  peerAccountId?: string;
+  peerAgentId?: string;
   peerE2eePublicKey?: ECJWK | string;
   peerKeyFingerprint?: string;
   peerIdentityKey?: ECJWK | string;
   peerKeySignature?: string;
   peerKeyEpoch?: number;
-  peerEpochHistory?: unknown[];
+  peerEpochHistory?: PeerEpochKeyEntry[];
+  peerEpochKeys?: PeerEpochKeyEntry[] | Record<string, PeerEpochKeyEntry>;
   publicKey?: ECJWK | string;
   fingerprint?: string;
   identityKey?: ECJWK | string;
   signature?: string;
   keyEpoch?: number;
-  epochHistory?: unknown[];
+  keyVersion?: number;
+  epochHistory?: PeerEpochKeyEntry[];
   agentId?: string;
+  [key: string]: unknown;
 }
 
 export interface PeerKeyInfo {
@@ -178,7 +225,7 @@ export interface PeerKeyInfo {
   identityKey?: ECJWK | string;
   signature?: string;
   keyEpoch: number;
-  epochHistory?: unknown[];
+  epochHistory?: PeerEpochKeyEntry[];
   agentId?: string;
 }
 
@@ -191,6 +238,7 @@ export interface Cluster {
   ownerAgentId?: string;
   membersCount?: number;
   members?: string[];
+  epoch?: number;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -204,6 +252,7 @@ export interface ClusterMessage {
   version?: number;
   keyEpoch?: number;
   recipients?: string[];
+  recipientAgentIds?: string[];
   createdAt: string;
 }
 
@@ -224,6 +273,7 @@ export interface SendClusterMessageOptions {
   version?: number;
   keyEpoch?: number;
   recipients?: string[];
+  recipientAgentIds?: string[];
   senderAgentId?: string;
 }
 
@@ -235,7 +285,10 @@ export interface WatchtowerActivity {
   id: string;
   type: string;
   actorAgentId?: string;
+  actorAgentName?: string;
   targetAgentId?: string;
+  category?: string;
+  outcome?: string;
   summary: string;
   details?: Record<string, unknown>;
   timestamp: string;
@@ -247,6 +300,14 @@ export interface WatchtowerStreamTicket {
   expiresAt: string;
 }
 
+export interface WatchtowerStreamEvent {
+  id?: string;
+  event: string;
+  data: unknown;
+  rawData?: string;
+  raw?: string;
+}
+
 // =============================================================================
 // FLOOR MCP Tool Governance
 // =============================================================================
@@ -255,23 +316,39 @@ export interface FloorTool {
   id: string;
   name: string;
   description: string;
+  serverId?: string;
+  serverName?: string;
+  serverUrl?: string;
+  authType?: string;
+  authHeaderName?: string;
   inputSchema: {
     type?: string;
     properties?: Record<string, unknown>;
     required?: string[];
     [key: string]: unknown;
   };
-  accessStatus: 'authorized' | 'pending' | 'required' | 'revoked' | string;
+  accessStatus: 'authorized' | 'granted' | 'hitl' | 'pending' | 'required' | 'unassigned' | 'revoked' | string;
+}
+
+export interface FloorToolPolicy {
+  toolId: string;
+  accessStatus?: string;
+  policy?: string;
+  requiresApproval?: boolean;
+  serverId?: string;
+  serverUrl?: string;
+  authType?: string;
+  [key: string]: unknown;
 }
 
 export interface FloorToolInvokeOptions {
   arguments: Record<string, unknown>;
   reason?: string;
-  requestType?: 'execute' | 'access_request' | string;
+  requestType?: 'execute' | 'access' | 'access_request' | string;
 }
 
 export interface FloorToolInvokeResult {
-  status: 'pending' | 'completed' | 'executed' | 'approved' | string;
+  status: 'pending' | 'accepted' | 'completed' | 'executed' | 'approved' | string;
   requestId?: string;
   invocationId?: string;
   toolId?: string;
@@ -284,8 +361,21 @@ export interface FloorInvocationResponse {
   invocationId: string;
   requestId?: string;
   toolId?: string;
-  status: 'pending' | 'approved' | 'rejected' | string;
+  status: 'pending' | 'accepted' | 'approved' | 'rejected' | 'denied' | string;
+  result?: unknown;
   message?: string;
+  [key: string]: unknown;
+}
+
+export interface FloorAuthConfig {
+  authType?: 'none' | 'bearer' | 'api_key' | 'apiKey' | 'custom_header' | 'header' | string;
+  type?: string;
+  authHeaderName?: string;
+  headerName?: string;
+  headerValue?: string;
+  token?: string;
+  apiKey?: string;
+  headers?: Record<string, string>;
   [key: string]: unknown;
 }
 
@@ -294,17 +384,23 @@ export interface FloorExecutionAuthorization {
   toolId: string;
   status: 'approved' | string;
   serverUrl: string;
-  auth?: {
-    type?: string;
-    token?: string;
-    apiKey?: string;
-    headerName?: string;
-    headerValue?: string;
-    headers?: Record<string, string>;
+  authConfig?: FloorAuthConfig;
+  auth?: FloorAuthConfig;
+  verificationInfo?: {
+    verified?: boolean;
+    toolId?: string;
+    agentId?: string;
     [key: string]: unknown;
   };
+  grantToken?: string;
+  accessToken?: string;
+  scope?: string;
+  expiresAt?: string;
+  approvedArguments?: Record<string, unknown>;
+  tool?: { id?: string; name?: string; [key: string]: unknown };
   grant?: {
     id?: string;
+    grantId?: string;
     agentId?: string;
     toolId?: string;
     status?: string;
@@ -316,7 +412,7 @@ export interface FloorExecutionAuthorization {
 
 export interface FloorAccessRequestStatus {
   requestId: string;
-  status: 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired' | string;
+  status: 'pending' | 'accepted' | 'approved' | 'rejected' | 'denied' | 'revoked' | 'expired' | string;
   toolId?: string;
   invocationId?: string;
   agentId?: string;
@@ -332,12 +428,16 @@ export interface GetAgentsOptions {
 }
 
 export interface AgentE2eeKeyResponse {
+  agentId?: string;
   publicKey?: ECJWK | string;
   fingerprint?: string;
   identityKey?: ECJWK | string;
+  signature?: string;
+  hasIdentityBinding?: boolean;
   keyVersion?: number;
   keyEpoch?: number;
   allowRotation?: boolean;
+  epochHistory?: PeerEpochKeyEntry[];
   [key: string]: unknown;
 }
 
@@ -346,9 +446,11 @@ export interface ClusterKeyDistributionResponse {
   epoch?: number;
   keyFingerprint?: string;
   senderAgentId?: string;
+  senderPublicKey?: ECJWK | string;
   recipientAgentId?: string;
+  recipientKeyFingerprint?: string;
   wrappingParams?: Record<string, unknown>;
   encryptedKeyPackage?: string;
+  nonce?: string;
   [key: string]: unknown;
 }
-

@@ -30,14 +30,20 @@ export {
   normalizeWatchtowerActivity,
 } from './normalize.js';
 
-
 export { createMockFetch, createMockDataStore } from './mock.js';
 export { runCli } from './cli.js';
 export type {
   EncryptedEnvelope,
   KeyStore,
+  ClusterWrappingParams,
+  WrappedClusterKeyPackage,
 } from './crypto.js';
 export {
+  CHANNEL_HKDF_SALT,
+  CHANNEL_HKDF_INFO_PREFIX,
+  CLUSTER_KEY_WRAP_VERSION,
+  CLUSTER_KEY_WRAP_ALGORITHM,
+  CLUSTER_KEY_AAD_PREFIX,
   InMemoryKeyStore,
   FileSystemKeyStore,
   setKeyStore,
@@ -45,20 +51,37 @@ export {
   resetLocalIdentityKeyPair,
   generateECKeyPair,
   getLocalIdentityKeyPair,
+  getLocalIdentitySigningKeyPair,
+  getLocalEcdhKeyPair,
+  findLocalEcdhKeyPair,
+  getLatestLocalEcdhEpoch,
+  rotateLocalEcdhKeyPair,
   getLocalPublicKeyPem,
   exportPublicKeyJWK,
   importPublicKey,
   computeKeyFingerprint,
+  computeClusterKeyFingerprint,
+  computeAudienceHash,
+  computeRosterHash,
   createIdentityBindingString,
   signIdentityBinding,
   verifyIdentityBinding,
   verifyPeerKey,
+  deriveSharedSecret,
+  deriveConnectionAesKey,
   encryptMessageWithKeys,
   decryptMessageWithKeys,
   generateClusterKey,
+  buildClusterWrappingParams,
   wrapClusterKeyForRecipient,
   unwrapClusterKey,
   encryptClusterMessagePayload,
   decryptClusterMessagePayload,
 } from './crypto.js';
+export {
+  assertSafeMcpServerUrl,
+  validateToolArguments,
+  buildMcpAuthHeaders,
+  invokeExternalMcpTool,
+} from './mcp-executor.js';
 export * from './types.js';

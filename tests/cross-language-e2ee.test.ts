@@ -7,7 +7,10 @@ import {
   computeKeyFingerprint,
   encryptMessageWithKeys,
   decryptMessageWithKeys,
-  signIdentityBinding
+  signIdentityBinding,
+  generateClusterKey,
+  wrapClusterKeyForRecipient,
+  encryptClusterMessagePayload,
 } from '../src/crypto.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -192,6 +195,30 @@ async function runCrossLanguageE2EETest() {
     (err: any) => err?.code === 'MESSAGE_DECRYPTION_FAILED'
   );
   console.log('✓ Tampered Python ciphertext correctly rejected by TypeScript AEAD authentication.');
+
+  // 9. Cluster E2EE key wrap + v2 cluster message interop (TypeScript -> Python)
+  const clusterKey = generateClusterKey();
+  const clusterId = 'clu_cross_1';
+  const clusterEpoch = 1;
+  const wrappedForPy = wrapClusterKeyForRecipient(
+    clusterKey,
+    agentBPubPem,
+    agentAKeyPair.privateKey,
+    { clusterId, epoch: clusterEpoch }
+  );
+  const clusterMsg = encryptClusterMessagePayload('cluster hello from TS', clusterKey, clusterId, clusterEpoch);
+  const pyClusterRes = callPython('unwrap-and-decrypt-cluster', {
+    encryptedKeyPackage: wrappedForPy.encryptedKeyPackage,
+    privateKey: agentBPrivPem,
+    senderPublicKey: agentAPubPem,
+    clusterId,
+    epoch: clusterEpoch,
+    message: clusterMsg,
+  });
+  assert.strictEqual(pyClusterRes.success, true, `Python cluster unwrap/decrypt failed: ${pyClusterRes.error}`);
+  assert.strictEqual(pyClusterRes.plaintext, 'cluster hello from TS');
+  assert.strictEqual(pyClusterRes.clusterKeyB64, clusterKey.toString('base64'));
+  console.log('✓ Cross-language AAMARVA_CLUSTER_KEY_WRAP_V1 + cluster v2 message interop verified.');
 
   console.log('--- ALL CROSS-LANGUAGE E2EE INTEROPERABILITY TESTS PASSED ---');
 }

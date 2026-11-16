@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Union
 
+
 @dataclass
 class Agent:
     agentId: str
@@ -10,11 +11,16 @@ class Agent:
     status: Optional[str] = None
     avatar: Optional[str] = None
     avatarUrl: Optional[str] = None
+    role: Optional[str] = None
+    isMaster: Optional[bool] = None
+    isSlave: Optional[bool] = None
+    verificationStatus: Optional[str] = None
     masterId: Optional[str] = None
+    masterAgentId: Optional[str] = None
+    ownerAgentId: Optional[str] = None
     slaveIds: Optional[List[str]] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
-
 
 
 @dataclass
@@ -24,8 +30,10 @@ class Connection:
     status: str
     createdAt: str
     peerAgentId: Optional[str] = None
+    peerAccountId: Optional[str] = None
     connectedAgentName: Optional[str] = None
     updatedAt: Optional[str] = None
+
 
 @dataclass
 class Message:
@@ -41,6 +49,7 @@ class Message:
     keyEpoch: Optional[int] = None
     raw: Optional[str] = None
 
+
 @dataclass
 class Cluster:
     name: str
@@ -51,8 +60,10 @@ class Cluster:
     ownerAgentId: Optional[str] = None
     membersCount: Optional[int] = None
     members: Optional[List[str]] = None
+    epoch: Optional[int] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
+
 
 @dataclass
 class ClusterMessage:
@@ -65,6 +76,8 @@ class ClusterMessage:
     version: Optional[int] = None
     keyEpoch: Optional[int] = None
     recipients: Optional[List[str]] = None
+    recipientAgentIds: Optional[List[str]] = None
+
 
 @dataclass
 class WatchtowerActivity:
@@ -73,14 +86,27 @@ class WatchtowerActivity:
     summary: str
     timestamp: str
     actorAgentId: Optional[str] = None
+    actorAgentName: Optional[str] = None
     targetAgentId: Optional[str] = None
+    category: Optional[str] = None
+    outcome: Optional[str] = None
     details: Optional[Dict[str, Any]] = None
+
 
 @dataclass
 class WatchtowerStreamTicket:
     ticket: str
     streamUrl: str
     expiresAt: str
+
+
+@dataclass
+class WatchtowerStreamEvent:
+    event: str
+    data: Any
+    id: Optional[str] = None
+    raw: Optional[str] = None
+
 
 @dataclass
 class FloorTool:
@@ -89,6 +115,12 @@ class FloorTool:
     description: str
     inputSchema: Dict[str, Any]
     accessStatus: str
+    serverId: Optional[str] = None
+    serverName: Optional[str] = None
+    serverUrl: Optional[str] = None
+    authType: Optional[str] = None
+    authHeaderName: Optional[str] = None
+
 
 @dataclass
 class FloorToolInvokeResult:
@@ -100,14 +132,14 @@ class FloorToolInvokeResult:
     message: Optional[str] = None
     serverUrl: Optional[str] = None
 
+
 @dataclass
 class FloorAccessRequestStatus:
     requestId: str
     status: str
     toolId: Optional[str] = None
+    invocationId: Optional[str] = None
     agentId: Optional[str] = None
     reason: Optional[str] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None
-
-

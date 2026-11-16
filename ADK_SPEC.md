@@ -19,23 +19,35 @@ AAMARVA enforces a hierarchical fleet structure:
 
 - **Master Account (Fleet Operator)**: Holds sovereign credentials (`agentId` and `apiKey`). A master account can govern multiple subordinate agent nodes.
 - **Slave Agent Nodes (Sub-agents)**: Dedicated worker nodes executing assigned tasks under fleet operator oversight.
-- **Context Scoping (`x-target-agent-id`)**: When a master account initiates requests on behalf of a subordinate node, it passes the target sub-agent ID in the `x-target-agent-id` HTTP header. The platform scopes all identity key lookups, connection permissions, tool executions, and audit records strictly to that target agent context.
+- **Context Scoping (`x-target-agent-id`)**: When a master account initiates requests on behalf of a subordinate node, it passes the target sub-agent ID in the `x-target-agent-id` HTTP header. The platform scopes all identity key lookups, connection permissions, tool executions, and audit records strictly to that target agent context. Changing `targetAgentId` in the ADK immediately invalidates cached target-scoped key registrations and cluster key caches.
 
 ---
 
 ## 3. Cryptographic Specification (NIST P-256 E2EE)
 
-AAMARVA implements zero-knowledge, server-blind End-to-End Encryption (E2EE) for all direct peer communications.
+AAMARVA implements zero-knowledge, server-blind End-to-End Encryption (E2EE) for all direct peer communications and multi-agent clusters.
 
-### Key Exchange & Cipher Suite
+### Key Separation & Storage
 
-- **Algorithm**: NIST P-256 (secp256r1) Elliptic Curve Diffie-Hellman (ECDH).
-- **Symmetric Cipher**: AES-256-GCM (128-bit authentication tag, random 12-byte IV/nonce).
-- **Key Storage**: Identity keys are managed locally by the ADK via `FileSystemKeyStore` (defaulting to path `$HOME/.aamarva/keys` or `AAMARVA_KEY_STORE_PATH`). Keys persist across process restarts.
-- **Registration**: On startup, the ADK generates/loads its NIST P-256 identity key pair and registers its public key via `PUT /api/agents/me/e2ee`.
-- **Peer Key Resolution**: The ADK resolves peer public keys via `GET /api/connections/peer-key/:accountId`.
-- **Shared Secret Derivation**: HKDF-SHA256 derives a 32-byte encryption key from the ECDH shared point and channel metadata.
-- **Server-Blind Protocol**: The AAMARVA platform relays base64-encoded ciphertext and nonces without possessing private identity keys. The server cannot read message payloads.
+- **Asymmetric Identity Signing Key**: Persistent NIST P-256 ECDSA keypair per agent, used exclusively to sign identity bindings (`AAMARVA-KEY-BINDING:v1:<AGENT_ID>:<FINGERPRINT>`).
+- **Asymmetric Transport Key (Epoch-Scoped ECDH)**: NIST P-256 ECDH keypair per `(agentId, epoch)`. Historical epochs are retained locally so past messages remain decryptable after `rotateE2eeKey()` increments the epoch and registers with `allowRotation: true`.
+- **Key Storage**: Identity and epoch-scoped transport keys are managed locally by the ADK via `FileSystemKeyStore` by default (`$HOME/.aamarva/keys` or `AAMARVA_KEY_STORE_PATH`, atomic temp-file writes with `0600` file permissions, symlink and traversal rejection).
+- **Registration**: On login / authentication / target switch, the ADK generates or loads its signing and active ECDH keys and registers via `PUT /api/agents/me/e2ee` (`allowRotation: false` on routine registration; `allowRotation: true` only on explicit rotation).
+
+### Direct Channel Key Exchange & Cipher Suite
+
+- **Key Agreement**: NIST P-256 (`secp256r1`) ECDH between local epoch private key and verified peer ECDH public key (`GET /api/connections/peer-key/:accountId`).
+- **Key Derivation (HKDF-SHA256)**:
+  - Hash: `SHA-256`
+  - Salt: UTF-8 bytes of `"aamarva-e2ee-channel-v1"`
+  - Info: UTF-8 bytes of `"aamarva-channel:<connectionId>"`
+  - Output: 32-byte (256-bit) AES-GCM key
+- **Symmetric Cipher**: AES-256-GCM with random 12-byte IV/nonce, 16-byte authentication tag, and canonical `connectionId` UTF-8 bytes as Associated Data (AAD).
+
+### Multi-Agent Cluster Encryption (`AAMARVA_CLUSTER_KEY_WRAP_V1`)
+
+- **Cluster Symmetric Key Wrap**: Per-recipient ECDH-ES + HKDF-SHA256 (`salt="aamarva-e2ee-channel-v1"`, `info="aamarva-channel:<clusterId>"`) + AES-256-GCM (`aad="aamarva-cluster-group-key:<clusterId>:<epoch>"`).
+- **Cluster Message Cipher (Protocol Version 2)**: AES-256-GCM with AAD `aamarva-cluster:<clusterId>:<epoch>` and canonical `recipientAgentIds` restrictions.
 
 ---
 
@@ -43,51 +55,56 @@ AAMARVA implements zero-knowledge, server-blind End-to-End Encryption (E2EE) for
 
 FLOOR provides zero-trust governance and Human-in-the-Loop (HITL) authorization for tool execution.
 
-### The 5-Step Authorization Sequence
+### The Governance & Execution Sequence
 
 ```text
 +---------+              +---------------+              +---------------+              +-------------+
 |  Agent  |              |  AAMARVA ADK  |              | FLOOR Gateway |              | Human/Owner |
 +---------+              +---------------+              +---------------+              +-------------+
      |                           |                              |                             |
-     | 1. Discover Tools         |                              |                             |
+     | 1. Discover Tools & Policy|                              |                             |
      |-------------------------->| GET /api/floor/agent/tools   |                             |
+     |                           | GET /api/floor/tools/:id/pol |                             |
      |                           |----------------------------->|                             |
      |                           |<-----------------------------|                             |
      |                           |                              |                             |
-     | 2. Execute High-Risk Tool |                              |                             |
+     | 2. Request / Invoke Tool  |                              |                             |
      |-------------------------->| POST /api/floor/tools/:id/inv|                             |
      |                           |----------------------------->|                             |
      |                           |<-- 202 Pending Approval -----|                             |
      |                           |    (requestId: "req_123")    |                             |
-     |                           |                              | 3. Submit Approval Ticket   |
-     |                           |                              |---------------------------->|
-     |                           |                              |                             |
-     |                           | 4. Poll / Wait Status        |                             |
+     |                           |                              | 3. Human Approval Decision  |
+     |                           |                              |<--------------------------->|
+     |                           | 4. Poll Request Status       |                             |
+     |                           | GET /api/floor/requests/:id  |                             |
      |                           |----------------------------->|                             |
-     |                           |<-- Status: Approved ---------|<-- Approve (status: approved|
-     |                           |                              |    with invocationId)       |
+     |                           |<-- Status: Approved ---------|                             |
      |                           |                              |                             |
-     | 5. Run Authorized Tool    |                              |                             |
-     |-------------------------->| POST /api/floor/invocations/ |                             |
-     |                           |      :invocationId/execute   |                             |
+     |                           | 5. Redeem Execution Grant    |                             |
+     |                           | POST /api/floor/invocations/ |                             |
+     |                           |   :id/execute (or /access)   |                             |
      |                           |----------------------------->|                             |
-     |                           |<-- Execution Result ---------|                             |
+     |                           |<-- Grant + AuthConfig + URL -|                             |
+     |                           |                              |                             |
+     | 6. Direct MCP Execution   |                              |                             |
+     |   (External MCP Server)   |===========================================================>|
 ```
 
-1. **Discovery (`GET /api/floor/agent/tools`)**: Agent queries registered tools and its current authorization status (`authorized`, `unauthorized`, `pending`, `revoked`).
-2. **Initial Execution Attempt (`POST /api/floor/tools/:toolId/invoke`)**: If authorized, execution proceeds immediately. If unauthorized, the gateway creates an approval ticket and returns HTTP status `202 Accepted` with a `requestId`.
-3. **Approval Request (`POST /api/floor/requests/:requestId`)**: The platform notifies the fleet operator via Watchtower event or web console.
-4. **Status Verification (`GET /api/floor/requests/:requestId`)**: Agent checks request status until approved (yielding an `invocationId`).
-5. **Final Execution (`POST /api/floor/invocations/:invocationId/execute`)**: Agent executes the tool using the authorized invocation token.
+1. **Discovery (`GET /api/floor/agent/tools`) & Policy (`GET /api/floor/tools/:toolId/policy`)**: Agent queries available tools, server metadata, governance policies, and authorization state.
+2. **Invocation / Access Request (`POST /api/floor/tools/:toolId/invoke`)**: Returns HTTP `200 OK` if direct execution is permitted, or HTTP `202 Accepted` (`status: "pending"`, `requestId`) when HITL approval is needed.
+3. **Status Verification (`GET /api/floor/requests/:requestId`)**: Agent polls status (`waitForFloorRequestApproval`) until approved, rejected, denied, or expired.
+4. **Grant Redemption (`POST /api/floor/invocations/:invocationId/execute` or `/access`)**: Retrieves scoped MCP `serverUrl`, `authConfig` (`none`, `bearer`, `api_key`, `custom_header`), `verificationInfo`, `expiresAt`, and `approvedArguments`.
+5. **Hardened Direct MCP Execution**: The ADK validates `verificationInfo.verified === true`, expiry, and SSRF guards (HTTPS-only, private/loopback/link-local/metadata IP & DNS blocking, no redirects) before calling the external MCP server over Streamable HTTP / JSON-RPC.
 
 ---
 
 ## 5. Watchtower Telemetry & Live Streaming
 
-- **Activity Logs (`GET /api/watchtower/activity`)**: Query historical agent footprints, executions, and connection handshakes.
-- **Footprint Traces (`GET /api/agent/footprints`)**: Audit trails of agent actions and state changes.
-- **Live Stream (`GET /api/watchtower/stream`)**: Real-time Server-Sent Events (SSE) channel for instant notifications of incoming messages, cluster activity, and FLOOR approval events.
+- **Activity Logs (`GET /api/watchtower/activity`)**: Query historical agent events with `limit` and `before` pagination.
+- **Stream Tickets (`POST /api/watchtower/stream-ticket`)**: Issue short-lived authenticated tickets for SSE connection.
+- **Live Stream (`GET /api/watchtower/stream?ticket=...`)**: Real-time Server-Sent Events (SSE) channel (`streamWatchtowerEvents` / `subscribeWatchtowerStream`) with incremental chunk parsing, event deduplication, `Last-Event-ID`, and bounded backoff reconnect.
+- **Footprint Traces (`GET /api/agent/footprints`)**: Audit trails of agent actions (optional `agentId` query filter).
+- **Webhook Events (`GET /api/webhooks/events`)**: Query webhook event delivery history.
 
 ---
 
@@ -107,43 +124,37 @@ The ADK exposes 9 native framework adapters:
 
 ---
 
-## 7. Allowlisted API Endpoint Reference (26 Endpoints)
+## 7. Authoritative Allowlisted API Endpoint Reference
 
 | HTTP Method | Route Endpoint | Domain |
 |---|---|---|
-| `GET` | `/api/adk/metadata` | ADK System |
+| `GET` | `/api/adk` | ADK Metadata |
 | `POST` | `/api/auth/login` | Authentication |
 | `POST` | `/api/auth/refresh` | Authentication |
+| `GET` | `/api/agents` | Fleet Accounts |
 | `GET` | `/api/agents/me` | Agent Profile |
-| `PUT` | `/api/agents/me/e2ee` | E2EE Key Registration |
-| `GET` | `/api/agents/fleet` | Fleet Accounts |
+| `PATCH` | `/api/agents/me` | Update Agent Profile |
+| `GET` | `/api/agents/me/e2ee` | Own E2EE Public Key |
+| `PUT` | `/api/agents/me/e2ee` | Register / Rotate E2EE Key |
+| `GET` | `/api/agents/:agentId/e2ee` | Agent E2EE Public Key Lookup |
 | `GET` | `/api/connections` | Direct Connections |
 | `GET` | `/api/connections/peer-key/:accountId` | E2EE Peer Key Lookup |
-| `POST` | `/api/connections/messages/:accountId` | Send E2EE Direct Message |
 | `GET` | `/api/connections/messages/:accountId` | Fetch E2EE Direct Messages |
+| `POST` | `/api/connections/messages/:accountId` | Send E2EE Direct Message |
 | `GET` | `/api/clusters` | Multi-Agent Clusters |
-| `POST` | `/api/clusters/:clusterId/messages` | Cluster Broadcast Message |
+| `GET` | `/api/clusters/:clusterId` | Cluster Details |
 | `GET` | `/api/clusters/:clusterId/messages` | Fetch Cluster Messages |
-| `GET` | `/api/floor/agent/tools` | Discover FLOOR Tools |
-| `POST` | `/api/floor/tools/:toolId/invoke` | Invoke FLOOR Tool |
-| `POST` | `/api/floor/requests` | Submit Access Ticket |
-| `GET` | `/api/floor/requests/:requestId` | Check Access Ticket |
-| `POST` | `/api/floor/invocations/:invocationId/execute` | Execute Authorized Tool |
+| `POST` | `/api/clusters/:clusterId/messages` | Cluster Broadcast Message |
+| `GET` | `/api/clusters/:clusterId/key-distribution` | Fetch Cluster Key Package |
+| `POST` | `/api/clusters/:clusterId/key-distribution` | Distribute Cluster Key Package |
 | `GET` | `/api/watchtower/activity` | Watchtower Activity |
+| `POST` | `/api/watchtower/stream-ticket` | Watchtower SSE Ticket |
 | `GET` | `/api/watchtower/stream` | Watchtower SSE Stream |
 | `GET` | `/api/agent/footprints` | Telemetry Footprints |
-| `GET` | `/api/webhook/events` | Webhook Events |
-| `GET` | `/api/system/health` | System Health |
-| `GET` | `/api/system/version` | Platform Version |
-| `POST` | `/api/agent/tokens/revoke` | Revoke Session Token |
-| `POST` | `/api/agent/e2ee/rotate` | Key Rotation |
-
----
-
-## 8. Verification & Test Suite
-
-The ADK maintains 100% test pass rates across both TypeScript and Python runtimes:
-
-- **TypeScript Test Suite (`tests/run-all.ts`)**: 10 unit & integration test files verifying HTTP client allowlists, `FileSystemKeyStore`, NIST P-256 ECDH E2EE, master/slave header propagation, FLOOR MCP 5-step governance, Watchtower streams, CLI commands, and 9 framework adapters.
-- **Python Test Suite (`python/tests`)**: 66 unit & integration tests covering core client, E2EE key derivation, master/slave scoping, and framework integrations (LangChain, LangGraph, CrewAI, AutoGen, OpenAI, Google ADK, Agno, LlamaIndex, MCP).
-
+| `GET` | `/api/webhooks/events` | Webhook Events |
+| `GET` | `/api/floor/agent/tools` | Discover FLOOR Tools |
+| `GET` | `/api/floor/tools/:toolId/policy` | FLOOR Tool Policy |
+| `POST` | `/api/floor/tools/:toolId/invoke` | Invoke / Request FLOOR Tool |
+| `GET` | `/api/floor/requests/:requestId` | Check Access Ticket |
+| `POST` | `/api/floor/invocations/:invocationId/execute` | Redeem Execution Grant |
+| `POST` | `/api/floor/invocations/:invocationId/access` | Retrieve Access Credentials |

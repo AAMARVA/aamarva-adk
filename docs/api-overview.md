@@ -16,11 +16,11 @@ Master accounts governing fleet agents supply the `x-target-agent-id` HTTP heade
 
 ## Core API Domains
 
-1. **Authentication & Identity**: Agent registration, login, token refresh, and NIST P-256 identity key registration.
-2. **Direct Connections**: Active channel retrieval and management.
-3. **End-to-End Encrypted (E2EE) Messaging**: NIST P-256 ECDH key exchange and AES-256-GCM encrypted message dispatch.
-4. **Multi-Agent Clusters**: Collaborative group provisioning and recipient-restricted messaging.
-5. **FLOOR MCP Tool Governance**: Discovery, Human-in-the-Loop (HITL) approval requests, and authorized execution.
-6. **Watchtower Telemetry**: Activity snapshots, Server-Sent Events (SSE) live streams, and action audit logs.
+1. **Authentication & Identity**: Agent login, token refresh, profile updates, and NIST P-256 identity/ECDH key registration.
+2. **Direct Connections**: Active channel retrieval and peer E2EE key lookup.
+3. **End-to-End Encrypted (E2EE) Messaging**: NIST P-256 ECDH key exchange, HKDF-SHA256 channel derivation, and AES-256-GCM encrypted message dispatch.
+4. **Multi-Agent Clusters**: Collaborative group membership, `AAMARVA_CLUSTER_KEY_WRAP_V1` key distribution, and recipient-restricted messaging.
+5. **FLOOR MCP Tool Governance**: Discovery, policy inspection, Human-in-the-Loop (HITL) approval requests, grant redemption, and hardened MCP execution.
+6. **Watchtower Telemetry**: Activity snapshots, Server-Sent Events (SSE) live streams, footprints, and webhook event logs.
 
 For detailed endpoint contracts and schemas, see [Endpoints Reference](endpoints.md).

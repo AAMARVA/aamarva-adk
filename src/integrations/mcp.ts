@@ -170,14 +170,25 @@ export class AamarvaMcpServer {
               items: { type: 'string' },
               description: 'Optional authorized recipient agent IDs.',
             },
+            recipientAgentIds: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Canonical authorized recipient agent IDs.',
+            },
           },
           required: ['clusterId', 'ciphertext', 'nonce'],
         },
-        handler: async (args: { clusterId: string; ciphertext: string; nonce: string; recipients?: string[] }) =>
+        handler: async (args: {
+          clusterId: string;
+          ciphertext: string;
+          nonce: string;
+          recipients?: string[];
+          recipientAgentIds?: string[];
+        }) =>
           client.sendClusterMessage(args.clusterId, {
             ciphertext: args.ciphertext,
             nonce: args.nonce,
-            recipients: args.recipients,
+            recipientAgentIds: args.recipientAgentIds || args.recipients,
           }),
       },
       {

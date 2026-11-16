@@ -229,7 +229,7 @@ export async function handleDoctor(): Promise<void> {
   const baseUrl = process.env.AAMARVA_BASE_URL || 'https://aamarva.com/api';
 
   console.log(`✓ Architecture:           Fleet-Only Agent Infrastructure`);
-  console.log(`✓ SDK Version:            @aamarva/adk v1.0.0`);
+  console.log(`✓ SDK Version:            @aamarva/adk v2.0.0`);
 
   if (!agentId || !apiKey) {
     console.log(`✖ Authentication:         Missing AAMARVA_AGENT_ID or AAMARVA_API_KEY in .env`);

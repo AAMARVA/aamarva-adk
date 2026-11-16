@@ -14,10 +14,11 @@ const APPROVED_ENDPOINT_PATTERNS: Array<{ method: string; regex: RegExp }> = [
   { method: 'GET', regex: /^\/agents\/me\/e2ee$/ },
   { method: 'PUT', regex: /^\/agents\/me\/e2ee$/ },
   { method: 'POST', regex: /^\/agents\/me\/e2ee$/ },
+  { method: 'GET', regex: /^\/agents\/[^/]+\/e2ee$/ },
   { method: 'GET', regex: /^\/connections$/ },
-  { method: 'GET', regex: /^\/connections\/[^/]+\/peer-key$/ },
-  { method: 'GET', regex: /^\/connections\/[^/]+\/messages$/ },
-  { method: 'POST', regex: /^\/connections\/[^/]+\/messages$/ },
+  { method: 'GET', regex: /^\/connections\/peer-key\/[^/]+$/ },
+  { method: 'GET', regex: /^\/connections\/messages\/[^/]+$/ },
+  { method: 'POST', regex: /^\/connections\/messages\/[^/]+$/ },
   { method: 'GET', regex: /^\/clusters$/ },
   { method: 'GET', regex: /^\/clusters\/[^/]+$/ },
   { method: 'GET', regex: /^\/clusters\/[^/]+\/messages$/ },
@@ -25,9 +26,11 @@ const APPROVED_ENDPOINT_PATTERNS: Array<{ method: string; regex: RegExp }> = [
   { method: 'GET', regex: /^\/clusters\/[^/]+\/key-distribution$/ },
   { method: 'POST', regex: /^\/clusters\/[^/]+\/key-distribution$/ },
   { method: 'GET', regex: /^\/floor\/agent\/tools$/ },
+  { method: 'GET', regex: /^\/floor\/tools\/[^/]+\/policy$/ },
   { method: 'POST', regex: /^\/floor\/tools\/[^/]+\/invoke$/ },
   { method: 'GET', regex: /^\/floor\/requests\/[^/]+$/ },
   { method: 'POST', regex: /^\/floor\/invocations\/[^/]+\/execute$/ },
+  { method: 'POST', regex: /^\/floor\/invocations\/[^/]+\/access$/ },
   { method: 'GET', regex: /^\/adk$/ },
   { method: 'GET', regex: /^\/watchtower\/activity$/ },
   { method: 'POST', regex: /^\/watchtower\/stream-ticket$/ },
@@ -36,12 +39,24 @@ const APPROVED_ENDPOINT_PATTERNS: Array<{ method: string; regex: RegExp }> = [
   { method: 'GET', regex: /^\/webhooks\/events$/ },
 ];
 
-
 export function isApprovedEndpoint(method: string, path: string): boolean {
   const normMethod = method.toUpperCase();
   const normPath = path.startsWith('/') ? path : '/' + path;
   const cleanPath = normPath.split('?')[0];
   return APPROVED_ENDPOINT_PATTERNS.some((p) => p.method === normMethod && p.regex.test(cleanPath));
+}
+
+function parseRetryAfterHeader(headerVal: string | null): number | undefined {
+  if (!headerVal) return undefined;
+  const trimmed = headerVal.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Math.max(0, parseInt(trimmed, 10));
+  }
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isNaN(dateMs)) {
+    return Math.max(0, Math.ceil((dateMs - Date.now()) / 1000));
+  }
+  return undefined;
 }
 
 export interface RequestOptions {
@@ -71,6 +86,7 @@ export class HttpClient {
   private authPromise: Promise<void> | null = null;
   private refreshPromise: Promise<boolean> | null = null;
   private onAuthSuccess?: () => Promise<void>;
+  private onTargetAgentIdChange?: (targetAgentId?: string) => void;
 
   constructor(config: AamarvaConfig = {}) {
     const defaultUrl = 'https://aamarva.com/api';
@@ -92,6 +108,10 @@ export class HttpClient {
     this.onAuthSuccess = fn;
   }
 
+  public setOnTargetAgentIdChange(fn?: (targetAgentId?: string) => void): void {
+    this.onTargetAgentIdChange = fn;
+  }
+
   public setTokens(tokens: AuthTokens): void {
     this.accessToken = tokens.accessToken;
     this.refreshToken = tokens.refreshToken;
@@ -105,7 +125,13 @@ export class HttpClient {
   }
 
   public setTargetAgentId(targetAgentId?: string): void {
-    this.targetAgentId = targetAgentId;
+    const normalized = targetAgentId && targetAgentId.trim() ? targetAgentId.trim() : undefined;
+    if (this.targetAgentId !== normalized) {
+      this.targetAgentId = normalized;
+      if (this.onTargetAgentIdChange) {
+        this.onTargetAgentIdChange(this.targetAgentId);
+      }
+    }
   }
 
   public getTargetAgentId(): string | undefined {
@@ -132,7 +158,6 @@ export class HttpClient {
         return;
       }
       if (options === true || (typeof options === 'object' && options.preserveTokens)) {
-        // Keep existing valid tokens intact
         return;
       }
     }
@@ -198,7 +223,7 @@ export class HttpClient {
           retries: 1,
         });
 
-        const data = response.data;
+        const data = (response.data || response) as any;
         if (data?.tokens?.accessToken) {
           this.accessToken = data.tokens.accessToken;
           this.refreshToken = data.tokens.refreshToken;
@@ -233,6 +258,7 @@ export class HttpClient {
     this.refreshPromise = (async () => {
       try {
         const response = await this.rawRequest<{
+          tokens?: AuthTokens;
           accessToken?: string;
           refreshToken?: string;
         }>({
@@ -245,16 +271,21 @@ export class HttpClient {
           retries: 1,
         });
 
-        if (response.data?.accessToken) {
-          this.accessToken = response.data.accessToken;
-          if (response.data.refreshToken) {
-            this.refreshToken = response.data.refreshToken;
+        const data = (response.data || response) as any;
+        const nextAccessToken = data?.tokens?.accessToken || data?.accessToken;
+        const nextRefreshToken = data?.tokens?.refreshToken || data?.refreshToken;
+
+        if (nextAccessToken && typeof nextAccessToken === 'string') {
+          this.accessToken = nextAccessToken;
+          if (nextRefreshToken && typeof nextRefreshToken === 'string') {
+            this.refreshToken = nextRefreshToken;
           }
           if (this.onAuthSuccess) {
             await this.onAuthSuccess();
           }
           return true;
         }
+        this.accessToken = undefined;
         return false;
       } catch {
         this.accessToken = undefined;
@@ -284,18 +315,91 @@ export class HttpClient {
         const refreshed = await this.refreshAccessToken();
         if (refreshed) {
           return await this.executeWithRetry<T>(options);
-        } else if (this.agentId && this.apiKey) {
+        }
+        if (this.agentId && this.apiKey) {
           this.accessToken = undefined;
+          this.refreshToken = undefined;
           await this.ensureAuthenticated();
           return await this.executeWithRetry<T>(options);
         }
+        this.accessToken = undefined;
       }
       throw err;
     }
   }
 
+  /**
+   * Open an approved GET SSE stream using configured transport, auth, and target scoping headers.
+   */
+  public async openStream(
+    path: string,
+    query?: Record<string, string | number | boolean | undefined | null>,
+    options: { signal?: AbortSignal; headers?: Record<string, string>; auth?: boolean } = {}
+  ): Promise<Response> {
+    const cleanPath = path.startsWith('/') ? path : '/' + path;
+    if (!isApprovedEndpoint('GET', cleanPath)) {
+      throw new AamarvaError(`Endpoint not allowed by specification: GET ${cleanPath}`, {
+        code: 'ENDPOINT_NOT_ALLOWED',
+      });
+    }
+
+    if (options.auth !== false && this.autoLogin && !this.accessToken && this.agentId && this.apiKey) {
+      await this.ensureAuthenticated();
+    }
+
+    let url = `${this.baseUrl}${cleanPath}`;
+    if (query) {
+      const searchParams = new URLSearchParams();
+      for (const [key, value] of Object.entries(query)) {
+        if (value !== undefined && value !== null) {
+          searchParams.append(key, String(value));
+        }
+      }
+      const qs = searchParams.toString();
+      if (qs) {
+        url += (url.includes('?') ? '&' : '?') + qs;
+      }
+    }
+
+    const headers: Record<string, string> = {
+      Accept: 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      ...options.headers,
+    };
+
+    if (options.auth !== false && this.accessToken) {
+      headers['Authorization'] = `Bearer ${this.accessToken}`;
+    }
+
+    if (this.targetAgentId && !headers['x-target-agent-id']) {
+      headers['x-target-agent-id'] = this.targetAgentId;
+    }
+
+    const response = await this.fetchFn(url, {
+      method: 'GET',
+      headers,
+      signal: options.signal,
+    });
+
+    if (!response.ok) {
+      let body: unknown = null;
+      try {
+        body = await response.json();
+      } catch {
+        try {
+          body = { message: await response.text() };
+        } catch {
+          body = null;
+        }
+      }
+      throw normalizeError(null, response.status, body);
+    }
+
+    return response;
+  }
+
   private async executeWithRetry<T>(options: RequestOptions): Promise<ApiResponse<T>> {
-    const method = options.method || 'GET';
+    const method = (options.method || 'GET').toUpperCase();
     const isIdempotent = method === 'GET' || method === 'HEAD';
     const maxAttempts = options.retries !== undefined ? options.retries : isIdempotent ? this.maxRetries : 0;
 
@@ -309,13 +413,14 @@ export class HttpClient {
         lastError = err;
         attempt++;
 
-        const errObj = (typeof err === 'object' && err !== null) ? (err as Record<string, unknown>) : null;
+        const errObj = typeof err === 'object' && err !== null ? (err as Record<string, unknown>) : null;
         const statusCode = typeof errObj?.statusCode === 'number' ? errObj.statusCode : undefined;
         const isRetryableStatus = statusCode === 429 || (statusCode !== undefined && statusCode >= 500 && statusCode <= 504);
-        const isNetworkFailure = statusCode === undefined;
+        const isNetworkFailure = statusCode === undefined && !(err instanceof AamarvaError && err.code === 'ENDPOINT_NOT_ALLOWED');
 
         if (attempt <= maxAttempts && isIdempotent && (isRetryableStatus || isNetworkFailure)) {
-          let delayMs = Math.min(Math.pow(2, attempt) * 300, 5000);
+          const jitterMs = Math.floor(Math.random() * 150);
+          let delayMs = Math.min(Math.pow(2, attempt) * 300, 5000) + jitterMs;
           if (statusCode === 429 && typeof errObj?.retryAfterSeconds === 'number') {
             delayMs = Math.max(delayMs, errObj.retryAfterSeconds * 1000);
           }
@@ -331,7 +436,7 @@ export class HttpClient {
   }
 
   public async rawRequest<T = unknown>(options: RequestOptions): Promise<ApiResponse<T>> {
-    const method = options.method || 'GET';
+    const method = (options.method || 'GET').toUpperCase();
     const cleanPath = options.path.startsWith('/') ? options.path : '/' + options.path;
 
     if (!isApprovedEndpoint(method, cleanPath)) {
@@ -356,7 +461,7 @@ export class HttpClient {
     }
 
     const headers: Record<string, string> = {
-      'Accept': 'application/json',
+      Accept: 'application/json',
       ...options.headers,
     };
 
@@ -403,6 +508,10 @@ export class HttpClient {
       }
 
       if (!response.ok) {
+        const retryAfter = parseRetryAfterHeader(response.headers.get('retry-after'));
+        if (retryAfter !== undefined && data && typeof data === 'object' && !('retryAfter' in data)) {
+          (data as Record<string, unknown>).retryAfter = retryAfter;
+        }
         throw normalizeError(null, response.status, data);
       }
 
@@ -421,7 +530,7 @@ export class HttpClient {
       };
     } catch (err: unknown) {
       clearTimeout(timer);
-      const errObj = (typeof err === 'object' && err !== null) ? (err as Record<string, unknown>) : null;
+      const errObj = typeof err === 'object' && err !== null ? (err as Record<string, unknown>) : null;
       if (errObj?.name === 'AbortError') {
         throw new AamarvaTimeoutError(`Request to ${options.path} timed out after ${timeout}ms.`);
       }

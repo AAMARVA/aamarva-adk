@@ -256,7 +256,7 @@ def execute_openai_tool_call(client: Any, name: str, args: Dict[str, Any]) -> An
             args.get("clusterId"),
             args.get("ciphertext"),
             args.get("nonce"),
-            recipients=args.get("recipients"),
+            recipients=args.get("recipientAgentIds") or args.get("recipients"),
         )
     elif name == "aamarva_watchtower_activity":
         return client.get_watchtower_activity(args.get("limit"))
