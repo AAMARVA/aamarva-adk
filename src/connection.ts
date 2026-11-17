@@ -72,11 +72,28 @@ export class AamarvaConnection {
     }
 
     const peerData = peerRes.data || peerRes || {};
+    if (peerData.connectionId && String(peerData.connectionId).trim() !== this.connectionId.trim()) {
+      throw new AamarvaError('Connection ID mismatch in peer key response.', {
+        code: 'PEER_KEY_VERIFICATION_FAILED',
+      });
+    }
     const rawPeerKey = peerData.peerE2eePublicKey || peerData.e2eePublicKey || peerData.publicKey;
     const peerFp = peerData.peerKeyFingerprint || peerData.keyFingerprint || peerData.fingerprint;
     const peerIdentityKey = peerData.peerIdentityKey || peerData.identityKey;
     const peerSignature = peerData.peerKeySignature || peerData.signature;
-    const peerEpoch = Number(peerData.peerKeyEpoch ?? peerData.keyEpoch ?? 1);
+    const rawPeerEpoch = peerData.peerKeyEpoch !== undefined ? peerData.peerKeyEpoch : peerData.keyEpoch;
+    let peerEpoch: number | undefined;
+    if (typeof rawPeerEpoch === 'number' && Number.isInteger(rawPeerEpoch) && rawPeerEpoch >= 1) {
+      peerEpoch = rawPeerEpoch;
+    } else if (typeof rawPeerEpoch === 'string' && /^\d+$/.test(rawPeerEpoch.trim())) {
+      const parsed = Number(rawPeerEpoch.trim());
+      if (Number.isInteger(parsed) && parsed >= 1) peerEpoch = parsed;
+    }
+    if (peerEpoch === undefined) {
+      throw new AamarvaError('Missing or invalid peerKeyEpoch in peer key response.', {
+        code: 'PEER_KEY_VERIFICATION_FAILED',
+      });
+    }
     const actualPeerAgentId = peerData.peerAgentId || peerData.agentId;
 
     if (!rawPeerKey) {
@@ -195,10 +212,10 @@ export class AamarvaConnection {
   /**
    * Retrieve normalized and decrypted message list for this connection channel
    */
-  public async getMessages(options: { page?: number; limit?: number } = {}): Promise<Message[]> {
+  public async getMessages(options: { page?: number; limit?: number; peerAgentId?: string } = {}): Promise<Message[]> {
     let peerInfo;
     try {
-      peerInfo = await this.fetchVerifiedPeerKey(this.agentId);
+      peerInfo = await this.fetchVerifiedPeerKey(options.peerAgentId || this.agentId);
     } catch (err: any) {
       if (err instanceof AamarvaError) throw err;
       throw new AamarvaError(`Failed to fetch peer public key for decryption: ${err.message}`, {
@@ -222,9 +239,14 @@ export class AamarvaConnection {
 
     return rawList.map((item) => {
       const msg = normalizeMessage(item, this.connectionId);
+      if (msg.connectionId && msg.connectionId.trim() !== this.connectionId.trim()) {
+        throw new AamarvaError('Connection ID mismatch in encrypted message envelope.', {
+          code: 'MESSAGE_INVALID_ENVELOPE',
+        });
+      }
       if (msg.ciphertext && msg.nonce) {
         try {
-          const localKp = getLocalIdentityKeyPair(myAgentId, msg.keyEpoch && msg.keyEpoch > 1 ? msg.keyEpoch : undefined);
+          const localKp = getLocalIdentityKeyPair(myAgentId, msg.keyEpoch);
           msg.content = decryptMessageWithKeys(
             {
               ciphertext: msg.ciphertext,
@@ -243,6 +265,7 @@ export class AamarvaConnection {
             msg.senderAgentId || peerInfo.actualPeerAgentId
           );
         } catch (err: any) {
+          if (err instanceof AamarvaError) throw err;
           throw new AamarvaError(`Failed to decrypt incoming message: ${err.message}`, {
             code: 'MESSAGE_DECRYPTION_FAILED',
             cause: err,
@@ -256,7 +279,7 @@ export class AamarvaConnection {
   /**
    * Alias for getMessages
    */
-  public async messages(options: { page?: number; limit?: number } = {}): Promise<Message[]> {
+  public async messages(options: { page?: number; limit?: number; peerAgentId?: string } = {}): Promise<Message[]> {
     return this.getMessages(options);
   }
 
@@ -266,7 +289,7 @@ export class AamarvaConnection {
   public async getEncryptedMessages(options: { page?: number; limit?: number } = {}): Promise<EncryptedEnvelope[]> {
     const response = await this.http.request<unknown[]>({
       method: 'GET',
-      path: `/connections/${this.connectionId}/messages`,
+      path: `/connections/${encodeURIComponent(this.connectionId)}/messages`,
       query: {
         page: options.page || 1,
         limit: options.limit || 50,
@@ -275,12 +298,15 @@ export class AamarvaConnection {
     });
 
     const rawList = Array.isArray(response.data) ? response.data : [];
-    return rawList.map((item: any) => ({
-      ciphertext: String(item.ciphertext || ''),
-      nonce: String(item.nonce || ''),
-      version: Number(item.version || 1),
-      keyEpoch: Number(item.keyEpoch || item.key_epoch || 1),
-    }));
+    return rawList.map((item: any) => {
+      const msg = normalizeMessage(item, this.connectionId);
+      return {
+        ciphertext: msg.ciphertext!,
+        nonce: msg.nonce!,
+        version: msg.version!,
+        keyEpoch: msg.keyEpoch!,
+      };
+    });
   }
 }
 

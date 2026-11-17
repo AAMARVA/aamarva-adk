@@ -295,8 +295,127 @@ export interface WatchtowerStreamTicket {
 }
 
 // =============================================================================
-// FLOOR MCP Tool Governance
+// FLOOR MCP Tool Governance & Mandatory MCP Adapter Gateway Contract (v1)
 // =============================================================================
+
+export const GATEWAY_PROTOCOL_VERSION = 'aamarva.gateway.v1' as const;
+
+export interface AgentEncryptionKeyJWK {
+  kty: 'OKP' | string;
+  crv: 'X25519' | string;
+  x: string;
+  [key: string]: unknown;
+}
+
+export interface AgentEncryptionKeyRecord {
+  version: string;
+  agentId: string;
+  keyId: string;
+  keyVersion: number;
+  algorithm: 'X25519' | string;
+  hpkeSuite: {
+    kem: string;
+    kdf: string;
+    aead: string;
+  };
+  publicKey: AgentEncryptionKeyJWK;
+  fingerprint: string;
+  identityPublicKey: ECJWK;
+  status: 'active' | 'rotated' | 'revoked' | string;
+  signature: string;
+  createdAt: string;
+  revokedAt?: string;
+}
+
+export interface SignedExecutionInstruction {
+  version: string;
+  instructionId: string;
+  issuer: string;
+  audience: string;
+  gatewayId: string;
+  agentId: string;
+  agentName?: string;
+  agentKeyId: string;
+  agentKeyVersion: number;
+  agentPublicKey: AgentEncryptionKeyJWK;
+  invocationId: string;
+  mcpServerId: string;
+  toolId: string;
+  approvedArguments: Record<string, unknown>;
+  approvedArgsDigest: string;
+  scope?: string | string[];
+  decision: 'approved' | string;
+  hitlApprovalRef?: string;
+  iat: string;
+  exp: string;
+  issuerKeyId: string;
+  signature: string;
+}
+
+export interface DecryptedGatewayTokenPayload {
+  version: string;
+  token: string;
+  tokenId: string;
+  gatewayId: string;
+  gatewayUrl: string;
+  agentId: string;
+  agentKeyId: string;
+  agentKeyVersion: number;
+  invocationId: string;
+  instructionId: string;
+  mcpServerId: string;
+  toolId: string;
+  approvedArgsDigest: string;
+  scope?: string | string[];
+  iat: string;
+  exp: string;
+}
+
+export interface GatewayTokenEnvelope {
+  version: string;
+  suite: {
+    kem: string;
+    kdf: string;
+    aead: string;
+  };
+  gatewayId: string;
+  gatewayKeyId: string;
+  gatewayUrl: string;
+  gatewayPublicKey?: ECJWK;
+  agentId: string;
+  agentKeyId: string;
+  agentKeyVersion: number;
+  invocationId: string;
+  instructionId: string;
+  mcpServerId: string;
+  toolId: string;
+  approvedArgsDigest: string;
+  scope?: string | string[];
+  iat: string;
+  exp: string;
+  enc: string;
+  ciphertext: string;
+  aad: string;
+  info: string;
+  gatewaySignature: string;
+}
+
+export interface GatewayRedemptionRequest {
+  version: string;
+  token: string;
+  gatewayId: string;
+  agentId: string;
+  agentKeyId: string;
+  invocationId: string;
+  instructionId: string;
+  mcpServerId: string;
+  toolId: string;
+  arguments: Record<string, unknown>;
+  approvedArgsDigest: string;
+  nonce: string;
+  timestamp: string;
+  proofOfPossession: string;
+}
 
 export interface FloorTool {
   id: string;
@@ -310,6 +429,9 @@ export interface FloorTool {
   };
   accessStatus: 'authorized' | 'unauthorized' | 'pending' | 'required' | 'revoked' | string;
   requestId?: string;
+  mcpServerId?: string;
+  gatewayId?: string;
+  gatewayUrl?: string;
 }
 
 export interface FloorToolInvokeOptions {
@@ -325,6 +447,14 @@ export interface ExecuteFloorToolOptions {
   waitForApproval?: boolean;
   pollIntervalMs?: number;
   pollTimeoutMs?: number;
+  requiredScope?: string;
+  fleetId?: string;
+  requireApprovedArguments?: boolean;
+  gatewayId?: string;
+  gatewayUrl?: string;
+  agentKeyId?: string;
+  trustedGatewayPublicKeys?: Record<string, ECJWK | string>;
+  requirePersistentKeyStore?: boolean;
 }
 
 export interface FloorToolInvokeResult {
@@ -332,15 +462,17 @@ export interface FloorToolInvokeResult {
   requestId?: string;
   invocationId?: string;
   toolId?: string;
+  mcpServerId?: string;
+  gatewayId?: string;
   result?: unknown;
   message?: string;
-  serverUrl?: string;
 }
 
 export interface FloorInvocationResponse {
   invocationId: string;
   requestId?: string;
   toolId?: string;
+  mcpServerId?: string;
   status: 'pending' | 'approved' | 'rejected' | string;
   message?: string;
   [key: string]: unknown;
@@ -350,25 +482,25 @@ export interface FloorExecutionAuthorization {
   invocationId: string;
   toolId: string;
   status: 'approved' | string;
-  serverUrl: string;
-  agentId?: string;
-  expiresAt?: string;
+  gatewayId: string;
+  gatewayUrl: string;
+  mcpServerId: string;
+  agentId: string;
+  agentKeyId: string;
+  instructionId: string;
+  approvedArgsDigest: string;
+  scope?: string | string[];
+  expiresAt: string;
   approvedArguments?: Record<string, unknown>;
-  auth?: {
-    type?: string;
-    token?: string;
-    apiKey?: string;
-    headerName?: string;
-    headerValue?: string;
-    headers?: Record<string, string>;
-    [key: string]: unknown;
-  };
+  gatewayEnvelope: GatewayTokenEnvelope;
+  gatewayPublicKey?: ECJWK | string;
   grant?: {
     id?: string;
     grantId?: string;
     agentId?: string;
     toolId?: string;
     status?: string;
+    scope?: string | string[];
     expiresAt?: string;
     [key: string]: unknown;
   };

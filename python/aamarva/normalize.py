@@ -91,6 +91,19 @@ def normalize_connection(raw: Any, current_agent_id: Optional[str] = None) -> Co
     )
 
 
+def _parse_positive_int(val: Any) -> Optional[int]:
+    if isinstance(val, bool) or val is None:
+        return None
+    if isinstance(val, int):
+        return val if val >= 1 else None
+    if isinstance(val, str):
+        trimmed = val.strip()
+        if trimmed.isdigit():
+            parsed = int(trimmed)
+            return parsed if parsed >= 1 else None
+    return None
+
+
 def normalize_message(raw: Any, connection_id: Optional[str] = None) -> Message:
     if isinstance(raw, str):
         raise AamarvaError("Plaintext transcript string received on private E2EE channel; transport must be encrypted.", code="PLAINTEXT_MESSAGE_RECEIVED")
@@ -99,10 +112,11 @@ def normalize_message(raw: Any, connection_id: Optional[str] = None) -> Message:
         raise AamarvaError("Invalid message format received.", code="MESSAGE_INVALID_ENVELOPE")
 
     has_plaintext = bool((raw.get("content") and str(raw.get("content")).strip()) or (raw.get("message") and str(raw.get("message")).strip()))
-    ciphertext = raw.get("ciphertext")
-    nonce = raw.get("nonce")
-    version = raw.get("version")
-    key_epoch = raw.get("keyEpoch") if raw.get("keyEpoch") is not None else raw.get("key_epoch")
+    ciphertext = raw.get("ciphertext") if isinstance(raw.get("ciphertext"), str) and raw.get("ciphertext").strip() else None
+    nonce = raw.get("nonce") if isinstance(raw.get("nonce"), str) and raw.get("nonce").strip() else None
+    version = _parse_positive_int(raw.get("version"))
+    raw_epoch = raw.get("keyEpoch") if raw.get("keyEpoch") is not None else raw.get("key_epoch")
+    key_epoch = _parse_positive_int(raw_epoch)
 
     if has_plaintext and not ciphertext:
         raise AamarvaError("Plaintext message received from private-message endpoint; transport must be encrypted.", code="PLAINTEXT_MESSAGE_RECEIVED")
@@ -110,7 +124,7 @@ def normalize_message(raw: Any, connection_id: Optional[str] = None) -> Message:
     if not ciphertext or not nonce or version is None or key_epoch is None:
         if has_plaintext:
             raise AamarvaError("Plaintext message received from private-message endpoint; transport must be encrypted.", code="PLAINTEXT_MESSAGE_RECEIVED")
-        raise AamarvaError("Invalid encrypted envelope: missing required fields or key epoch.", code="MESSAGE_INVALID_ENVELOPE")
+        raise AamarvaError("Invalid encrypted envelope: missing or invalid required fields, version, or key epoch.", code="MESSAGE_INVALID_ENVELOPE")
 
     return Message(
         messageId=str(raw.get("messageId") or raw.get("id") or ""),
@@ -120,8 +134,8 @@ def normalize_message(raw: Any, connection_id: Optional[str] = None) -> Message:
         content=None,
         ciphertext=str(ciphertext),
         nonce=str(nonce),
-        version=int(version) if isinstance(version, (int, float, str)) else 1,
-        keyEpoch=int(key_epoch) if isinstance(key_epoch, (int, float, str)) else 1,
+        version=version,
+        keyEpoch=key_epoch,
         createdAt=raw.get("createdAt") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
 
@@ -130,7 +144,7 @@ def normalize_cluster(raw: Any) -> Cluster:
         return Cluster(name="", createdAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
 
     raw_epoch = raw.get("epoch") if raw.get("epoch") is not None else (raw.get("keyEpoch") if raw.get("keyEpoch") is not None else raw.get("key_epoch"))
-    epoch = int(raw_epoch) if isinstance(raw_epoch, (int, float, str)) and str(raw_epoch).isdigit() else None
+    epoch = _parse_positive_int(raw_epoch)
     raw_members = raw.get("members")
     members = None
     if isinstance(raw_members, list):

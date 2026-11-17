@@ -36,6 +36,14 @@ const APPROVED_ENDPOINT_PATTERNS: Array<{ method: string; regex: RegExp }> = [
   { method: 'GET', regex: /^\/watchtower\/stream$/ },
   { method: 'GET', regex: /^\/agent\/footprints$/ },
   { method: 'GET', regex: /^\/webhooks\/events$/ },
+  { method: 'GET', regex: /^\/agents\/me\/gateway-key$/ },
+  { method: 'PUT', regex: /^\/agents\/me\/gateway-key$/ },
+  { method: 'POST', regex: /^\/agents\/me\/gateway-key\/rotate$/ },
+  { method: 'POST', regex: /^\/agents\/me\/gateway-key\/revoke$/ },
+  { method: 'GET', regex: /^\/agents\/[^/]+\/gateway-key$/ },
+  { method: 'GET', regex: /^\/gateway\/keys$/ },
+  { method: 'POST', regex: /^\/gateway\/tokens$/ },
+  { method: 'POST', regex: /^\/gateway\/mcp$/ },
 ];
 
 

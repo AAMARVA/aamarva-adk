@@ -51,7 +51,7 @@ from aamarva.crypto import (
     encrypt_cluster_message,
     decrypt_cluster_message,
 )
-from aamarva.normalize import normalize_message
+from aamarva.normalize import normalize_message, normalize_cluster
 from aamarva.errors import AamarvaError
 
 
@@ -469,6 +469,105 @@ class TestCryptoSecurityHardening(unittest.TestCase):
                 sig,
             )
         )
+
+    def test_epoch_and_unwrap_fail_closed(self):
+        get_local_identity_key("AMR-EPOCH-TEST-PY")
+        with self.assertRaises(AamarvaError) as ctx:
+            get_local_identity_key("AMR-EPOCH-TEST-PY", epoch=99)
+        self.assertEqual(ctx.exception.code, "IDENTITY_KEY_UNAVAILABLE")
+
+        for bad_ep in (0, -1, True):
+            with self.assertRaises(AamarvaError) as bad_ctx:
+                get_local_identity_key("AMR-EPOCH-TEST-PY", epoch=bad_ep)
+            self.assertEqual(bad_ctx.exception.code, "IDENTITY_KEY_INVALID")
+
+        group_key = generate_cluster_key()
+        group_fp = compute_group_key_fingerprint(group_key)
+        wrapped = wrap_cluster_key_for_recipient(
+            cluster_key=group_key,
+            recipient_public_key=self.bob_pub_pem,
+            sender_private_key=self.alice_priv,
+            cluster_id="clu_unwrap_py",
+            epoch=2,
+            audience_hash="ALL",
+            key_fingerprint=group_fp,
+            sender_agent_id="AMR-ALICE",
+            recipient_agent_id="AMR-BOB",
+        )
+
+        with self.assertRaises(AamarvaError) as c1:
+            unwrap_cluster_key(wrapped["encryptedKeyPackage"], wrapped["nonce"], self.bob_priv, self.alice_pub_pem, cluster_id="", epoch=2, audience_hash="ALL", expected_key_fingerprint=group_fp)
+        self.assertEqual(c1.exception.code, "CLUSTER_KEY_UNWRAP_FAILED")
+
+        with self.assertRaises(AamarvaError) as c2:
+            unwrap_cluster_key(wrapped["encryptedKeyPackage"], wrapped["nonce"], self.bob_priv, self.alice_pub_pem, cluster_id="clu_unwrap_py", epoch=0, audience_hash="ALL", expected_key_fingerprint=group_fp)
+        self.assertEqual(c2.exception.code, "CLUSTER_KEY_UNWRAP_FAILED")
+
+        with self.assertRaises(AamarvaError) as c3:
+            unwrap_cluster_key(wrapped["encryptedKeyPackage"], wrapped["nonce"], self.bob_priv, self.alice_pub_pem, cluster_id="clu_unwrap_py", epoch=3, audience_hash="ALL", expected_key_fingerprint=group_fp)
+        self.assertEqual(c3.exception.code, "CLUSTER_KEY_UNWRAP_FAILED")
+
+        with self.assertRaises(AamarvaError) as c4:
+            unwrap_cluster_key(
+                wrapped["encryptedKeyPackage"],
+                wrapped["nonce"],
+                self.bob_priv,
+                self.alice_pub_pem,
+                cluster_id="clu_unwrap_py",
+                epoch=2,
+                audience_hash="ALL",
+                expected_key_fingerprint=group_fp,
+                recipient_agent_id="AMR-CHARLIE",
+            )
+        self.assertEqual(c4.exception.code, "RECIPIENT_KEY_MISMATCH")
+
+        with self.assertRaises(AamarvaError) as c5:
+            unwrap_cluster_key(
+                wrapped["encryptedKeyPackage"],
+                wrapped["nonce"],
+                self.bob_priv,
+                self.alice_pub_pem,
+                cluster_id="clu_unwrap_py",
+                epoch=2,
+                audience_hash="ALL",
+                expected_key_fingerprint=group_fp,
+                wrapping_params={"algorithm": "RSA-OAEP", "curve": "P-256", "hkdfHash": "SHA-256"},
+            )
+        self.assertEqual(c5.exception.code, "CLUSTER_KEY_UNWRAP_FAILED")
+
+
+class TestNormalizationSecurityHardening(unittest.TestCase):
+    def test_normalize_message_rejects_invalid_version_and_epoch(self):
+        base = {
+            "messageId": "m1",
+            "connectionId": "conn-1",
+            "senderAgentId": "AMR-A",
+            "ciphertext": "Y2lwaGVy",
+            "nonce": "MTIzNDU2Nzg5MDEy",
+            "version": 1,
+            "keyEpoch": 1,
+        }
+        ok = normalize_message(base, "conn-1")
+        self.assertEqual(ok.version, 1)
+        self.assertEqual(ok.keyEpoch, 1)
+
+        for bad_ver in (None, 0, -1, True, 1.5, "abc"):
+            bad = {**base, "version": bad_ver}
+            with self.assertRaises(AamarvaError) as ctx:
+                normalize_message(bad, "conn-1")
+            self.assertEqual(ctx.exception.code, "MESSAGE_INVALID_ENVELOPE")
+
+        for bad_ep in (None, 0, -1, True, 1.5, "abc"):
+            bad = {**base, "keyEpoch": bad_ep}
+            with self.assertRaises(AamarvaError) as ctx:
+                normalize_message(bad, "conn-1")
+            self.assertEqual(ctx.exception.code, "MESSAGE_INVALID_ENVELOPE")
+
+    def test_normalize_cluster_rejects_invalid_epoch(self):
+        for bad_ep in (None, 0, -2, True, 2.5, "abc"):
+            cluster = normalize_cluster({"clusterId": "c1", "name": "C", "epoch": bad_ep})
+            self.assertIsNone(cluster.epoch)
+            self.assertIsNone(cluster.keyEpoch)
 
 
 if __name__ == "__main__":

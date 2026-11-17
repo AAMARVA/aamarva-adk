@@ -596,7 +596,7 @@ async function runCryptoHardeningTests() {
   );
   assert.strictEqual(subtleOk, true, 'WebCrypto subtle.verify must accept 64-byte IEEE P1363 signature');
 
-  // Epoch-archived identity key isolation + active key fallback
+  // Epoch-archived identity key isolation + fail-closed missing/invalid epoch rejection
   const epochDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aamarva-epoch-'));
   const epochStore = new FileSystemKeyStore(epochDir);
   setKeyStore(epochStore);
@@ -606,7 +606,6 @@ async function runCryptoHardeningTests() {
   epochStore.savePrivateKey(kpEp2.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), 'AMR-EPOCH-TEST_epoch_2');
   const ep1 = getLocalIdentityKeyPair('AMR-EPOCH-TEST', 1);
   const ep2 = getLocalIdentityKeyPair('AMR-EPOCH-TEST', 2);
-  const epActive = getLocalIdentityKeyPair('AMR-EPOCH-TEST', 99); // unarchived epoch falls back to active key
   assert.strictEqual(
     computeKeyFingerprint(exportPublicKeyJWK(ep1.publicKey)),
     computeKeyFingerprint(exportPublicKeyJWK(kpEp1.publicKey))
@@ -619,13 +618,90 @@ async function runCryptoHardeningTests() {
     computeKeyFingerprint(exportPublicKeyJWK(ep1.publicKey)),
     computeKeyFingerprint(exportPublicKeyJWK(ep2.publicKey))
   );
-  assert.strictEqual(
-    computeKeyFingerprint(exportPublicKeyJWK(epActive.publicKey)),
-    computeKeyFingerprint(exportPublicKeyJWK(getLocalIdentityKeyPair('AMR-EPOCH-TEST').publicKey))
+  assert.throws(
+    () => getLocalIdentityKeyPair('AMR-EPOCH-TEST', 99),
+    (err: any) => err?.code === 'IDENTITY_KEY_UNAVAILABLE',
+    'Missing rotated epoch key must fail closed rather than falling back to active key'
   );
+  for (const badEpoch of [0, -1, 1.5, NaN]) {
+    assert.throws(
+      () => getLocalIdentityKeyPair('AMR-EPOCH-TEST', badEpoch),
+      (err: any) => err?.code === 'IDENTITY_KEY_INVALID',
+      `Invalid epoch ${String(badEpoch)} must fail closed`
+    );
+  }
   resetLocalIdentityKeyPair();
   fs.rmSync(epochDir, { recursive: true, force: true });
-  console.log('✓ Workflow 2 hashes, subgroup key wrapping, IEEE P1363 signing & epoch key archival verified.');
+
+  // Fail-closed unwrapClusterKey context & algorithm checks
+  const aliceKpWrap = generateECKeyPair();
+  const bobKpWrap = generateECKeyPair();
+  const symWrap = generateClusterKey();
+  const symFp = computeGroupKeyFingerprint(symWrap);
+  const wrappedValid = wrapClusterKeyForRecipient(symWrap, exportPublicKeyJWK(bobKpWrap.publicKey), aliceKpWrap.privateKey, {
+    clusterId: 'clu_wrap',
+    epoch: 2,
+    audienceHash: 'ALL',
+    keyFingerprint: symFp,
+    senderAgentId: 'AMR-ALICE',
+    recipientAgentId: 'AMR-BOB',
+  });
+  assert.throws(
+    () => unwrapClusterKey(wrappedValid.encryptedKeyPackage, wrappedValid.nonce, bobKpWrap.privateKey, exportPublicKeyJWK(aliceKpWrap.publicKey), {
+      epoch: 2,
+      audienceHash: 'ALL',
+    }),
+    (err: any) => err?.code === 'CLUSTER_KEY_UNWRAP_FAILED'
+  );
+  assert.throws(
+    () => unwrapClusterKey({ ...wrappedValid.encryptedKeyPackage, clusterId: 'clu_other' }, wrappedValid.nonce, bobKpWrap.privateKey, exportPublicKeyJWK(aliceKpWrap.publicKey), {
+      clusterId: 'clu_wrap',
+      epoch: 2,
+      audienceHash: 'ALL',
+      expectedKeyFingerprint: symFp,
+    }),
+    (err: any) => err?.code === 'CLUSTER_KEY_UNWRAP_FAILED'
+  );
+  assert.throws(
+    () => unwrapClusterKey({ ...wrappedValid.encryptedKeyPackage, hkdfInfo: 'evil-info' }, wrappedValid.nonce, bobKpWrap.privateKey, exportPublicKeyJWK(aliceKpWrap.publicKey), {
+      clusterId: 'clu_wrap',
+      epoch: 2,
+      audienceHash: 'ALL',
+      expectedKeyFingerprint: symFp,
+    }),
+    (err: any) => err?.code === 'CLUSTER_KEY_UNWRAP_FAILED'
+  );
+  assert.throws(
+    () => unwrapClusterKey(wrappedValid.encryptedKeyPackage, wrappedValid.nonce, bobKpWrap.privateKey, exportPublicKeyJWK(aliceKpWrap.publicKey), {
+      clusterId: 'clu_wrap',
+      epoch: 2,
+      audienceHash: 'ALL',
+      expectedKeyFingerprint: symFp,
+      wrappingParams: { algorithm: 'RSA-OAEP', curve: 'P-256', hkdfHash: 'SHA-256' },
+    }),
+    (err: any) => err?.code === 'CLUSTER_KEY_UNWRAP_FAILED'
+  );
+  assert.throws(
+    () => unwrapClusterKey(wrappedValid.encryptedKeyPackage, wrappedValid.nonce, bobKpWrap.privateKey, exportPublicKeyJWK(aliceKpWrap.publicKey), {
+      clusterId: 'clu_wrap',
+      epoch: 2,
+      audienceHash: 'ALL',
+      expectedKeyFingerprint: 'SHA256:SHORT',
+    }),
+    (err: any) => err?.code === 'CLUSTER_KEY_FINGERPRINT_MISMATCH'
+  );
+  for (const badEnv of [
+    { ciphertext: 'Y2lwaGVy', nonce: 'MTIzNDU2Nzg5MDEy', version: 0, keyEpoch: 1 },
+    { ciphertext: 'Y2lwaGVy', nonce: 'MTIzNDU2Nzg5MDEy', version: 1, keyEpoch: 0 },
+    { ciphertext: 'Y2lwaGVy', nonce: 'MTIzNDU2Nzg5MDEy', version: 1, keyEpoch: 1.5 },
+    { ciphertext: 'Y2lwaGVy', nonce: 'MTIzNDU2Nzg5MDEy', version: 1, keyEpoch: true },
+  ]) {
+    assert.throws(
+      () => normalizeMessage(badEnv, 'conn-norm'),
+      (err: any) => err?.code === 'MESSAGE_INVALID_ENVELOPE'
+    );
+  }
+  console.log('✓ Workflow 2 hashes, subgroup key wrapping, IEEE P1363 signing & fail-closed epoch isolation verified.');
 
   console.log('--- ALL CRYPTO HARDENING TESTS PASSED ---');
 }

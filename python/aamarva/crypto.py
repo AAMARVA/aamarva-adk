@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import hashlib
 import base64
@@ -131,7 +132,12 @@ def reset_local_identity_key() -> None:
 def get_local_identity_key(identity_id: str = "default", epoch: Optional[int] = None) -> Any:
     _require_cryptography()
     global _cached_identity_keys, _active_key_store
-    effective_id = f"{identity_id}_epoch_{epoch}" if epoch is not None else identity_id
+    has_explicit_epoch = epoch is not None
+    if has_explicit_epoch:
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+            raise AamarvaError("Invalid identity key epoch: must be a positive integer >= 1.", code="IDENTITY_KEY_INVALID")
+
+    effective_id = f"{identity_id}_epoch_{epoch}" if has_explicit_epoch else identity_id
     if effective_id in _cached_identity_keys:
         return _cached_identity_keys[effective_id]
 
@@ -151,8 +157,22 @@ def get_local_identity_key(identity_id: str = "default", epoch: Optional[int] = 
                 code="IDENTITY_KEY_INVALID"
             )
 
-    if epoch is not None:
-        return get_local_identity_key(identity_id)
+    if has_explicit_epoch:
+        if epoch == 1:
+            has_higher_epoch = (
+                f"{identity_id}_epoch_2" in _cached_identity_keys
+                or bool(_active_key_store.load_private_key(f"{identity_id}_epoch_2"))
+            )
+            if not has_higher_epoch:
+                if identity_id in _cached_identity_keys:
+                    return _cached_identity_keys[identity_id]
+                active_stored = _active_key_store.load_private_key(identity_id)
+                if active_stored and isinstance(active_stored, str) and active_stored.strip():
+                    return get_local_identity_key(identity_id)
+        raise AamarvaError(
+            f'Identity key for "{identity_id}" at requested epoch {epoch} is unavailable.',
+            code="IDENTITY_KEY_UNAVAILABLE",
+        )
 
     priv = ec.generate_private_key(ec.SECP256R1())
     _cached_identity_keys[identity_id] = priv
@@ -162,6 +182,9 @@ def get_local_identity_key(identity_id: str = "default", epoch: Optional[int] = 
         encryption_algorithm=serialization.NoEncryption()
     ).decode('utf-8')
     _active_key_store.save_private_key(priv_pem, identity_id)
+    if not _active_key_store.load_private_key(f"{identity_id}_epoch_1"):
+        _active_key_store.save_private_key(priv_pem, f"{identity_id}_epoch_1")
+        _cached_identity_keys[f"{identity_id}_epoch_1"] = priv
     return priv
 
 
@@ -420,10 +443,23 @@ def verify_peer_key(
         raise AamarvaError("Peer key identity signature verification failed.", code="PEER_KEY_VERIFICATION_FAILED")
 
 
+def _coerce_ec_private_key(local_priv: Any, error_code: str = "IDENTITY_KEY_INVALID") -> Any:
+    if isinstance(local_priv, ec.EllipticCurvePrivateKey):
+        return local_priv
+    if isinstance(local_priv, str) and local_priv.strip():
+        try:
+            priv = serialization.load_pem_private_key(local_priv.encode("utf-8"), password=None)
+            if isinstance(priv, ec.EllipticCurvePrivateKey):
+                return priv
+        except Exception as err:
+            raise AamarvaError(f"Invalid EC private key: {str(err)}", code=error_code)
+    raise AamarvaError("Valid local EC private key is required.", code=error_code)
+
+
 def derive_shared_secret(local_priv, peer_key: Any) -> bytes:
     try:
         peer_pub = import_public_key(peer_key)
-        priv = local_priv if isinstance(local_priv, ec.EllipticCurvePrivateKey) else get_local_identity_key()
+        priv = _coerce_ec_private_key(local_priv, error_code="IDENTITY_KEY_INVALID")
         return priv.exchange(ec.ECDH(), peer_pub)
     except Exception as err:
         if isinstance(err, AamarvaError):
@@ -476,11 +512,14 @@ def encrypt_message_with_keys(
     aad = create_direct_message_aad_v1(connection_id, sender_agent_id).encode('utf-8')
     ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext.encode('utf-8'), aad)
 
+    if isinstance(key_epoch, bool) or not isinstance(key_epoch, int) or key_epoch < 1:
+        raise AamarvaError("Direct message keyEpoch must be a positive integer >= 1.", code="MESSAGE_ENCRYPTION_FAILED")
+
     return {
         "ciphertext": base64.b64encode(ciphertext_with_tag).decode('utf-8'),
         "nonce": base64.b64encode(nonce).decode('utf-8'),
         "version": 1,
-        "keyEpoch": int(key_epoch) or 1,
+        "keyEpoch": key_epoch,
     }
 
 
@@ -680,7 +719,7 @@ def wrap_cluster_key_for_recipient(
     """
     _require_cryptography()
     recipient_pub = import_public_key(recipient_public_key)
-    sender_priv = sender_private_key if isinstance(sender_private_key, ec.EllipticCurvePrivateKey) else get_local_identity_key()
+    sender_priv = _coerce_ec_private_key(sender_private_key, error_code="IDENTITY_KEY_INVALID")
 
     hkdf_salt = WORKFLOW_HKDF_SALT
     hkdf_info = f"aamarva-channel:{cluster_id}"
@@ -749,41 +788,93 @@ def unwrap_cluster_key(
     nonce_b64: str,
     recipient_private_key: Any,
     sender_public_key: Any,
-    cluster_id: str = "default",
-    epoch: int = 1,
-    audience_hash: str = "ALL",
+    cluster_id: Optional[str] = None,
+    epoch: Optional[int] = None,
+    audience_hash: Optional[str] = None,
     expected_key_fingerprint: Optional[str] = None,
     aad: Optional[str] = None,
     hkdf_salt: Optional[str] = None,
     hkdf_info: Optional[str] = None,
+    recipient_agent_id: Optional[str] = None,
+    wrapping_params: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """
     Unwrap cluster symmetric key using Workflow 2 HKDF-SHA256, AAD, and fingerprint verification.
     """
     _require_cryptography()
+    if not cluster_id or not isinstance(cluster_id, str) or not cluster_id.strip():
+        raise AamarvaError("Cluster ID is required to unwrap cluster key.", code="CLUSTER_KEY_UNWRAP_FAILED")
+    clean_cluster_id = cluster_id.strip()
+
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+        raise AamarvaError("Valid positive integer epoch is required to unwrap cluster key.", code="CLUSTER_KEY_UNWRAP_FAILED")
+
+    clean_audience = audience_hash.strip() if isinstance(audience_hash, str) else ""
+    if not clean_audience or (clean_audience != "ALL" and not re.match(r"^AUD:[0-9A-F]{32}$", clean_audience)):
+        raise AamarvaError("Valid audienceHash (ALL or AUD:<32-HEX>) is required to unwrap cluster key.", code="CLUSTER_KEY_UNWRAP_FAILED")
+
     pkg_obj: Optional[Dict[str, Any]] = None
     if isinstance(encrypted_key_package, dict):
         pkg_obj = encrypted_key_package
     elif isinstance(encrypted_key_package, str) and encrypted_key_package.strip().startswith('{'):
         try:
-            pkg_obj = json.loads(encrypted_key_package)
-        except Exception:
-            pkg_obj = None
+            parsed_pkg = json.loads(encrypted_key_package)
+            if not isinstance(parsed_pkg, dict):
+                raise ValueError("package JSON must be an object")
+            pkg_obj = parsed_pkg
+        except Exception as err:
+            raise AamarvaError("Malformed JSON in encryptedKeyPackage.", code="CLUSTER_KEY_UNWRAP_FAILED") from err
 
     ct_b64 = str((pkg_obj or {}).get("key") or (pkg_obj or {}).get("ciphertext") or (encrypted_key_package if isinstance(encrypted_key_package, str) else ""))
     iv_b64 = str((pkg_obj or {}).get("iv") or nonce_b64 or "")
     if not ct_b64 or not iv_b64:
         raise AamarvaError("Cluster key package is missing ciphertext or iv/nonce.", code="CLUSTER_KEY_UNWRAP_FAILED")
 
-    resolved_cluster_id = str((pkg_obj or {}).get("clusterId") or cluster_id)
-    resolved_epoch = int((pkg_obj or {}).get("epoch") or epoch)
-    resolved_audience = str((pkg_obj or {}).get("audienceHash") or audience_hash or "ALL")
-    resolved_salt = str((pkg_obj or {}).get("hkdfSalt") or hkdf_salt or WORKFLOW_HKDF_SALT)
-    resolved_info = str((pkg_obj or {}).get("hkdfInfo") or hkdf_info or f"aamarva-channel:{resolved_cluster_id}")
-    resolved_aad = str((pkg_obj or {}).get("aad") or aad or create_cluster_wrap_aad_v2(resolved_cluster_id, resolved_epoch, resolved_audience))
+    resolved_salt = hkdf_salt or WORKFLOW_HKDF_SALT
+    resolved_info = hkdf_info or f"aamarva-channel:{clean_cluster_id}"
+    resolved_aad = aad or create_cluster_wrap_aad_v2(clean_cluster_id, epoch, clean_audience)
+
+    # Fail closed if untrusted package metadata contradicts expected context
+    if pkg_obj is not None:
+        if pkg_obj.get("clusterId") is not None and str(pkg_obj.get("clusterId")).strip() != clean_cluster_id:
+            raise AamarvaError("Wrapped cluster key package clusterId mismatch.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if pkg_obj.get("epoch") is not None:
+            pkg_epoch = pkg_obj.get("epoch")
+            if isinstance(pkg_epoch, bool) or not isinstance(pkg_epoch, int) or pkg_epoch != epoch:
+                raise AamarvaError("Wrapped cluster key package epoch mismatch.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if pkg_obj.get("audienceHash") is not None and str(pkg_obj.get("audienceHash")) != clean_audience:
+            raise AamarvaError("Wrapped cluster key package audienceHash mismatch.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if pkg_obj.get("hkdfSalt") is not None and str(pkg_obj.get("hkdfSalt")) != resolved_salt:
+            raise AamarvaError("Wrapped cluster key package hkdfSalt mismatch.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if pkg_obj.get("hkdfInfo") is not None and str(pkg_obj.get("hkdfInfo")) != resolved_info:
+            raise AamarvaError("Wrapped cluster key package hkdfInfo mismatch.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if pkg_obj.get("aad") is not None and str(pkg_obj.get("aad")) != resolved_aad:
+            raise AamarvaError("Wrapped cluster key package AAD metadata mismatch.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if recipient_agent_id and pkg_obj.get("recipientAgentId") is not None:
+            if normalize_agent_id(str(pkg_obj.get("recipientAgentId"))) != normalize_agent_id(recipient_agent_id):
+                raise AamarvaError("Wrapped cluster key package recipientAgentId mismatch.", code="RECIPIENT_KEY_MISMATCH")
+
+    if wrapping_params is not None:
+        if not isinstance(wrapping_params, dict):
+            raise AamarvaError("Malformed wrappingParams object.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if wrapping_params.get("algorithm") is not None and wrapping_params.get("algorithm") != "ECDH-ES+HKDF-256+A256GCM":
+            raise AamarvaError(f"Unsupported wrapping algorithm: {wrapping_params.get('algorithm')}", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if wrapping_params.get("curve") is not None and wrapping_params.get("curve") != "P-256":
+            raise AamarvaError(f"Unsupported wrapping curve: {wrapping_params.get('curve')}", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if wrapping_params.get("hkdfHash") is not None and wrapping_params.get("hkdfHash") != "SHA-256":
+            raise AamarvaError(f"Unsupported HKDF hash: {wrapping_params.get('hkdfHash')}", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if wrapping_params.get("hkdfSalt") is not None and str(wrapping_params.get("hkdfSalt")) != resolved_salt:
+            raise AamarvaError("Wrapping params hkdfSalt mismatch.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if wrapping_params.get("hkdfInfo") is not None and str(wrapping_params.get("hkdfInfo")) != resolved_info:
+            raise AamarvaError("Wrapping params hkdfInfo mismatch.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if wrapping_params.get("aad") is not None and str(wrapping_params.get("aad")) != resolved_aad:
+            raise AamarvaError("Wrapping params AAD mismatch.", code="CLUSTER_KEY_UNWRAP_FAILED")
+
+    if recipient_private_key is None:
+        raise AamarvaError("Recipient private key is required to unwrap cluster key.", code="CLUSTER_KEY_UNWRAP_FAILED")
 
     sender_pub = import_public_key(sender_public_key)
-    recipient_priv = recipient_private_key if isinstance(recipient_private_key, ec.EllipticCurvePrivateKey) else get_local_identity_key()
+    recipient_priv = _coerce_ec_private_key(recipient_private_key, error_code="CLUSTER_KEY_UNWRAP_FAILED")
 
     shared_secret = recipient_priv.exchange(ec.ECDH(), sender_pub)
     wrap_key = HKDF(
@@ -796,8 +887,8 @@ def unwrap_cluster_key(
     try:
         iv = base64.b64decode(iv_b64)
         combined = base64.b64decode(ct_b64)
-        if len(combined) < 16:
-            raise AamarvaError("Cluster key package is too short or malformed.", code="CLUSTER_KEY_UNWRAP_FAILED")
+        if len(iv) != 12 or len(combined) < 16:
+            raise AamarvaError("Cluster key package nonce or ciphertext is malformed.", code="CLUSTER_KEY_UNWRAP_FAILED")
         aesgcm = AESGCM(wrap_key)
         raw_key = aesgcm.decrypt(iv, combined, resolved_aad.encode('utf-8') if resolved_aad else None)
     except Exception as err:
@@ -805,8 +896,17 @@ def unwrap_cluster_key(
             raise err
         raise AamarvaError(f"Failed to unwrap cluster key: {str(err)}", code="CLUSTER_KEY_UNWRAP_FAILED")
 
-    fp_check = expected_key_fingerprint or ((pkg_obj or {}).get("keyFingerprint") if isinstance((pkg_obj or {}).get("keyFingerprint"), str) else None)
-    if fp_check and fp_check.startswith("SHA256:") and len(fp_check.split(":")) == 33:
+    if len(raw_key) != 32:
+        raise AamarvaError("Unwrapped cluster key has invalid length (expected 32 bytes).", code="CLUSTER_KEY_UNWRAP_FAILED")
+
+    pkg_fp = (pkg_obj or {}).get("keyFingerprint") if isinstance((pkg_obj or {}).get("keyFingerprint"), str) else None
+    if expected_key_fingerprint and pkg_fp and expected_key_fingerprint != pkg_fp:
+        raise AamarvaError("Cluster key fingerprint mismatch between expected value and package metadata.", code="CLUSTER_KEY_FINGERPRINT_MISMATCH")
+
+    fp_check = expected_key_fingerprint or pkg_fp
+    if fp_check is not None:
+        if not isinstance(fp_check, str) or not re.match(r"^SHA256:([0-9A-F]{2}:){31}[0-9A-F]{2}$", fp_check):
+            raise AamarvaError(f"Malformed cluster key fingerprint format: {fp_check}", code="CLUSTER_KEY_FINGERPRINT_MISMATCH")
         actual_fp = compute_group_key_fingerprint(raw_key)
         if actual_fp != fp_check:
             raise AamarvaError(

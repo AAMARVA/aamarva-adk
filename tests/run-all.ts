@@ -26,13 +26,16 @@ try {
   console.log('\n▶ [7/8] Running Python Fleet ADK & E2EE Test Suite...');
   execSync('PYTHONPATH=python python3 -m unittest discover -s python/tests', { stdio: 'inherit' });
 
-  console.log('\n▶ [8/10] Running FLOOR MCP Access Control Test Suite...');
+  console.log('\n▶ [8/11] Running FLOOR MCP Access Control Test Suite...');
   execSync('npx tsx tests/floor-mcp.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [9/10] Running Framework Integrations & Multi-Framework Suite...');
+  console.log('\n▶ [9/11] Running MCP Adapter Gateway Integration Test Suite...');
+  execSync('npx tsx tests/gateway.test.ts', { stdio: 'inherit' });
+
+  console.log('\n▶ [10/11] Running Framework Integrations & Multi-Framework Suite...');
   execSync('npx tsx tests/framework-integrations.test.ts', { stdio: 'inherit' });
 
-  console.log('\n▶ [10/10] Running NPM Pack & Clean Consumer App Installation Test...');
+  console.log('\n▶ [11/11] Running NPM Pack & Clean Consumer App Installation Test...');
   execSync('npx tsx tests/package-pack.test.ts', { stdio: 'inherit' });
 
   console.log('\n==================================================');

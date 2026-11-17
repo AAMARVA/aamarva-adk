@@ -79,15 +79,18 @@ export function createMockDataStore(): MockDataStore {
         name: 'Market Arbitrage Cluster',
         description: 'Consensus on L2 liquidity arbitrage opportunities.',
         ownerUserId: 'usr_abc123',
-        ownerAgentId: 'AMR-1111-2222',
-        membersCount: 2,
-        members: ['AMR-1111-2222', 'AMR-5555-6666'],
+        ownerAgentId: 'AMR-0000-MASTER',
+        epoch: 1,
+        keyEpoch: 1,
+        rotationStatus: 'NONE',
+        membersCount: 3,
+        members: ['AMR-1111-2222', 'AMR-5555-6666', 'AMR-0000-MASTER'],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       },
     ],
     clusterMembers: {
-      'cluster_987654': ['AMR-1111-2222', 'AMR-5555-6666'],
+      'cluster_987654': ['AMR-1111-2222', 'AMR-5555-6666', 'AMR-0000-MASTER'],
     },
     clusterMessages: {
       'cluster_987654': [],
@@ -538,22 +541,36 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
           message: `Invocation is ${inv.status}.`,
         });
       }
+      if (body && body.arguments !== undefined && JSON.stringify(body.arguments || {}) !== JSON.stringify(inv.arguments || {})) {
+        return json(403, {
+          success: false,
+          error: 'FLOOR_ACCESS_DENIED',
+          message: 'Submitted execution arguments do not match approved invocation arguments.',
+        });
+      }
       const expiresAt = new Date(Date.now() + 3600000).toISOString();
+      const authorizedAgent = inv.agentId || effectiveAgentId;
       return json(200, {
         success: true,
         data: {
           status: 'approved',
           invocationId,
           toolId: inv.toolId,
-          agentId: inv.agentId || effectiveAgentId,
+          agentId: authorizedAgent,
           serverUrl: store.mcpServerUrl || 'https://aamarva.com/api/mcp',
+          approvedArguments: inv.arguments || {},
+          verificationInfo: {
+            verified: true,
+            toolId: inv.toolId,
+            agentId: authorizedAgent,
+          },
           auth: {
             type: 'bearer',
             token: 'mock_mcp_jwt_token',
           },
           grant: {
             grantId: 'grant_' + Date.now(),
-            agentId: inv.agentId || effectiveAgentId,
+            agentId: authorizedAgent,
             toolId: inv.toolId,
             status: 'active',
             scope: 'read:sec_edgar',
@@ -853,7 +870,14 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
         const audienceHash = url.searchParams.get('audienceHash');
         const epoch = epochStr ? parseInt(epochStr, 10) : 1;
         const scopedKey = `${clusterId}:${epoch}:${audienceHash || 'ALL'}`;
-        const saved = store.clusterKeyDistributions?.[scopedKey] || store.clusterKeyDistributions?.[clusterId];
+        const saved = store.clusterKeyDistributions?.[scopedKey];
+        if (!saved) {
+          return json(404, {
+            success: false,
+            code: 'CLUSTER_KEY_MISSING',
+            error: `No cluster key distribution found for ${clusterId} at epoch ${epoch}.`,
+          });
+        }
         const pkgs: any[] = Array.isArray(saved?.keyPackages) ? saved.keyPackages : [];
         const matchingPkg =
           pkgs.find((p) => String(p.recipientAgentId || '').toUpperCase() === currentAgentId.toUpperCase()) ||
@@ -865,7 +889,7 @@ export function createMockFetch(store: MockDataStore = createMockDataStore()): t
             epoch,
             ...(audienceHash ? { audienceHash } : saved?.audienceHash ? { audienceHash: saved.audienceHash } : {}),
             ...(saved?.rosterHash ? { rosterHash: saved.rosterHash } : {}),
-            keyFingerprint: saved?.keyFingerprint || matchingPkg?.keyFingerprint || 'SHA256:mock_group_key_fp',
+            keyFingerprint: saved?.keyFingerprint || matchingPkg?.keyFingerprint || 'SHA256:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00',
             senderAgentId: saved?.senderAgentId || 'AMR-0000-MASTER',
             recipientAgentId: matchingPkg?.recipientAgentId || currentAgentId || 'AMR-1111-2222',
             wrappingParams: matchingPkg?.wrappingParams || { alg: 'ECDH-ES+A256KW' },

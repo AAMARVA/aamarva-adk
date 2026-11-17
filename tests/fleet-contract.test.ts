@@ -87,16 +87,31 @@ async function runFleetContractTests() {
   const clusters = await aamarva.getClusters();
   assert.ok(clusters.length > 0);
   const cluster = clusters[0];
-  assert.ok(cluster.clusterId || cluster.id);
+  const activeClusterId = cluster.clusterId || cluster.id!;
+  assert.ok(activeClusterId);
+  mockStore.clusterMembers[activeClusterId] = ['AMR-FLEET-TEST', 'AMR-0000-MASTER', 'AMR-PARTNER-999'];
 
-  const clusterMsg = await aamarva.sendClusterMessage(cluster.clusterId || cluster.id!, {
-    ciphertext: 'ZW5jcnlwdGVkX3BheWxvYWQ=',
-    nonce: 'MTIzNDU2Nzg5MDEy',
-    version: 2,
-    keyEpoch: 1,
-    recipients: ['AMR-PARTNER-999'],
-  });
+  await assert.rejects(
+    async () => {
+      await aamarva.sendClusterMessage(activeClusterId, {
+        ciphertext: 'ZW5jcnlwdGVkX3BheWxvYWQ=',
+        nonce: 'MTIzNDU2Nzg5MDEy',
+        version: 2,
+        keyEpoch: 1,
+        recipients: ['AMR-PARTNER-999'],
+      });
+    },
+    (err: any) => err?.code === 'STRICT_PREFLIGHT_REQUIRED'
+  );
+
+  const clusterMsg = await aamarva.sendEncryptedClusterMessage(
+    activeClusterId,
+    'Fleet cluster synchronized payload',
+    { recipients: ['AMR-PARTNER-999'] }
+  );
   assert.ok(clusterMsg.messageId);
+  assert.strictEqual(clusterMsg.version, 2);
+  assert.strictEqual(clusterMsg.keyEpoch, 1);
   console.log('✓ Cluster messaging verified.');
 
   // 4. Watchtower Telemetry & Event Streaming Contract

@@ -1,3 +1,4 @@
+import base64
 import unittest
 from unittest.mock import MagicMock
 from aamarva import Aamarva, AamarvaConnection, Agent, Connection, Message
@@ -9,6 +10,8 @@ from aamarva.errors import (
 )
 from aamarva.crypto import (
     compute_key_fingerprint,
+    compute_roster_hash,
+    compute_audience_hash,
     export_public_key_jwk,
     get_local_identity_key,
     reset_local_identity_key,
@@ -188,7 +191,27 @@ class TestAamarvaFleetClient(unittest.TestCase):
             if path == "/floor/tools/tool_sec/invoke":
                 return {"success": True, "data": {"invocationId": "inv_123", "status": "approved"}}
             if path == "/floor/invocations/inv_123/execute":
-                return {"success": True, "data": {"status": "approved", "invocationId": "inv_123", "toolId": "tool_sec", "serverUrl": "http://127.0.0.1:4000/mcp", "auth": {"type": "bearer", "token": "tok"}, "grant": {"grantId": "g1"}}}
+                return {
+                    "success": True,
+                    "data": {
+                        "status": "approved",
+                        "invocationId": "inv_123",
+                        "toolId": "tool_sec",
+                        "agentId": "AMR-TEST-1111",
+                        "serverUrl": "http://127.0.0.1:4000/mcp",
+                        "auth": {"type": "bearer", "token": "tok"},
+                        "verificationInfo": {"verified": True, "toolId": "tool_sec", "agentId": "AMR-TEST-1111"},
+                        "approvedArguments": {"ticker": "AAPL"},
+                        "grant": {
+                            "grantId": "g1",
+                            "status": "active",
+                            "agentId": "AMR-TEST-1111",
+                            "toolId": "tool_sec",
+                            "scope": "tool:invoke",
+                            "expiresAt": "2099-01-01T00:00:00Z",
+                        },
+                    },
+                }
             return {}
         self.client.http.request.side_effect = mock_req
         with unittest.mock.patch("aamarva.client.invoke_external_mcp_tool", return_value={"data": 123}):
@@ -267,6 +290,199 @@ class TestAamarvaFleetClient(unittest.TestCase):
         with self.assertRaises(AamarvaError) as ctx1:
             self.client.execute_floor_tool("tool_sec", {})
         self.assertEqual(ctx1.exception.code, "FLOOR_EXECUTION_FAILED")
+
+    def test_floor_execute_reconciled_docs_contract_and_scoping(self):
+        import json as _json
+        call_order = []
+        captured = {}
+
+        def mock_req(method, path, **kwargs):
+            if path == "/floor/agent/tools":
+                call_order.append("floor:discover")
+                return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
+            if path == "/floor/invocations/inv_docs_1/execute":
+                call_order.append("floor:execute")
+                return {
+                    "success": True,
+                    "data": {
+                        "invocationId": "inv_docs_1",
+                        "toolId": "tool_sec",
+                        "tool": {"id": "tool_sec", "name": "SEC"},
+                        "serverUrl": "https://mcp.weather.internal/sse",
+                        "authConfig": {
+                            "authType": "bearer",
+                            "authHeaderName": "Authorization",
+                            "headerValue": "Bearer grant_sec_docs_991",
+                        },
+                        "verificationInfo": {
+                            "verified": True,
+                            "toolId": "tool_sec",
+                            "agentId": "AMR-TEST-1111",
+                        },
+                        "grantToken": "grant_sec_docs_991",
+                        "accessToken": "grant_sec_docs_991",
+                        "scope": "tool:invoke",
+                        "expiresAt": "2099-01-01T00:00:00Z",
+                        "approvedArguments": {
+                            "ticker": "AAPL",
+                            "nested": {"b": 2, "a": [True, {"y": 9, "x": 8}]},
+                        },
+                    },
+                }
+            return {}
+
+        class _FakeMcpResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def getcode(self):
+                return 200
+            def read(self):
+                return _json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}).encode("utf-8")
+
+        def fake_urlopen(req, timeout=None):
+            call_order.append("mcp:urlopen")
+            captured["url"] = req.full_url
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            captured["body"] = _json.loads(req.data.decode("utf-8"))
+            return _FakeMcpResp()
+
+        self.client.http.request.side_effect = mock_req
+        submitted_args = {
+            "nested": {"a": [True, {"x": 8, "y": 9}], "b": 2},
+            "ticker": "AAPL",
+        }
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            res = self.client.execute_floor_tool(
+                "tool_sec",
+                submitted_args,
+                invocation_id="inv_docs_1",
+                required_scope="tool:invoke",
+                require_approved_arguments=True,
+            )
+
+        self.assertEqual(res.status, "approved")
+        self.assertEqual(call_order, ["floor:discover", "floor:execute", "mcp:urlopen"])
+        self.assertEqual(captured["url"], "https://mcp.weather.internal/sse")
+        self.assertEqual(captured["headers"].get("authorization"), "Bearer grant_sec_docs_991")
+        self.assertEqual(captured["body"]["params"]["name"], "tool_sec")
+
+        # Target-agent (slave) scoping test
+        slave_client = Aamarva(agent_id="AMR-MASTER-01", api_key="sk_m", target_agent_id="AMR-SLAVE-01")
+        slave_client.http.request = MagicMock(side_effect=lambda method, path, **kw: (
+            {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
+            if path == "/floor/agent/tools" else
+            {
+                "success": True,
+                "data": {
+                    "status": "approved",
+                    "invocationId": "inv_slave_ok",
+                    "toolId": "tool_sec",
+                    "agentId": "AMR-SLAVE-01",
+                    "serverUrl": "https://mcp.slave.internal/rpc",
+                    "auth": {"type": "bearer", "token": "slave_tok"},
+                    "verificationInfo": {"verified": True, "toolId": "tool_sec", "agentId": "AMR-SLAVE-01"},
+                    "grant": {"status": "active", "agentId": "AMR-SLAVE-01", "toolId": "tool_sec", "expiresAt": "2099-01-01T00:00:00Z"},
+                },
+            }
+        ))
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            slave_res = slave_client.execute_floor_tool("tool_sec", {"ticker": "MSFT"}, invocation_id="inv_slave_ok")
+        self.assertEqual(slave_res.status, "approved")
+
+    def test_floor_execute_zero_mcp_requests_on_auth_failures(self):
+        def valid_base():
+            return {
+                "status": "approved",
+                "invocationId": "inv_1",
+                "toolId": "tool_sec",
+                "agentId": "AMR-TEST-1111",
+                "serverUrl": "https://mcp.example.internal/rpc",
+                "auth": {"type": "bearer", "token": "super_secret_mcp_token_do_not_leak"},
+                "verificationInfo": {"verified": True, "toolId": "tool_sec", "agentId": "AMR-TEST-1111"},
+                "grant": {
+                    "grantId": "g_1",
+                    "status": "active",
+                    "agentId": "AMR-TEST-1111",
+                    "toolId": "tool_sec",
+                    "scope": "tool:invoke",
+                    "expiresAt": "2099-01-01T00:00:00Z",
+                },
+                "approvedArguments": {"ticker": "AAPL", "flag": True, "nested": {"k1": "v1"}},
+            }
+
+        def mutated(**overrides):
+            obj = valid_base()
+            obj.update(overrides)
+            return obj
+
+        scenarios = [
+            ("missing grant without docs proof", {"invocationId": "inv_1", "toolId": "tool_sec", "agentId": "AMR-TEST-1111", "status": "approved", "serverUrl": "https://mcp.example.internal/rpc", "auth": {"type": "bearer", "token": "secret_tok"}}, None, None, {}),
+            ("empty grant object {}", mutated(grant={}), None, None, {}),
+            ("missing grant.status (no fallback)", mutated(grant={"grantId": "g1", "agentId": "AMR-TEST-1111", "expiresAt": "2099-01-01T00:00:00Z"}), None, None, {}),
+            ("pending status", mutated(status="pending", grant={**valid_base()["grant"], "status": "pending"}), None, None, {}),
+            ("rejected status", mutated(status="rejected", grant={**valid_base()["grant"], "status": "rejected"}), None, None, {}),
+            ("expired grant.expiresAt", mutated(grant={**valid_base()["grant"], "expiresAt": "2020-01-01T00:00:00Z"}), None, None, {}),
+            ("expired top-level expiresAt", mutated(expiresAt="2020-01-01T00:00:00Z"), None, None, {}),
+            ("malformed non-ISO expiresAt", mutated(grant={**valid_base()["grant"], "expiresAt": "9999"}), None, None, {}),
+            ("null expiresAt", mutated(grant={**valid_base()["grant"], "expiresAt": None}), None, None, {}),
+            ("revoked grant status", mutated(grant={**valid_base()["grant"], "status": "revoked"}), None, None, {}),
+            ("revoked scope token", mutated(grant={**valid_base()["grant"], "scope": "revoked"}), None, None, {}),
+            ("missing required_scope", valid_base(), None, None, {"required_scope": "admin:write"}),
+            ("unsupported URL scheme ftp://", mutated(serverUrl="ftp://mcp.example.internal/rpc"), None, None, {}),
+            ("malformed URL", mutated(serverUrl="not-a-valid-url"), None, None, {}),
+            ("missing credentials", mutated(auth=None), None, None, {}),
+            ("empty auth dict", mutated(auth={}), None, None, {}),
+            ("verificationInfo.verified false", mutated(verificationInfo={"verified": False, "toolId": "tool_sec", "agentId": "AMR-TEST-1111"}), None, None, {}),
+            ("verificationInfo.verified string true", mutated(verificationInfo={"verified": "true", "toolId": "tool_sec", "agentId": "AMR-TEST-1111"}), None, None, {}),
+            ("missing verificationInfo when grant omitted", {"invocationId": "inv_1", "toolId": "tool_sec", "agentId": "AMR-TEST-1111", "serverUrl": "https://mcp.example.internal/rpc", "grantToken": "secret_tok"}, None, None, {}),
+            ("missing agentId when client has agent_id", mutated(agentId=None, verificationInfo={"verified": True, "toolId": "tool_sec"}, grant={**valid_base()["grant"], "agentId": None}), None, None, {}),
+            ("mismatched grant.agentId", mutated(grant={**valid_base()["grant"], "agentId": "AMR-HIJACKED"}), None, None, {}),
+            ("master agentId returned instead of slave target_agent_id", mutated(agentId="AMR-MASTER-01", grant={**valid_base()["grant"], "agentId": "AMR-MASTER-01"}, verificationInfo={"verified": True, "toolId": "tool_sec", "agentId": "AMR-MASTER-01"}), None, ("AMR-MASTER-01", "AMR-SLAVE-01"), {}),
+            ("fleetId mismatch", mutated(fleetId="fleet_other"), None, None, {"fleet_id": "fleet_prod"}),
+            ("mismatched invocationId", mutated(invocationId="inv_WRONG"), None, None, {}),
+            ("mismatched grant.toolId", mutated(grant={**valid_base()["grant"], "toolId": "wrong_tool"}), None, None, {}),
+            ("tool mismatched", mutated(toolId="wrong_tool"), None, None, {}),
+            ("modified nested argument", valid_base(), {"ticker": "AAPL", "flag": True, "nested": {"k1": "TAMPERED"}}, None, {}),
+            ("boolean vs integer argument mismatch (True vs 1)", valid_base(), {"ticker": "AAPL", "flag": 1, "nested": {"k1": "v1"}}, None, {}),
+            ("extra unauthorized argument", valid_base(), {"ticker": "AAPL", "flag": True, "nested": {"k1": "v1"}, "adminOverride": True}, None, {}),
+            ("malformed approvedArguments list", mutated(approvedArguments=["bad"]), None, None, {}),
+            ("missing approvedArguments when required", mutated(approvedArguments=None), None, None, {"require_approved_arguments": True}),
+            ("post-discovery 403 revocation", "RAISE_403", None, None, {}),
+        ]
+        for name, resp_data, sub_args, client_ident, exec_kw in scenarios:
+            mcp_called = [False]
+            urlopen_called = [False]
+
+            def mock_req(method, path, **kwargs):
+                if path == "/floor/agent/tools":
+                    return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
+                if path == "/floor/tools/tool_sec/invoke":
+                    return {"success": True, "data": {"invocationId": "inv_1", "status": "approved"}}
+                if path == "/floor/invocations/inv_1/execute":
+                    if resp_data == "RAISE_403":
+                        raise AamarvaAPIError("Revoked", status_code=403)
+                    return {"success": True, "data": resp_data}
+                return {}
+
+            test_client = (
+                Aamarva(agent_id=client_ident[0], api_key="sk_m", target_agent_id=client_ident[1])
+                if client_ident else self.client
+            )
+            test_client.http.request = MagicMock(side_effect=mock_req)
+            args_to_send = sub_args if sub_args is not None else {"ticker": "AAPL", "flag": True, "nested": {"k1": "v1"}}
+
+            with (
+                unittest.mock.patch("urllib.request.urlopen", side_effect=lambda *a, **kw: urlopen_called.__setitem__(0, True)),
+                unittest.mock.patch("aamarva.client.invoke_external_mcp_tool", side_effect=lambda *a, **kw: mcp_called.__setitem__(0, True)),
+            ):
+                with self.assertRaises(AamarvaError) as err_ctx:
+                    test_client.execute_floor_tool("tool_sec", args_to_send, **exec_kw)
+                self.assertFalse(urlopen_called[0], f"urllib.request.urlopen called for scenario '{name}'")
+                self.assertFalse(mcp_called[0], f"MCP tool invoked for scenario '{name}'")
+                self.assertNotIn("super_secret_mcp_token_do_not_leak", str(err_ctx.exception))
+                self.assertNotIn("secret_tok", str(err_ctx.exception))
 
     @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
     def test_registration_cache_identity_aware(self):
@@ -478,26 +694,56 @@ class TestAamarvaFleetClient(unittest.TestCase):
             real_http.request("PATCH", "/agents/me", auth=True, json_data={"avatar": "https://example.com/x.png"})
         self.assertEqual(captured_headers.get("x-target-agent-id"), "AMR-SLAVE-01")
 
+    def _wf2_defaults(self):
+        fp1 = "SHA256:" + ":".join(["11"] * 32)
+        fp2 = "SHA256:" + ":".join(["22"] * 32)
+        fp3 = "SHA256:" + ":".join(["33"] * 32)
+        fp_group = "SHA256:" + ":".join(["AA"] * 32)
+        sig_64 = base64.b64encode(b"\x01" * 64).decode("ascii")
+        return fp1, fp2, fp3, fp_group, sig_64
+
     def test_send_cluster_message_enforces_sender_and_master(self):
+        fp1, fp2, fp3, fp_group, sig_64 = self._wf2_defaults()
+        rst = compute_roster_hash(["AMR-TEST-1111", "AMR-MASTER-AUTH", "AMR-WORKER-1"])
         last_body = {}
         def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
             nonlocal last_body
             if path == "/agents/me":
                 return {"success": True, "data": {"agentId": "AMR-TEST-1111", "masterId": "AMR-MASTER-AUTH"}}
+            if path == "/clusters/c_1":
+                return {"success": True, "data": {"clusterId": "c_1", "name": "C1", "epoch": 1, "rotationStatus": "NONE", "members": ["AMR-TEST-1111", "AMR-MASTER-AUTH", "AMR-WORKER-1"]}}
+            if path == "/clusters/public/c_1/members":
+                return {"success": True, "data": [
+                    {"agentId": "AMR-TEST-1111", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x1", "y": "y1"}, "keyFingerprint": fp1, "keyEpoch": 1},
+                    {"agentId": "AMR-MASTER-AUTH", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x2", "y": "y2"}, "keyFingerprint": fp2, "keyEpoch": 1},
+                    {"agentId": "AMR-WORKER-1", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x3", "y": "y3"}, "keyFingerprint": fp3, "keyEpoch": 1},
+                ]}
             last_body = json_data or {}
             return {"success": True, "messageId": "msg_c_1"}
         self.client.http.request.side_effect = mock_req
         self.client.target_agent_id = "AMR-SLAVE-TARGET-99"
 
-        res = self.client.send_cluster_message(
-            cluster_id="c_1",
-            ciphertext="cipher_123",
-            nonce="MTIzNDU2Nzg5MDEy",
-            recipients=["AMR-WORKER-1", "AMR-WORKER-1"]
-        )
+        with (
+            unittest.mock.patch("aamarva.client.export_public_key_jwk", side_effect=lambda k=None: k),
+            unittest.mock.patch("aamarva.client.compute_key_fingerprint", return_value=fp1),
+            unittest.mock.patch("aamarva.client.verify_cluster_message_signature_v2", return_value=True),
+        ):
+            self.client.send_cluster_message(
+                cluster_id="c_1",
+                ciphertext="cipher_123",
+                nonce="MTIzNDU2Nzg5MDEy",
+                key_epoch=1,
+                recipients=["AMR-WORKER-1", "AMR-WORKER-1"],
+                audience_hash="ALL",
+                roster_hash=rst,
+                key_fingerprint=fp_group,
+                signature=sig_64,
+                strict_preflight=True,
+            )
         self.assertEqual(last_body.get("senderAgentId"), "AMR-TEST-1111")
         self.assertEqual(last_body.get("version"), 2)
         self.assertEqual(last_body.get("keyEpoch"), 1)
+        self.assertTrue(last_body.get("strictPreflight"))
         recipients = last_body.get("recipients", [])
         self.assertIn("AMR-MASTER-AUTH", recipients)
         self.assertNotIn("AMR-SLAVE-TARGET-99", recipients)
@@ -506,17 +752,37 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(recipients.count("AMR-WORKER-1"), 1)
 
     def test_send_cluster_message_validation_rejects_before_http(self):
+        _, _, _, fp_group, sig_64 = self._wf2_defaults()
+        rst = compute_roster_hash(["AMR-TEST-1111", "AMR-MASTER-AUTH"])
+        base = {
+            "version": 2,
+            "key_epoch": 1,
+            "nonce": "MTIzNDU2Nzg5MDEy",
+            "audience_hash": "ALL",
+            "roster_hash": rst,
+            "key_fingerprint": fp_group,
+            "signature": sig_64,
+            "strict_preflight": True,
+        }
         invalid_cases = [
-            {"version": 1, "key_epoch": 1, "nonce": "MTIzNDU2Nzg5MDEy"},
-            {"version": 3, "key_epoch": 1, "nonce": "MTIzNDU2Nzg5MDEy"},
-            {"version": True, "key_epoch": 1, "nonce": "MTIzNDU2Nzg5MDEy"},
-            {"version": 2, "key_epoch": 0, "nonce": "MTIzNDU2Nzg5MDEy"},
-            {"version": 2, "key_epoch": -1, "nonce": "MTIzNDU2Nzg5MDEy"},
-            {"version": 2, "key_epoch": 1.5, "nonce": "MTIzNDU2Nzg5MDEy"},
-            {"version": 2, "key_epoch": True, "nonce": "MTIzNDU2Nzg5MDEy"},
-            {"version": 2, "key_epoch": 1, "nonce": "not-base64!"},
-            {"version": 2, "key_epoch": 1, "nonce": "bW9ja19ub25jZQ=="},
-            {"version": 2, "key_epoch": 1, "nonce": "AAAAAAAAAAAAAAAAAAAAAA=="},
+            {**base, "version": 1},
+            {**base, "version": 3},
+            {**base, "version": True},
+            {**base, "key_epoch": None},
+            {**base, "key_epoch": 0},
+            {**base, "key_epoch": -1},
+            {**base, "key_epoch": 1.5},
+            {**base, "key_epoch": True},
+            {**base, "nonce": "not-base64!"},
+            {**base, "nonce": "bW9ja19ub25jZQ=="},
+            {**base, "nonce": "AAAAAAAAAAAAAAAAAAAAAA=="},
+            {**base, "strict_preflight": False},
+            {**base, "strict_preflight": None},
+            {**base, "audience_hash": ""},
+            {**base, "audience_hash": "INVALID_AUD"},
+            {**base, "roster_hash": "INVALID_RST"},
+            {**base, "key_fingerprint": "SHA256:short"},
+            {**base, "signature": "c2hvcnQ="},
         ]
         for case in invalid_cases:
             with self.assertRaises(AamarvaValidationError, msg=f"Should reject {case}"):
@@ -526,10 +792,17 @@ class TestAamarvaFleetClient(unittest.TestCase):
                     nonce=case["nonce"],
                     version=case["version"],
                     key_epoch=case["key_epoch"],
+                    audience_hash=case["audience_hash"],
+                    roster_hash=case["roster_hash"],
+                    key_fingerprint=case["key_fingerprint"],
+                    signature=case["signature"],
+                    strict_preflight=case["strict_preflight"],
                 )
         self.assertEqual(self.client.http.request.call_count, 0)
 
     def test_send_cluster_message_fails_if_master_unresolvable(self):
+        _, _, _, fp_group, sig_64 = self._wf2_defaults()
+        rst = compute_roster_hash(["AMR-TEST-1111", "AMR-MASTER-AUTH"])
         def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
             if path == "/agents/me":
                 raise AamarvaAPIError("Profile corrupt", status_code=500)
@@ -539,33 +812,75 @@ class TestAamarvaFleetClient(unittest.TestCase):
             self.client.send_cluster_message(
                 cluster_id="c_1",
                 ciphertext="cipher",
-                nonce="MTIzNDU2Nzg5MDEy"
+                nonce="MTIzNDU2Nzg5MDEy",
+                key_epoch=1,
+                audience_hash="ALL",
+                roster_hash=rst,
+                key_fingerprint=fp_group,
+                signature=sig_64,
+                strict_preflight=True,
             )
         self.assertEqual(ctx.exception.code, "MASTER_RESOLUTION_FAILED")
 
     def test_send_cluster_message_rejects_spoofed_sender(self):
-        with self.assertRaises(AamarvaValidationError):
+        _, _, _, fp_group, sig_64 = self._wf2_defaults()
+        rst = compute_roster_hash(["AMR-TEST-1111", "AMR-MASTER-AUTH"])
+        with self.assertRaises(AamarvaValidationError) as ctx:
             self.client.send_cluster_message(
                 cluster_id="c_1",
                 ciphertext="cipher",
                 nonce="MTIzNDU2Nzg5MDEy",
-                sender_agent_id="AMR-SPOOFED"
+                key_epoch=1,
+                sender_agent_id="AMR-SPOOFED",
+                audience_hash="ALL",
+                roster_hash=rst,
+                key_fingerprint=fp_group,
+                signature=sig_64,
+                strict_preflight=True,
             )
+        self.assertEqual(ctx.exception.code, "SENDER_IDENTITY_MISMATCH")
 
     def test_master_identity_aliases(self):
+        fp1, fp2, _, fp_group, sig_64 = self._wf2_defaults()
+        rst = compute_roster_hash(["AMR-SLAVE-1", "AMR-MASTER-ALIAS"])
         for field in ["masterId", "master_id", "masterAgentId", "master_agent_id", "ownerAgentId", "owner_agent_id"]:
             last_body = {}
             def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
                 nonlocal last_body
                 if path == "/agents/me":
                     return {"success": True, "data": {"agentId": "AMR-SLAVE-1", field: "AMR-MASTER-ALIAS"}}
+                if path == "/clusters/c_1":
+                    return {"success": True, "data": {"clusterId": "c_1", "name": "C1", "epoch": 1, "rotationStatus": "NONE", "members": ["AMR-SLAVE-1", "AMR-MASTER-ALIAS"]}}
+                if path == "/clusters/public/c_1/members":
+                    return {"success": True, "data": [
+                        {"agentId": "AMR-SLAVE-1", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x1", "y": "y1"}, "keyFingerprint": fp1, "keyEpoch": 1},
+                        {"agentId": "AMR-MASTER-ALIAS", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x2", "y": "y2"}, "keyFingerprint": fp2, "keyEpoch": 1},
+                    ]}
                 last_body = json_data or {}
                 return {"success": True, "messageId": "msg_c_1"}
             self.client.http.request.side_effect = mock_req
-            self.client.send_cluster_message("c_1", "cipher", "MTIzNDU2Nzg5MDEy")
+            self.client.http.agent_id = "AMR-SLAVE-1"
+            with (
+                unittest.mock.patch("aamarva.client.export_public_key_jwk", side_effect=lambda k=None: k),
+                unittest.mock.patch("aamarva.client.compute_key_fingerprint", return_value=fp1),
+                unittest.mock.patch("aamarva.client.verify_cluster_message_signature_v2", return_value=True),
+            ):
+                self.client.send_cluster_message(
+                    "c_1",
+                    "cipher",
+                    "MTIzNDU2Nzg5MDEy",
+                    key_epoch=1,
+                    audience_hash="ALL",
+                    roster_hash=rst,
+                    key_fingerprint=fp_group,
+                    signature=sig_64,
+                    strict_preflight=True,
+                )
             self.assertIn("AMR-MASTER-ALIAS", last_body.get("recipients", []))
 
     def test_conflicting_master_identity_fails_closed(self):
+        _, _, _, fp_group, sig_64 = self._wf2_defaults()
+        rst = compute_roster_hash(["AMR-SLAVE-1", "AMR-MASTER-A"])
         def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
             if path == "/agents/me":
                 return {
@@ -579,10 +894,22 @@ class TestAamarvaFleetClient(unittest.TestCase):
             return {}
         self.client.http.request.side_effect = mock_req
         with self.assertRaises(AamarvaError) as ctx:
-            self.client.send_cluster_message("c_1", "cipher", "MTIzNDU2Nzg5MDEy")
+            self.client.send_cluster_message(
+                "c_1",
+                "cipher",
+                "MTIzNDU2Nzg5MDEy",
+                key_epoch=1,
+                audience_hash="ALL",
+                roster_hash=rst,
+                key_fingerprint=fp_group,
+                signature=sig_64,
+                strict_preflight=True,
+            )
         self.assertEqual(ctx.exception.code, "MASTER_RESOLUTION_FAILED")
 
     def test_missing_master_identity_fails_closed(self):
+        _, _, _, fp_group, sig_64 = self._wf2_defaults()
+        rst = compute_roster_hash(["AMR-ORPHAN-SLAVE"])
         def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
             if path == "/agents/me":
                 return {
@@ -594,7 +921,17 @@ class TestAamarvaFleetClient(unittest.TestCase):
             return {}
         self.client.http.request.side_effect = mock_req
         with self.assertRaises(AamarvaError) as ctx:
-            self.client.send_cluster_message("c_1", "cipher", "MTIzNDU2Nzg5MDEy")
+            self.client.send_cluster_message(
+                "c_1",
+                "cipher",
+                "MTIzNDU2Nzg5MDEy",
+                key_epoch=1,
+                audience_hash="ALL",
+                roster_hash=rst,
+                key_fingerprint=fp_group,
+                signature=sig_64,
+                strict_preflight=True,
+            )
         self.assertEqual(ctx.exception.code, "MASTER_RESOLUTION_FAILED")
 
     def test_floor_execute_denied_status_raises(self):
@@ -703,17 +1040,20 @@ class TestAamarvaFleetClient(unittest.TestCase):
     def test_workflow2_client_methods_and_409_rotation_mocked(self):
         calls = []
         race_triggered = False
+        rotated = False
+        fp1, fp2, fp3, fp_sealed, sig_64 = self._wf2_defaults()
+        fp_peer_lookup = "SHA256:" + ":".join(["AA"] * 32)
 
         def mock_req(method, path, auth=False, params=None, json_data=None, skip_auto_auth=False, **kwargs):
-            nonlocal race_triggered
+            nonlocal race_triggered, rotated
             calls.append((method, path, params, json_data))
             if path == "/connections/peer-key/AMR-PEER-9":
                 return {
                     "success": True,
                     "data": {
                         "peerAgentId": "AMR-PEER-9",
-                        "peerE2eePublicKey": {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"},
-                        "peerKeyFingerprint": "SHA256:AA",
+                        "peerE2eePublicKey": {"kty": "EC", "crv": "P-256", "x": "x3", "y": "y3"},
+                        "peerKeyFingerprint": fp_peer_lookup,
                         "peerKeyEpoch": 1,
                     },
                 }
@@ -723,21 +1063,22 @@ class TestAamarvaFleetClient(unittest.TestCase):
                     "data": {
                         "clusterId": "clu_wf2",
                         "name": "WF2",
-                        "epoch": 1,
-                        "keyEpoch": 1,
-                        "rotationStatus": "ROTATION_REQUIRED_MEMBER_REMOVED",
+                        "epoch": 2 if rotated else 1,
+                        "keyEpoch": 2 if rotated else 1,
+                        "rotationStatus": "NONE" if rotated else "ROTATION_REQUIRED_MEMBER_REMOVED",
                         "members": ["AMR-TEST-1111", "AMR-MASTER-AUTH", "AMR-PEER-9"],
                     },
                 }
             if path == "/clusters/clu_wf2/rotate-key" and method == "POST":
+                rotated = True
                 return {"success": True, "data": {"clusterId": "clu_wf2", "epoch": 2, "keyEpoch": 2, "rotationStatus": "NONE"}}
             if path == "/clusters/public/clu_wf2/members":
                 return {
                     "success": True,
                     "data": [
-                        {"agentId": "AMR-TEST-1111", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x1", "y": "y1"}, "keyFingerprint": "SHA256:11", "keyEpoch": 1},
-                        {"agentId": "AMR-MASTER-AUTH", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x2", "y": "y2"}, "keyFingerprint": "SHA256:22", "keyEpoch": 1},
-                        {"agentId": "AMR-PEER-9", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x3", "y": "y3"}, "keyFingerprint": "SHA256:33", "keyEpoch": 1},
+                        {"agentId": "AMR-TEST-1111", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x1", "y": "y1"}, "keyFingerprint": fp1, "keyEpoch": 1},
+                        {"agentId": "AMR-MASTER-AUTH", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x2", "y": "y2"}, "keyFingerprint": fp2, "keyEpoch": 1},
+                        {"agentId": "AMR-PEER-9", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x3", "y": "y3"}, "keyFingerprint": fp3, "keyEpoch": 1},
                     ],
                 }
             if path == "/agents/me":
@@ -751,7 +1092,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
                         "clusterId": "clu_wf2",
                         "epoch": 2,
                         "audienceHash": (params or {}).get("audienceHash", "ALL"),
-                        "keyFingerprint": "SHA256:SEALED",
+                        "keyFingerprint": fp_sealed,
                         "senderAgentId": "AMR-PEER-9",
                         "senderPublicKey": {"kty": "EC", "crv": "P-256", "x": "x3", "y": "y3"},
                         "encryptedKeyPackage": {"iv": "MTIzNDU2Nzg5MDEy", "key": "d3JhcHBlZF9rZXk="},
@@ -780,18 +1121,23 @@ class TestAamarvaFleetClient(unittest.TestCase):
         # 3. Auto-rotate + 409 EPOCH_KEY_ALREADY_SEALED race recovery + strictPreflight + Workflow 2 fields
         fake_key = b"\x11" * 32
         fake_priv = unittest.mock.MagicMock()
+
+        def fake_fp(k):
+            x = k.get("x") if isinstance(k, dict) else None
+            return {"x1": fp1, "x2": fp2, "x3": fp3}.get(x, fp1)
+
         with (
             unittest.mock.patch("aamarva.client.get_local_identity_key", return_value=fake_priv),
-            unittest.mock.patch("aamarva.client.export_public_key_jwk", return_value={"kty": "EC", "crv": "P-256", "x": "x1", "y": "y1"}),
+            unittest.mock.patch("aamarva.client.export_public_key_jwk", side_effect=lambda k=None: k if isinstance(k, dict) and "x" in k else {"kty": "EC", "crv": "P-256", "x": "x1", "y": "y1"}),
             unittest.mock.patch("aamarva.client.generate_cluster_key", return_value=fake_key),
-            unittest.mock.patch("aamarva.client.compute_key_fingerprint", return_value="SHA256:11"),
-            unittest.mock.patch("aamarva.client.compute_group_key_fingerprint", return_value="SHA256:SEALED"),
+            unittest.mock.patch("aamarva.client.compute_key_fingerprint", side_effect=fake_fp),
+            unittest.mock.patch("aamarva.client.compute_group_key_fingerprint", return_value=fp_sealed),
             unittest.mock.patch(
                 "aamarva.client.wrap_cluster_key_for_recipient",
                 return_value={
-                    "encryptedKeyPackage": {"iv": "a", "key": "b"},
-                    "nonce": "a",
-                    "wrappingParams": {"kdf": "HKDF-SHA256"},
+                    "encryptedKeyPackage": {"iv": "MTIzNDU2Nzg5MDEy", "key": "d3JhcHBlZF9rZXk="},
+                    "nonce": "MTIzNDU2Nzg5MDEy",
+                    "wrappingParams": {"algorithm": "ECDH-ES+HKDF-256+A256GCM", "curve": "P-256", "hkdfHash": "SHA-256"},
                 },
             ),
             unittest.mock.patch("aamarva.client.unwrap_cluster_key", return_value=fake_key),
@@ -805,7 +1151,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
                     "audienceHash": "ALL",
                 },
             ),
-            unittest.mock.patch("aamarva.client.sign_cluster_message_v2", return_value="cDEzNjNfc2lnX2Jhc2U2NA=="),
+            unittest.mock.patch("aamarva.client.sign_cluster_message_v2", return_value=sig_64),
         ):
             sent = self.client.send_encrypted_cluster_message("clu_wf2", "Secret fleet directive")
             self.assertEqual(sent["messageId"], "msg_wf2_1")
@@ -816,9 +1162,286 @@ class TestAamarvaFleetClient(unittest.TestCase):
             self.assertEqual(body["keyEpoch"], 2)
             self.assertEqual(body["audienceHash"], "ALL")
             self.assertTrue(body["rosterHash"].startswith("RST:"))
-            self.assertEqual(body["keyFingerprint"], "SHA256:SEALED")
-            self.assertEqual(body["signature"], "cDEzNjNfc2lnX2Jhc2U2NA==")
+            self.assertEqual(body["keyFingerprint"], fp_sealed)
+            self.assertEqual(body["signature"], sig_64)
             self.assertTrue(body["strictPreflight"])
+
+    def test_direct_connection_fail_closed_invariants(self):
+        # 1. Missing or invalid peerKeyEpoch fails closed
+        for bad_epoch in (None, 0, -1, True):
+            self.client.http.request.side_effect = [
+                {
+                    "success": True,
+                    "data": {
+                        "peerAgentId": "AMR-PEER-2222",
+                        "peerE2eePublicKey": {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"},
+                        "peerKeyFingerprint": "SHA256:" + ":".join(["11"] * 32),
+                        **({"peerKeyEpoch": bad_epoch} if bad_epoch is not None else {}),
+                    },
+                }
+            ]
+            with self.assertRaises(AamarvaError) as ctx:
+                self.client._fetch_verified_peer_key("conn-1", "AMR-PEER-2222")
+            self.assertEqual(ctx.exception.code, "PEER_KEY_VERIFICATION_FAILED")
+
+        # 2. connectionId mismatch on peer-key endpoint fails closed
+        self.client.http.request.side_effect = [
+            {
+                "success": True,
+                "data": {
+                    "connectionId": "conn-OTHER",
+                    "peerAgentId": "AMR-PEER-2222",
+                    "peerE2eePublicKey": {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"},
+                    "peerKeyFingerprint": "SHA256:" + ":".join(["11"] * 32),
+                    "peerKeyEpoch": 1,
+                },
+            }
+        ]
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client._fetch_verified_peer_key("conn-1", "AMR-PEER-2222")
+        self.assertEqual(ctx.exception.code, "PEER_KEY_VERIFICATION_FAILED")
+
+        # 3. get_encrypted_messages rejects plaintext & invalid keyEpoch
+        self.client.http.request.side_effect = [[{"messageId": "m1", "content": "plain"}]]
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.get_encrypted_messages("conn-1")
+        self.assertEqual(ctx.exception.code, "PLAINTEXT_MESSAGE_RECEIVED")
+
+        self.client.http.request.side_effect = [[{
+            "messageId": "m1",
+            "connectionId": "conn-1",
+            "senderAgentId": "AMR-PEER-2222",
+            "ciphertext": "Y2lwaGVy",
+            "nonce": "MTIzNDU2Nzg5MDEy",
+            "version": 1,
+            "keyEpoch": 0,
+        }]]
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.get_encrypted_messages("conn-1")
+        self.assertEqual(ctx.exception.code, "MESSAGE_INVALID_ENVELOPE")
+
+        # 4. get_messages rejects connectionId mismatch & passes explicit keyEpoch to get_local_identity_key
+        def mock_get_msgs_mismatch(method, path, **kwargs):
+            if path == "/connections/conn-1/peer-key":
+                return {"success": True, "data": {
+                    "peerAgentId": "AMR-PEER-2222",
+                    "peerE2eePublicKey": {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"},
+                    "peerKeyFingerprint": "SHA256:" + ":".join(["11"] * 32),
+                    "peerIdentityKey": {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"},
+                    "peerKeySignature": "c2ln",
+                    "peerKeyEpoch": 1,
+                }}
+            return {"success": True, "data": [{
+                "messageId": "m1",
+                "connectionId": "conn-WRONG",
+                "senderAgentId": "AMR-PEER-2222",
+                "ciphertext": "Y2lwaGVy",
+                "nonce": "MTIzNDU2Nzg5MDEy",
+                "version": 1,
+                "keyEpoch": 1,
+            }]}
+        self.client.http.request.side_effect = mock_get_msgs_mismatch
+        with unittest.mock.patch("aamarva.client.verify_peer_key", return_value=True):
+            with self.assertRaises(AamarvaError) as ctx:
+                self.client.get_messages("conn-1", "AMR-PEER-2222")
+            self.assertEqual(ctx.exception.code, "MESSAGE_INVALID_ENVELOPE")
+
+        seen_epochs = []
+        def mock_get_msgs_ep3(method, path, **kwargs):
+            if path == "/connections/conn-1/peer-key":
+                return {"success": True, "data": {
+                    "peerAgentId": "AMR-PEER-2222",
+                    "peerE2eePublicKey": {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"},
+                    "peerKeyFingerprint": "SHA256:" + ":".join(["11"] * 32),
+                    "peerIdentityKey": {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"},
+                    "peerKeySignature": "c2ln",
+                    "peerKeyEpoch": 3,
+                }}
+            return {"success": True, "data": [{
+                "messageId": "m1",
+                "connectionId": "conn-1",
+                "senderAgentId": "AMR-PEER-2222",
+                "ciphertext": "Y2lwaGVy",
+                "nonce": "MTIzNDU2Nzg5MDEy",
+                "version": 1,
+                "keyEpoch": 3,
+            }]}
+        self.client.http.request.side_effect = mock_get_msgs_ep3
+        with (
+            unittest.mock.patch("aamarva.client.verify_peer_key", return_value=True),
+            unittest.mock.patch("aamarva.client.get_local_identity_key", side_effect=lambda aid, epoch=None: seen_epochs.append(epoch) or MagicMock()),
+            unittest.mock.patch("aamarva.client.decrypt_message_with_keys", return_value="decrypted-ep3"),
+        ):
+            msgs = self.client.get_messages("conn-1", "AMR-PEER-2222")
+            self.assertEqual(seen_epochs, [3])
+            self.assertEqual(msgs[0].content, "decrypted-ep3")
+
+    def test_cluster_fail_closed_invariants(self):
+        fp1, fp2, fp3, fp_group, sig_64 = self._wf2_defaults()
+        rst = compute_roster_hash(["AMR-TEST-1111", "AMR-MASTER-AUTH"])
+
+        # 1. get_cluster_members rejects malformed payload & invalid member keyEpoch
+        self.client.http.request.side_effect = [{"success": True, "data": {"unexpected": True}}]
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.get_cluster_members("c_1")
+        self.assertEqual(ctx.exception.code, "CLUSTER_MEMBERSHIP_INVALID")
+
+        self.client.http.request.side_effect = [{"success": True, "data": [{"agentId": "AMR-TEST-1111", "keyEpoch": 0}]}]
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.get_cluster_members("c_1")
+        self.assertEqual(ctx.exception.code, "CLUSTER_MEMBERSHIP_INVALID")
+
+        # 2. rotate_cluster_key rejects non-monotonic epoch and evicts older cache
+        self.client.cluster_key_cache["c_1:1:ALL"] = {"key": b"old", "epoch": 1}
+        self.client.http.request.side_effect = [{"success": True, "data": {"clusterId": "c_1", "epoch": 2, "keyEpoch": 2}}]
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.rotate_cluster_key("c_1", current_epoch=2)
+        self.assertEqual(ctx.exception.code, "CLUSTER_ROTATION_FAILED")
+
+        self.client.http.request.side_effect = [{"success": True, "data": {"clusterId": "c_1", "epoch": 3, "keyEpoch": 3}}]
+        self.client.rotate_cluster_key("c_1", current_epoch=2)
+        self.assertNotIn("c_1:1:ALL", self.client.cluster_key_cache)
+
+        # 3. get_cluster_key requires explicit epoch
+        with self.assertRaises(AamarvaValidationError) as ctx:
+            self.client.get_cluster_key("c_1")
+        self.assertEqual(ctx.exception.code, "CLUSTER_INVALID_EPOCH")
+
+        # 4. send_cluster_message rejects non-member recipient, rotation-required, stale epoch, bad signature
+        def base_cluster_mock(rotation_status="NONE", cluster_epoch=1):
+            def _fn(method, path, **kwargs):
+                if path == "/agents/me":
+                    return {"success": True, "data": {"agentId": "AMR-TEST-1111", "masterId": "AMR-MASTER-AUTH"}}
+                if path == "/clusters/c_1":
+                    return {"success": True, "data": {"clusterId": "c_1", "name": "C1", "epoch": cluster_epoch, "rotationStatus": rotation_status}}
+                if path == "/clusters/public/c_1/members":
+                    return {"success": True, "data": [
+                        {"agentId": "AMR-TEST-1111", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x1", "y": "y1"}, "keyFingerprint": fp1, "keyEpoch": 1},
+                        {"agentId": "AMR-MASTER-AUTH", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x2", "y": "y2"}, "keyFingerprint": fp2, "keyEpoch": 1},
+                    ]}
+                return {"success": True, "data": {"messageId": "should-not-post"}}
+            return _fn
+
+        self.client.http.request.side_effect = base_cluster_mock()
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.send_cluster_message(
+                "c_1", "cipher", "MTIzNDU2Nzg5MDEy",
+                key_epoch=1, recipients=["AMR-OUTSIDER"],
+                audience_hash="ALL", roster_hash=rst, key_fingerprint=fp_group, signature=sig_64, strict_preflight=True,
+            )
+        self.assertEqual(ctx.exception.code, "CLUSTER_MEMBERSHIP_INVALID")
+
+        self.client.http.request.side_effect = base_cluster_mock(rotation_status="ROTATION_REQUIRED_MEMBER_REMOVED")
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.send_cluster_message(
+                "c_1", "cipher", "MTIzNDU2Nzg5MDEy",
+                key_epoch=1, audience_hash="ALL", roster_hash=rst, key_fingerprint=fp_group, signature=sig_64, strict_preflight=True,
+            )
+        self.assertEqual(ctx.exception.code, "CLUSTER_ROTATION_REQUIRED")
+
+        self.client.http.request.side_effect = base_cluster_mock(cluster_epoch=2)
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.send_cluster_message(
+                "c_1", "cipher", "MTIzNDU2Nzg5MDEy",
+                key_epoch=1, audience_hash="ALL", roster_hash=rst, key_fingerprint=fp_group, signature=sig_64, strict_preflight=True,
+            )
+        self.assertEqual(ctx.exception.code, "CLUSTER_INVALID_EPOCH")
+
+        self.client.http.request.side_effect = base_cluster_mock(cluster_epoch=1)
+        with (
+            unittest.mock.patch("aamarva.client.export_public_key_jwk", side_effect=lambda k=None: k),
+            unittest.mock.patch("aamarva.client.compute_key_fingerprint", return_value=fp1),
+            unittest.mock.patch("aamarva.client.verify_cluster_message_signature_v2", return_value=False),
+        ):
+            with self.assertRaises(AamarvaError) as ctx:
+                self.client.send_cluster_message(
+                    "c_1", "cipher", "MTIzNDU2Nzg5MDEy",
+                    key_epoch=1, audience_hash="ALL", roster_hash=rst, key_fingerprint=fp_group, signature=sig_64, strict_preflight=True,
+                )
+            self.assertEqual(ctx.exception.code, "CLUSTER_SIGNATURE_INVALID")
+
+        # 5. send_encrypted_cluster_message does NOT fall back to distribute_cluster_key on 403
+        dist_calls = []
+        def mock_403(method, path, **kwargs):
+            if path == "/agents/me":
+                return {"success": True, "data": {"agentId": "AMR-TEST-1111", "masterId": "AMR-MASTER-AUTH"}}
+            if path == "/clusters/c_1":
+                return {"success": True, "data": {"clusterId": "c_1", "name": "C1", "epoch": 1, "rotationStatus": "NONE"}}
+            if path == "/clusters/public/c_1/members":
+                return {"success": True, "data": [
+                    {"agentId": "AMR-TEST-1111", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x1", "y": "y1"}, "keyFingerprint": fp1, "keyEpoch": 1},
+                    {"agentId": "AMR-MASTER-AUTH", "publicKey": {"kty": "EC", "crv": "P-256", "x": "x2", "y": "y2"}, "keyFingerprint": fp2, "keyEpoch": 1},
+                ]}
+            if path == "/clusters/c_1/key-distribution" and method == "GET":
+                raise AamarvaAPIError("Forbidden", status_code=403)
+            if path == "/clusters/c_1/key-distribution" and method == "POST":
+                dist_calls.append(path)
+            return {}
+        self.client.http.request.side_effect = mock_403
+        with self.assertRaises(AamarvaAPIError):
+            self.client.send_encrypted_cluster_message("c_1", "secret")
+        self.assertEqual(len(dist_calls), 0)
+
+        # 6. decrypt_cluster_message fail-closed checks
+        valid_msg = {
+            "version": 2,
+            "keyEpoch": 1,
+            "audienceHash": "ALL",
+            "rosterHash": rst,
+            "keyFingerprint": fp_group,
+            "senderAgentId": "AMR-MASTER-AUTH",
+            "nonce": "MTIzNDU2Nzg5MDEy",
+            "ciphertext": "Y2lwaGVydGV4dA==",
+            "signature": sig_64,
+        }
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.decrypt_cluster_message("c_1", valid_msg, verify_signature=False)
+        self.assertEqual(ctx.exception.code, "CLUSTER_SIGNATURE_INVALID")
+
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.decrypt_cluster_message("c_1", {**valid_msg, "version": 1})
+        self.assertEqual(ctx.exception.code, "INVALID_CLUSTER_MESSAGE_VERSION")
+
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.decrypt_cluster_message("c_1", {**valid_msg, "signature": ""})
+        self.assertEqual(ctx.exception.code, "CLUSTER_SIGNATURE_INVALID")
+
+        self.client.http.request.side_effect = base_cluster_mock()
+        with self.assertRaises(AamarvaError) as ctx:
+            self.client.decrypt_cluster_message("c_1", {**valid_msg, "senderAgentId": "AMR-OUTSIDER"})
+        self.assertEqual(ctx.exception.code, "CLUSTER_MEMBERSHIP_INVALID")
+
+        def fp_by_x(k):
+            x = k.get("x") if isinstance(k, dict) else None
+            return {"x1": fp1, "x2": fp2, "x_evil": fp3}.get(x, fp2)
+
+        self.client.http.request.side_effect = base_cluster_mock()
+        with (
+            unittest.mock.patch("aamarva.client.export_public_key_jwk", side_effect=lambda k=None: k),
+            unittest.mock.patch("aamarva.client.compute_key_fingerprint", side_effect=fp_by_x),
+        ):
+            with self.assertRaises(AamarvaError) as ctx:
+                self.client.decrypt_cluster_message("c_1", valid_msg, sender_public_key={"kty": "EC", "crv": "P-256", "x": "x_evil", "y": "y"})
+            self.assertEqual(ctx.exception.code, "CLUSTER_SIGNATURE_INVALID")
+
+        # 7. decrypt_cluster_message rejects sealed rosterHash mismatch
+        wrong_rst = compute_roster_hash(["AMR-TEST-1111", "AMR-MASTER-AUTH", "AMR-EXTRA"])
+        self.client.cluster_key_cache[self.client._cluster_cache_key("c_1", 1, "ALL")] = {
+            "key": b"\x22" * 32,
+            "keyFingerprint": fp_group,
+            "rosterHash": wrong_rst,
+            "audienceHash": "ALL",
+            "epoch": 1,
+        }
+        self.client.http.request.side_effect = base_cluster_mock()
+        with (
+            unittest.mock.patch("aamarva.client.export_public_key_jwk", side_effect=lambda k=None: k),
+            unittest.mock.patch("aamarva.client.compute_key_fingerprint", side_effect=fp_by_x),
+            unittest.mock.patch("aamarva.client.verify_cluster_message_signature_v2", return_value=True),
+        ):
+            with self.assertRaises(AamarvaError) as ctx:
+                self.client.decrypt_cluster_message("c_1", valid_msg)
+            self.assertEqual(ctx.exception.code, "ROSTER_HASH_MISMATCH")
 
 
 if __name__ == "__main__":

@@ -123,20 +123,22 @@ export function normalizeMessage(raw: unknown, connectionId?: string): Message {
 
     const ciphertext = typeof obj.ciphertext === 'string' && obj.ciphertext.trim() ? obj.ciphertext : undefined;
     const nonce = typeof obj.nonce === 'string' && obj.nonce.trim() ? obj.nonce : undefined;
+    const parsePositiveInt = (val: unknown): number | undefined => {
+      if (typeof val === 'boolean' || val === null || val === undefined) return undefined;
+      if (typeof val === 'number') {
+        return Number.isInteger(val) && val >= 1 ? val : undefined;
+      }
+      if (typeof val === 'string' && /^\d+$/.test(val.trim())) {
+        const parsed = Number(val.trim());
+        return Number.isInteger(parsed) && parsed >= 1 ? parsed : undefined;
+      }
+      return undefined;
+    };
+
     const rawVersion = obj.version;
-    const version =
-      typeof rawVersion === 'number'
-        ? rawVersion
-        : typeof rawVersion === 'string' && !isNaN(Number(rawVersion))
-        ? Number(rawVersion)
-        : undefined;
+    const version = parsePositiveInt(rawVersion);
     const rawEpoch = obj.keyEpoch !== undefined ? obj.keyEpoch : obj.key_epoch;
-    const keyEpoch =
-      typeof rawEpoch === 'number'
-        ? rawEpoch
-        : typeof rawEpoch === 'string' && !isNaN(Number(rawEpoch))
-        ? Number(rawEpoch)
-        : undefined;
+    const keyEpoch = parsePositiveInt(rawEpoch);
 
     if (hasPlaintextContent && !ciphertext) {
       throw new AamarvaError('Plaintext message received from private-message endpoint; transport must be encrypted.', {
@@ -150,7 +152,7 @@ export function normalizeMessage(raw: unknown, connectionId?: string): Message {
           code: 'PLAINTEXT_MESSAGE_RECEIVED',
         });
       }
-      throw new AamarvaError('Invalid encrypted envelope: missing required fields or key epoch.', {
+      throw new AamarvaError('Invalid encrypted envelope: missing or invalid required fields, version, or key epoch.', {
         code: 'MESSAGE_INVALID_ENVELOPE',
       });
     }
@@ -182,7 +184,13 @@ export function normalizeCluster(raw: unknown): Cluster {
 
   const obj = raw as Record<string, unknown>;
   const rawEpoch = obj.epoch !== undefined ? obj.epoch : obj.keyEpoch !== undefined ? obj.keyEpoch : obj.key_epoch;
-  const epoch = typeof rawEpoch === 'number' ? rawEpoch : typeof rawEpoch === 'string' && !isNaN(Number(rawEpoch)) ? Number(rawEpoch) : undefined;
+  let epoch: number | undefined;
+  if (typeof rawEpoch === 'number' && Number.isInteger(rawEpoch) && rawEpoch >= 1) {
+    epoch = rawEpoch;
+  } else if (typeof rawEpoch === 'string' && /^\d+$/.test(rawEpoch.trim())) {
+    const parsed = Number(rawEpoch.trim());
+    if (Number.isInteger(parsed) && parsed >= 1) epoch = parsed;
+  }
   return {
     id: String(obj.id || obj.clusterId || ''),
     clusterId: String(obj.clusterId || obj.id || ''),
@@ -219,6 +227,10 @@ export function normalizeFloorTool(raw: unknown): FloorTool {
   const schema = (obj.inputSchema || obj.input_schema || obj.parameters || { type: 'object' }) as Record<string, unknown>;
   const reqId = obj.requestId || obj.request_id || obj.pendingRequestId || obj.pending_request_id;
 
+  const mcpServerId = obj.mcpServerId || obj.mcp_server_id;
+  const gatewayId = obj.gatewayId || obj.gateway_id;
+  const gatewayUrl = obj.gatewayUrl || obj.gateway_url;
+
   return {
     id: String(obj.id || obj.toolId || obj.tool_id || ''),
     name: String(obj.name || ''),
@@ -226,6 +238,9 @@ export function normalizeFloorTool(raw: unknown): FloorTool {
     inputSchema: typeof schema === 'object' && schema !== null ? schema : { type: 'object' },
     accessStatus: String(obj.accessStatus || obj.access_status || obj.status || 'required').trim().toLowerCase(),
     ...(typeof reqId === 'string' && reqId.trim() ? { requestId: reqId.trim() } : {}),
+    ...(typeof mcpServerId === 'string' && mcpServerId.trim() ? { mcpServerId: mcpServerId.trim() } : {}),
+    ...(typeof gatewayId === 'string' && gatewayId.trim() ? { gatewayId: gatewayId.trim() } : {}),
+    ...(typeof gatewayUrl === 'string' && gatewayUrl.trim() ? { gatewayUrl: gatewayUrl.trim() } : {}),
   };
 }
 

@@ -18,6 +18,17 @@ import {
   normalizeFloorRequestStatus,
 } from '../src/normalize.js';
 import { AamarvaConnection } from '../src/connection.js';
+import {
+  getLocalIdentityKeyPair,
+  exportPublicKeyJWK,
+  computeKeyFingerprint,
+  computeGroupKeyFingerprint,
+  computeRosterHash,
+  computeAudienceHash,
+  signClusterMessageV2,
+  signIdentityBinding,
+  generateECKeyPair,
+} from '../src/crypto.js';
 
 async function runSdkTests() {
   console.log('--------------------------------------------------');
@@ -205,9 +216,20 @@ async function runSdkTests() {
   const cluster = await client.getCluster('cluster_987654');
   assert.strictEqual(cluster.name, 'Market Arbitrage Cluster');
 
-  const clusterMsgRes = await client.sendClusterMessage('cluster_987654', {
-    ciphertext: 'bW9ja19jaXBoZXJ0ZXh0',
-    nonce: 'MTIzNDU2Nzg5MDEy',
+  // Incomplete sendClusterMessage must fail closed (no unsigned/v1 bypass)
+  await assert.rejects(
+    async () => {
+      await client.sendClusterMessage('cluster_987654', {
+        ciphertext: 'bW9ja19jaXBoZXJ0ZXh0',
+        nonce: 'MTIzNDU2Nzg5MDEy',
+        recipients: ['AMR-5555-6666'],
+      });
+    },
+    (err: any) => err?.code === 'INVALID_CLUSTER_KEY_EPOCH'
+  );
+
+  // Valid Workflow 2 encrypted cluster send verifies full pipeline
+  const clusterMsgRes = await client.sendEncryptedClusterMessage('cluster_987654', 'Cluster sync message', {
     recipients: ['AMR-5555-6666'],
   });
   assert.ok(clusterMsgRes.messageId);
@@ -215,15 +237,33 @@ async function runSdkTests() {
   const clusterMsgs = await client.getClusterMessages('cluster_987654');
   assert.ok(Array.isArray(clusterMsgs));
 
-  const keyDist = await client.getClusterKeyDistribution('cluster_987654', 2);
+  const keyDist = await client.getClusterKeyDistribution('cluster_987654', {
+    epoch: 1,
+    audienceHash: clusterMsgRes.audienceHash,
+  });
   assert.ok(keyDist);
   assert.strictEqual(keyDist.clusterId, 'cluster_987654');
-  assert.strictEqual(keyDist.epoch, 2);
+  assert.strictEqual(keyDist.epoch, 1);
 
   let capturedKeyDistUrl = '';
   const keyDistFetch = (async (url: string, init?: any) => {
     if (url.includes('/key-distribution')) {
       capturedKeyDistUrl = url;
+      const parsed = new URL(url);
+      const ep = Number(parsed.searchParams.get('epoch') || '1');
+      const aud = parsed.searchParams.get('audienceHash');
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            clusterId: 'cluster_987654',
+            epoch: ep,
+            ...(aud ? { audienceHash: aud } : {}),
+            keyFingerprint: 'SHA256:' + Array(32).fill('00').join(':'),
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
     }
     return mockFetch(url, init);
   }) as typeof fetch;
@@ -490,13 +530,63 @@ async function runSdkTests() {
 
   console.log('✓ Public-key registration across all authentication paths verified.');
 
-  // 12. Cluster Sender ID and Authoritative Master Recipient Tests
+  // 12. Cluster Sender ID and Authoritative Master Recipient Tests (Workflow 2 Hardened)
   console.log('12. Testing cluster message compulsory sender ID & authoritative master recipient resolution...');
 
-  // A. Test all supported master/owner field aliases
+  const buildSignedClusterEnvelope = (
+    agentId: string,
+    clusterId: string,
+    activeRoster: string[],
+    targetedRecipients: string[],
+    keyEpoch = 1
+  ) => {
+    const kp = getLocalIdentityKeyPair(agentId);
+    const pubJwk = exportPublicKeyJWK(kp.publicKey);
+    const pubFp = computeKeyFingerprint(pubJwk);
+    const rosterHash = computeRosterHash(activeRoster);
+    const audienceHash = computeAudienceHash(targetedRecipients, activeRoster);
+    const keyFingerprint = computeGroupKeyFingerprint(Buffer.alloc(32, 0x42));
+    const ciphertext = 'bW9ja19jaXBoZXJ0ZXh0';
+    const nonce = 'MTIzNDU2Nzg5MDEy';
+    const signature = signClusterMessageV2(kp.privateKey, {
+      clusterId,
+      keyEpoch,
+      senderAgentId: agentId,
+      audienceHash,
+      rosterHash,
+      sequence: '',
+      keyFingerprint,
+      nonce,
+      ciphertext,
+    });
+    return {
+      pubJwk,
+      pubFp,
+      opts: {
+        ciphertext,
+        nonce,
+        version: 2,
+        keyEpoch,
+        recipients: targetedRecipients,
+        audienceHash,
+        rosterHash,
+        keyFingerprint,
+        signature,
+        strictPreflight: true,
+      },
+    };
+  };
+
+  // A. Test all supported master/owner field aliases with authoritative Workflow 2 verification
   const aliasFields = ['masterId', 'master_id', 'masterAgentId', 'master_agent_id', 'ownerAgentId', 'owner_agent_id'];
   for (const field of aliasFields) {
     let payloadSent: any = null;
+    const env = buildSignedClusterEnvelope(
+      'AMR-SLAVE-NODE',
+      'cluster_alias',
+      ['AMR-SLAVE-NODE', 'AMR-MASTER-ALIAS-OK'],
+      ['AMR-SLAVE-NODE', 'AMR-MASTER-ALIAS-OK']
+    );
     const aliasFetch = (async (url: string, init?: any) => {
       if (url.endsWith('/agents/me') && init?.method === 'GET') {
         return new Response(JSON.stringify({
@@ -506,6 +596,28 @@ async function runSdkTests() {
             name: 'Slave Node',
             [field]: 'AMR-MASTER-ALIAS-OK',
           },
+        }), { status: 200 });
+      }
+      if (url.endsWith('/clusters/cluster_alias') && init?.method === 'GET') {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            clusterId: 'cluster_alias',
+            name: 'Alias Cluster',
+            epoch: 1,
+            keyEpoch: 1,
+            rotationStatus: 'NONE',
+            rosterHash: env.opts.rosterHash,
+          },
+        }), { status: 200 });
+      }
+      if (url.endsWith('/clusters/public/cluster_alias/members') && init?.method === 'GET') {
+        return new Response(JSON.stringify({
+          success: true,
+          data: [
+            { agentId: 'AMR-SLAVE-NODE', publicKey: env.pubJwk, keyFingerprint: env.pubFp, keyEpoch: 1 },
+            { agentId: 'AMR-MASTER-ALIAS-OK', keyEpoch: 1 },
+          ],
         }), { status: 200 });
       }
       if (url.includes('/clusters/') && url.endsWith('/messages') && init?.method === 'POST') {
@@ -521,15 +633,13 @@ async function runSdkTests() {
       fetch: aliasFetch,
     });
 
-    await aliasClient.sendClusterMessage('cluster_alias', {
-      ciphertext: 'bW9ja19jaXBoZXI=',
-      nonce: 'MTIzNDU2Nzg5MDEy',
-    });
+    await aliasClient.sendClusterMessage('cluster_alias', env.opts);
 
     assert.ok(payloadSent.recipients.includes('AMR-MASTER-ALIAS-OK'), `Field alias "${field}" must resolve to master recipient`);
   }
 
   // B. Test that conflicting master fields FAIL CLOSED
+  const conflictEnv = buildSignedClusterEnvelope('AMR-SLAVE-CONFLICT', 'cluster_1', ['AMR-SLAVE-CONFLICT', 'AMR-MASTER-A'], ['AMR-SLAVE-CONFLICT', 'AMR-MASTER-A']);
   const conflictFetch = (async (url: string, init?: any) => {
     if (url.endsWith('/agents/me') && init?.method === 'GET') {
       return new Response(JSON.stringify({
@@ -552,10 +662,7 @@ async function runSdkTests() {
   });
 
   try {
-    await conflictClient.sendClusterMessage('cluster_1', {
-      ciphertext: 'bW9ja19jaXBoZXI=',
-      nonce: 'MTIzNDU2Nzg5MDEy',
-    });
+    await conflictClient.sendClusterMessage('cluster_1', conflictEnv.opts);
     assert.fail('Conflicting master identities must fail closed');
   } catch (err: any) {
     assert.ok(err instanceof AamarvaError);
@@ -563,6 +670,7 @@ async function runSdkTests() {
   }
 
   // C. Test that missing master identity FAILS CLOSED (never substitute sender ID)
+  const missingMasterEnv = buildSignedClusterEnvelope('AMR-SLAVE-NO-MASTER', 'cluster_1', ['AMR-SLAVE-NO-MASTER'], ['AMR-SLAVE-NO-MASTER']);
   const missingMasterFetch = (async (url: string, init?: any) => {
     if (url.endsWith('/agents/me') && init?.method === 'GET') {
       return new Response(JSON.stringify({
@@ -583,10 +691,7 @@ async function runSdkTests() {
   });
 
   try {
-    await missingMasterClient.sendClusterMessage('cluster_1', {
-      ciphertext: 'bW9ja19jaXBoZXI=',
-      nonce: 'MTIzNDU2Nzg5MDEy',
-    });
+    await missingMasterClient.sendClusterMessage('cluster_1', missingMasterEnv.opts);
     assert.fail('Missing master identity must fail closed without substituting sender ID');
   } catch (err: any) {
     assert.ok(err instanceof AamarvaError);
@@ -594,6 +699,8 @@ async function runSdkTests() {
   }
 
   let lastClusterPayload: any = null;
+  const slaveRoster = ['AMR-SLAVE-NODE-01', 'AMR-MASTER-AUTHORITATIVE', 'AMR-WORKER-01'];
+  const slaveEnv = buildSignedClusterEnvelope('AMR-SLAVE-NODE-01', 'cluster_1', slaveRoster, ['AMR-SLAVE-NODE-01', 'AMR-MASTER-AUTHORITATIVE', 'AMR-WORKER-01']);
   const clusterTestFetch = (async (url: string, init?: any) => {
     if (url.endsWith('/agents/me') && init?.method === 'GET') {
       return new Response(JSON.stringify({
@@ -603,6 +710,29 @@ async function runSdkTests() {
           name: 'Slave Agent Node 1',
           masterId: 'AMR-MASTER-AUTHORITATIVE', // Authoritative owning master
         },
+      }), { status: 200 });
+    }
+    if (url.endsWith('/clusters/cluster_1') && init?.method === 'GET') {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          clusterId: 'cluster_1',
+          name: 'Cluster 1',
+          epoch: 1,
+          keyEpoch: 1,
+          rotationStatus: 'NONE',
+          rosterHash: slaveEnv.opts.rosterHash,
+        },
+      }), { status: 200 });
+    }
+    if (url.endsWith('/clusters/public/cluster_1/members') && init?.method === 'GET') {
+      return new Response(JSON.stringify({
+        success: true,
+        data: [
+          { agentId: 'AMR-SLAVE-NODE-01', publicKey: slaveEnv.pubJwk, keyFingerprint: slaveEnv.pubFp, keyEpoch: 1 },
+          { agentId: 'AMR-MASTER-AUTHORITATIVE', keyEpoch: 1 },
+          { agentId: 'AMR-WORKER-01', keyEpoch: 1 },
+        ],
       }), { status: 200 });
     }
     if (url.includes('/clusters/') && url.endsWith('/messages') && init?.method === 'POST') {
@@ -620,8 +750,7 @@ async function runSdkTests() {
   });
 
   await slaveClient.sendClusterMessage('cluster_1', {
-    ciphertext: 'bW9ja19jaXBoZXJ0ZXh0',
-    nonce: 'MTIzNDU2Nzg5MDEy',
+    ...slaveEnv.opts,
     recipients: ['AMR-WORKER-01', 'AMR-WORKER-01'], // includes duplicate
   });
 
@@ -647,15 +776,37 @@ async function runSdkTests() {
     fetch: noHttpFetch,
   });
 
+  const baseValidForPrecheck = {
+    ciphertext: 'Y2lwaGVy',
+    nonce: 'MTIzNDU2Nzg5MDEy',
+    version: 2,
+    keyEpoch: 1,
+    audienceHash: 'ALL',
+    rosterHash: computeRosterHash(['AMR-STRICT-01']),
+    keyFingerprint: computeGroupKeyFingerprint(Buffer.alloc(32, 1)),
+    signature: Buffer.alloc(64, 1).toString('base64'),
+    strictPreflight: true,
+  };
   const invalidClusterPayloads: Array<{ label: string; opts: any }> = [
-    { label: 'version=1', opts: { ciphertext: 'Y2lwaGVy', nonce: 'MTIzNDU2Nzg5MDEy', version: 1 } },
-    { label: 'version=3', opts: { ciphertext: 'Y2lwaGVy', nonce: 'MTIzNDU2Nzg5MDEy', version: 3 } },
-    { label: 'keyEpoch=0', opts: { ciphertext: 'Y2lwaGVy', nonce: 'MTIzNDU2Nzg5MDEy', keyEpoch: 0 } },
-    { label: 'keyEpoch=-1', opts: { ciphertext: 'Y2lwaGVy', nonce: 'MTIzNDU2Nzg5MDEy', keyEpoch: -1 } },
-    { label: 'keyEpoch=1.5', opts: { ciphertext: 'Y2lwaGVy', nonce: 'MTIzNDU2Nzg5MDEy', keyEpoch: 1.5 } },
-    { label: 'nonce invalid base64', opts: { ciphertext: 'Y2lwaGVy', nonce: 'not-base64!' } },
-    { label: 'nonce 10 bytes', opts: { ciphertext: 'Y2lwaGVy', nonce: 'bW9ja19ub25jZQ==' } },
-    { label: 'nonce 16 bytes', opts: { ciphertext: 'Y2lwaGVy', nonce: 'AAAAAAAAAAAAAAAAAAAAAA==' } },
+    { label: 'version=1', opts: { ...baseValidForPrecheck, version: 1 } },
+    { label: 'version=3', opts: { ...baseValidForPrecheck, version: 3 } },
+    { label: 'missing keyEpoch', opts: { ...baseValidForPrecheck, keyEpoch: undefined } },
+    { label: 'keyEpoch=0', opts: { ...baseValidForPrecheck, keyEpoch: 0 } },
+    { label: 'keyEpoch=-1', opts: { ...baseValidForPrecheck, keyEpoch: -1 } },
+    { label: 'keyEpoch=1.5', opts: { ...baseValidForPrecheck, keyEpoch: 1.5 } },
+    { label: 'nonce invalid base64', opts: { ...baseValidForPrecheck, nonce: 'not-base64!' } },
+    { label: 'nonce 10 bytes', opts: { ...baseValidForPrecheck, nonce: 'bW9ja19ub25jZQ==' } },
+    { label: 'nonce 16 bytes', opts: { ...baseValidForPrecheck, nonce: 'AAAAAAAAAAAAAAAAAAAAAA==' } },
+    { label: 'strictPreflight omitted', opts: { ...baseValidForPrecheck, strictPreflight: undefined } },
+    { label: 'strictPreflight false', opts: { ...baseValidForPrecheck, strictPreflight: false } },
+    { label: 'missing audienceHash', opts: { ...baseValidForPrecheck, audienceHash: undefined } },
+    { label: 'bad audienceHash', opts: { ...baseValidForPrecheck, audienceHash: 'SUBSET_BAD' } },
+    { label: 'missing rosterHash', opts: { ...baseValidForPrecheck, rosterHash: undefined } },
+    { label: 'bad rosterHash', opts: { ...baseValidForPrecheck, rosterHash: 'RST:SHORT' } },
+    { label: 'missing keyFingerprint', opts: { ...baseValidForPrecheck, keyFingerprint: undefined } },
+    { label: 'bad keyFingerprint', opts: { ...baseValidForPrecheck, keyFingerprint: 'SHA256:SHORT' } },
+    { label: 'missing signature', opts: { ...baseValidForPrecheck, signature: undefined } },
+    { label: 'non-64-byte signature', opts: { ...baseValidForPrecheck, signature: 'c2hvcnQ=' } },
   ];
   for (const tc of invalidClusterPayloads) {
     try {
@@ -666,13 +817,12 @@ async function runSdkTests() {
     }
   }
   assert.strictEqual(unexpectedHttpCalls, 0, 'Invalid cluster payloads must fail before any HTTP calls');
-  console.log('✓ Cluster strict validation (version===2, integer keyEpoch>=1, 12-byte base64 nonce) verified.');
+  console.log('✓ Cluster strict validation (version===2, integer keyEpoch>=1, 12-byte base64 nonce, Workflow 2 envelope) verified.');
 
   // Test sender ID spoofing rejection
   try {
     await slaveClient.sendClusterMessage('cluster_1', {
-      ciphertext: 'bW9ja19jaXBoZXJ0ZXh0',
-      nonce: 'MTIzNDU2Nzg5MDEy',
+      ...slaveEnv.opts,
       senderAgentId: 'AMR-SPOOFED-IDENTITY',
     });
     assert.fail('Spoofed sender agent ID should be rejected before network request');
@@ -697,10 +847,7 @@ async function runSdkTests() {
   });
 
   try {
-    await brokenClient.sendClusterMessage('cluster_1', {
-      ciphertext: 'bW9ja19jaXBoZXJ0ZXh0',
-      nonce: 'MTIzNDU2Nzg5MDEy',
-    });
+    await brokenClient.sendClusterMessage('cluster_1', slaveEnv.opts);
     assert.fail('Message send should fail if master agent ID cannot be resolved');
   } catch (err: any) {
     assert.ok(err instanceof AamarvaError);
@@ -836,24 +983,147 @@ async function runSdkTests() {
   const raceMsg = await raceClient.sendEncryptedClusterMessage('cluster_wf2', 'Race recovery secret', { epoch: 2 });
   assert.strictEqual(await raceClient.decryptClusterMessage('cluster_wf2', raceMsg), 'Race recovery secret');
 
-  // 13e. strictPreflight rejection when fingerprint mismatches sealed key
+  // 13e. strictPreflight rejection when fingerprint mismatches sealed key (even with valid local signature)
+  const badFpEnv = {
+    ...sentAll,
+    keyEpoch: 2,
+    keyFingerprint: 'SHA256:' + Array(32).fill('FF').join(':'),
+    strictPreflight: true,
+  };
   await assert.rejects(
     async () => {
-      await wf2Client.sendClusterMessage('cluster_wf2', {
-        ciphertext: sentAll.ciphertext,
-        nonce: sentAll.nonce,
-        version: 2,
-        keyEpoch: 1,
-        audienceHash: 'ALL',
-        rosterHash: sentAll.rosterHash,
-        keyFingerprint: 'SHA256:' + Array(32).fill('FF').join(':'),
-        signature: sentAll.signature,
-        strictPreflight: true,
-      });
+      await wf2Client.sendClusterMessage('cluster_wf2', badFpEnv);
     },
     (err: any) => err instanceof AamarvaError
   );
   console.log('✓ Workflow 2 cluster E2EE, audience isolation, 409 race recovery, rotation, and strictPreflight verified.');
+
+  // 14. Fail-Closed Security Hardening Regression Tests (Direct Connection + Cluster)
+  console.log('14. Testing fail-closed security invariants for Direct Connection & Cluster...');
+
+  // 14a. Direct Connection: Missing/invalid peerKeyEpoch and connectionId mismatch must fail closed
+  for (const badPeerRes of [
+    { label: 'missing peerKeyEpoch', payload: { peerAgentId: 'AMR-PEER-X', connectionId: 'conn_bad' } },
+    { label: 'peerKeyEpoch=0', payload: { peerAgentId: 'AMR-PEER-X', connectionId: 'conn_bad', peerKeyEpoch: 0 } },
+    { label: 'connectionId mismatch', payload: { peerAgentId: 'AMR-PEER-X', connectionId: 'conn_WRONG', peerKeyEpoch: 1 } },
+  ]) {
+    const peerKp = generateECKeyPair();
+    const peerJwk = exportPublicKeyJWK(peerKp.publicKey);
+    const peerFp = computeKeyFingerprint(peerJwk);
+    const peerSig = signIdentityBinding(peerKp.privateKey, 'AMR-PEER-X', peerFp);
+    const badConnFetch = (async (url: string, init?: any) => {
+      if (url.endsWith('/agents/me/e2ee')) {
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }
+      if (url.includes('/peer-key')) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            ...badPeerRes.payload,
+            peerE2eePublicKey: peerJwk,
+            peerKeyFingerprint: peerFp,
+            peerIdentityKey: peerJwk,
+            peerKeySignature: peerSig,
+          },
+        }), { status: 200 });
+      }
+      return mockFetch(url, init);
+    }) as typeof fetch;
+
+    const badConnClient = new Aamarva({ agentId: 'AMR-LOCAL-X', apiKey: 'sk_test', fetch: badConnFetch });
+    await assert.rejects(
+      async () => badConnClient.sendMessage('conn_bad', 'secret', { peerAgentId: 'AMR-PEER-X' }),
+      (err: any) => err?.code === 'PEER_KEY_VERIFICATION_FAILED',
+      `Direct send must fail closed on ${badPeerRes.label}`
+    );
+  }
+
+  // 14b. decryptClusterMessage fail-closed checks (verifySignature: false, missing sig, non-member sender, contradicting pubkey, sealed rosterHash mismatch)
+  await assert.rejects(
+    async () => wf2Client.decryptClusterMessage('cluster_wf2', sentSub, { verifySignature: false }),
+    (err: any) => err?.code === 'CLUSTER_SIGNATURE_INVALID'
+  );
+  await assert.rejects(
+    async () => wf2Client.decryptClusterMessage('cluster_wf2', { ...sentSub, version: 1 }),
+    (err: any) => err?.code === 'INVALID_CLUSTER_MESSAGE_VERSION'
+  );
+  await assert.rejects(
+    async () => wf2Client.decryptClusterMessage('cluster_wf2', { ...sentSub, senderAgentId: 'AMR-OUTSIDER' }),
+    (err: any) => err?.code === 'CLUSTER_MEMBERSHIP_INVALID'
+  );
+  const attackerKp = generateECKeyPair();
+  await assert.rejects(
+    async () => wf2Client.decryptClusterMessage('cluster_wf2', sentSub, { senderPublicKey: exportPublicKeyJWK(attackerKp.publicKey) }),
+    (err: any) => err?.code === 'CLUSTER_SIGNATURE_INVALID'
+  );
+  const wrongRosterHash = 'RST:' + '0'.repeat(32);
+  const signedWrongRosterSig = signClusterMessageV2(getLocalIdentityKeyPair('AMR-1111-2222').privateKey, {
+    clusterId: 'cluster_wf2',
+    keyEpoch: rotatedSent.keyEpoch!,
+    senderAgentId: rotatedSent.senderAgentId!,
+    audienceHash: rotatedSent.audienceHash!,
+    rosterHash: wrongRosterHash,
+    sequence: '',
+    keyFingerprint: rotatedSent.keyFingerprint!,
+    nonce: rotatedSent.nonce!,
+    ciphertext: rotatedSent.ciphertext!,
+  });
+  await assert.rejects(
+    async () => wf2Client.decryptClusterMessage('cluster_wf2', {
+      ...rotatedSent,
+      rosterHash: wrongRosterHash,
+      signature: signedWrongRosterSig,
+    }),
+    (err: any) => err?.code === 'ROSTER_HASH_MISMATCH'
+  );
+
+  // 14c. sendClusterMessage rejects non-member recipient, ROTATION_REQUIRED, and stale epoch
+  await assert.rejects(
+    async () => slaveClient.sendClusterMessage('cluster_1', { ...slaveEnv.opts, recipients: ['AMR-OUTSIDER-999'] }),
+    (err: any) => err?.code === 'CLUSTER_MEMBERSHIP_INVALID'
+  );
+  await assert.rejects(
+    async () => wf2Client.sendClusterMessage('cluster_wf2', { ...sentAll, strictPreflight: true, keyEpoch: 1 }),
+    (err: any) => err?.code === 'CLUSTER_INVALID_EPOCH'
+  );
+
+  // 14d. Non-404 error during getClusterKeyEntry must NOT trigger distributeClusterKey fallback
+  let distCalledOn403 = false;
+  const err403Fetch = (async (url: string, init?: any) => {
+    if (url.includes('/clusters/cluster_wf2/key-distribution') && init?.method === 'GET') {
+      return new Response(JSON.stringify({ success: false, error: 'Forbidden' }), { status: 403 });
+    }
+    if (url.includes('/clusters/cluster_wf2/key-distribution') && init?.method === 'POST') {
+      distCalledOn403 = true;
+    }
+    return wf2Fetch(url, init);
+  }) as typeof fetch;
+  const err403Client = new Aamarva({ agentId: 'AMR-1111-2222', apiKey: 'sk_test', fetch: err403Fetch });
+  await assert.rejects(
+    async () => err403Client.sendEncryptedClusterMessage('cluster_wf2', 'Should not auto-distribute on 403'),
+    (err: any) => err instanceof AamarvaError
+  );
+  assert.strictEqual(distCalledOn403, false, '403 on key fetch must NOT fall back to distributeClusterKey');
+
+  // 14e. rotateClusterKey rejects non-monotonic epoch
+  const staleRotateFetch = (async (url: string, init?: any) => {
+    if (url.includes('/rotate-key') && init?.method === 'POST') {
+      return new Response(JSON.stringify({ success: true, data: { clusterId: 'cluster_wf2', epoch: 2, keyEpoch: 2 } }), { status: 200 });
+    }
+    return wf2Fetch(url, init);
+  }) as typeof fetch;
+  const staleRotateClient = new Aamarva({ agentId: 'AMR-1111-2222', apiKey: 'sk_test', fetch: staleRotateFetch });
+  await assert.rejects(
+    async () => staleRotateClient.rotateClusterKey('cluster_wf2', { currentEpoch: 2 }),
+    (err: any) => err?.code === 'CLUSTER_ROTATION_FAILED'
+  );
+
+  // 14f. getClusterKey requires explicit epoch
+  await assert.rejects(
+    async () => wf2Client.getClusterKey('cluster_wf2'),
+    (err: any) => err?.code === 'CLUSTER_INVALID_EPOCH'
+  );
+  console.log('✓ All fail-closed Direct Connection & Cluster Phase 3/4 invariants verified.');
 
   console.log('--------------------------------------------------');
   console.log('ALL AAMARVA FLEET SDK TESTS PASSED SUCCESSFULLY   ');

@@ -241,7 +241,7 @@ class AamarvaMcpServer:
                             args.get("clusterId"),
                             args.get("ciphertext", ""),
                             args.get("nonce", ""),
-                            key_epoch=args.get("keyEpoch") or 1,
+                            key_epoch=args.get("keyEpoch"),
                             recipients=args.get("recipients"),
                             audience_hash=args.get("audienceHash"),
                             roster_hash=args.get("rosterHash"),

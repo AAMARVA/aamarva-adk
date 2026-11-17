@@ -216,6 +216,241 @@ async function runFloorMcpFixTests() {
     console.log('✓ Malformed data payload rejected with FLOOR_EXECUTION_FAILED.');
   }
 
+  // 15-38. Comprehensive zero-trust FLOOR execution authorization tests (reconciled contracts, identity/fleet, arguments, scope, credentials, zero MCP calls)
+  console.log('15-38. Testing zero-trust contract reconciliation & zero MCP requests on all auth failures...');
+
+  const futureIso = () => new Date(Date.now() + 600_000).toISOString();
+  const pastIso = () => new Date(Date.now() - 10_000).toISOString();
+
+  // A1. Reconciled docs/endpoints.md response (no top-level status or grant object; uses verificationInfo + grantToken + authConfig)
+  {
+    const callOrder: string[] = [];
+    let capturedMcpAuth = '';
+    let capturedMcpArgs: any = null;
+    const docsContractFetch = (async (url: string, init?: any) => {
+      if (url.includes('/execute')) {
+        callOrder.push('floor:execute');
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            invocationId: 'inv_docs_1',
+            toolId: authorizedTool.id,
+            tool: { id: authorizedTool.id, name: authorizedTool.name },
+            serverUrl: 'https://mcp.weather.internal/sse',
+            authConfig: {
+              authType: 'bearer',
+              authHeaderName: 'Authorization',
+              headerValue: 'Bearer grant_sec_docs_secret_991',
+            },
+            verificationInfo: {
+              verified: true,
+              toolId: authorizedTool.id,
+              agentId: 'AMR-TEST-AGENT',
+            },
+            grantToken: 'grant_sec_docs_secret_991',
+            accessToken: 'grant_sec_docs_secret_991',
+            scope: 'tool:invoke',
+            expiresAt: futureIso(),
+            approvedArguments: {
+              ticker: 'AAPL',
+              nested: { b: 2, a: [true, { y: 9, x: 8 }] },
+            },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (url.startsWith('https://mcp.weather.internal/')) {
+        callOrder.push('mcp:invoke');
+        capturedMcpAuth = String(init?.headers?.Authorization || init?.headers?.authorization || '');
+        const rpc = JSON.parse(String(init?.body || '{}'));
+        capturedMcpArgs = rpc.params?.arguments;
+        return new Response(JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { ok: true, fromDocsContract: true },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return mockFetch(url, init);
+    }) as typeof fetch;
+
+    const docsClient = new Aamarva({
+      agentId: 'AMR-TEST-AGENT',
+      apiKey: 'sk_test_123',
+      fetch: docsContractFetch,
+    });
+
+    const submitted = {
+      nested: { a: [true, { x: 8, y: 9 }], b: 2 },
+      ticker: 'AAPL',
+    };
+    const docsRes = await docsClient.executeFloorTool(authorizedTool.id, submitted, {
+      invocationId: 'inv_docs_1',
+      requiredScope: 'tool:invoke',
+      requireApprovedArguments: true,
+    });
+    assert.strictEqual(docsRes.status, 'approved');
+    assert.deepStrictEqual(callOrder, ['floor:execute', 'mcp:invoke']);
+    assert.strictEqual(capturedMcpAuth, 'Bearer grant_sec_docs_secret_991');
+    assert.strictEqual(capturedMcpArgs.ticker, 'AAPL');
+    console.log('✓ Reconciled docs/endpoints.md contract + nested key-order-insensitive arg binding + ordering verified.');
+  }
+
+  // A2. Target-agent (slave) scoping succeeds only when response matches targetAgentId
+  {
+    let mcpCalls = 0;
+    const slaveFetch = (async (url: string, init?: any) => {
+      if (url.includes('/execute')) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            status: 'approved',
+            invocationId: 'inv_slave_ok',
+            toolId: authorizedTool.id,
+            agentId: 'AMR-SLAVE-01',
+            serverUrl: 'https://mcp.slave.internal/rpc',
+            auth: { type: 'bearer', token: 'slave_tok_123' },
+            grant: {
+              status: 'active',
+              agentId: 'AMR-SLAVE-01',
+              toolId: authorizedTool.id,
+              scope: 'tool:invoke',
+              expiresAt: futureIso(),
+            },
+            verificationInfo: { verified: true, toolId: authorizedTool.id, agentId: 'AMR-SLAVE-01' },
+            approvedArguments: { ticker: 'MSFT' },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (url.startsWith('https://mcp.slave.internal/')) {
+        mcpCalls++;
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { slaveOk: true } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return mockFetch(url, init);
+    }) as typeof fetch;
+
+    const slaveScopedClient = new Aamarva({
+      agentId: 'AMR-MASTER-01',
+      targetAgentId: 'AMR-SLAVE-01',
+      apiKey: 'sk_master_123',
+      fetch: slaveFetch,
+    });
+    const slaveRes = await slaveScopedClient.executeFloorTool(
+      authorizedTool.id,
+      { ticker: 'MSFT' },
+      { invocationId: 'inv_slave_ok' }
+    );
+    assert.strictEqual(slaveRes.status, 'approved');
+    assert.strictEqual(mcpCalls, 1);
+    console.log('✓ Target-agent (x-target-agent-id) scoped authorization verified.');
+  }
+
+  // B-F: Exhaustive negative failure scenarios (zero MCP calls + no credential leakage)
+  const validBase = () => ({
+    status: 'approved',
+    invocationId: 'inv_1',
+    toolId: authorizedTool.id,
+    agentId: 'AMR-TEST-AGENT',
+    serverUrl: 'https://mcp.example.internal/rpc',
+    auth: { type: 'bearer', token: 'super_secret_mcp_token_do_not_leak' },
+    verificationInfo: { verified: true, toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT' },
+    grant: {
+      grantId: 'g_1',
+      status: 'active',
+      agentId: 'AMR-TEST-AGENT',
+      toolId: authorizedTool.id,
+      scope: 'tool:invoke',
+      expiresAt: futureIso(),
+    },
+    approvedArguments: { ticker: 'AAPL', nested: { k1: 'v1' } },
+  });
+
+  const authFailScenarios: Array<{
+    name: string;
+    response: any;
+    submittedArgs?: Record<string, unknown>;
+    clientConfig?: { agentId?: string; targetAgentId?: string };
+    execOptions?: Record<string, unknown>;
+    httpStatus?: number;
+  }> = [
+    { name: 'missing grant without docs proof', response: { success: true, data: { invocationId: 'inv_1', toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT', status: 'approved', serverUrl: 'https://mcp.example.internal/rpc', auth: { type: 'bearer', token: 'secret_tok' } } } },
+    { name: 'empty grant object {}', response: { success: true, data: { ...validBase(), grant: {} } } },
+    { name: 'missing grant.status (no fallback)', response: { success: true, data: { ...validBase(), grant: { grantId: 'g1', agentId: 'AMR-TEST-AGENT', expiresAt: futureIso() } } } },
+    { name: 'pending execution status', response: { success: true, data: { ...validBase(), status: 'pending', grant: { ...validBase().grant, status: 'pending' } } } },
+    { name: 'rejected execution status', response: { success: true, data: { ...validBase(), status: 'rejected', grant: { ...validBase().grant, status: 'rejected' } } } },
+    { name: 'expired grant.expiresAt', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, expiresAt: pastIso() } } } },
+    { name: 'expired top-level expiresAt even with future grant.expiresAt', response: { success: true, data: { ...validBase(), expiresAt: pastIso() } } },
+    { name: 'malformed non-ISO expiresAt ("9999")', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, expiresAt: '9999' } } } },
+    { name: 'null expiresAt', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, expiresAt: null } } } },
+    { name: 'revoked grant status', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, status: 'revoked' } } } },
+    { name: 'revoked scope token', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, scope: 'revoked' } } } },
+    { name: 'missing requiredScope', response: { success: true, data: validBase() }, execOptions: { requiredScope: 'admin:write' } },
+    { name: 'malformed URL scheme (ftp://)', response: { success: true, data: { ...validBase(), serverUrl: 'ftp://mcp.example.internal/rpc' } } },
+    { name: 'malformed URL string', response: { success: true, data: { ...validBase(), serverUrl: 'not-a-valid-url' } } },
+    { name: 'missing credentials (no auth and no grantToken)', response: { success: true, data: { ...validBase(), auth: undefined } } },
+    { name: 'empty auth object {}', response: { success: true, data: { ...validBase(), auth: {} } } },
+    { name: 'verificationInfo.verified false', response: { success: true, data: { ...validBase(), verificationInfo: { verified: false, toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT' } } } },
+    { name: 'verificationInfo.verified string "true"', response: { success: true, data: { ...validBase(), verificationInfo: { verified: 'true', toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT' } } } },
+    { name: 'missing verificationInfo when grant omitted', response: { success: true, data: { invocationId: 'inv_1', toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT', serverUrl: 'https://mcp.example.internal/rpc', grantToken: 'secret_tok', expiresAt: futureIso() } } },
+    { name: 'missing agentId when client has agentId', response: { success: true, data: { ...validBase(), agentId: undefined, verificationInfo: { verified: true, toolId: authorizedTool.id }, grant: { ...validBase().grant, agentId: undefined } } } },
+    { name: 'mismatched grant.agentId', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, agentId: 'AMR-HIJACKED' } } } },
+    { name: 'master agentId returned instead of slave targetAgentId', response: { success: true, data: { ...validBase(), agentId: 'AMR-MASTER-01', grant: { ...validBase().grant, agentId: 'AMR-MASTER-01' }, verificationInfo: { verified: true, toolId: authorizedTool.id, agentId: 'AMR-MASTER-01' } } }, clientConfig: { agentId: 'AMR-MASTER-01', targetAgentId: 'AMR-SLAVE-01' } },
+    { name: 'fleetId mismatch', response: { success: true, data: { ...validBase(), fleetId: 'fleet_other' } }, execOptions: { fleetId: 'fleet_prod' } },
+    { name: 'mismatched invocationId', response: { success: true, data: { ...validBase(), invocationId: 'inv_WRONG' } } },
+    { name: 'mismatched grant.toolId', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, toolId: 'wrong_tool' } } } },
+    { name: 'top-level tool mismatched', response: { success: true, data: { ...validBase(), toolId: 'wrong_tool' } } },
+    { name: 'modified nested argument', response: { success: true, data: validBase() }, submittedArgs: { ticker: 'AAPL', nested: { k1: 'TAMPERED' } } },
+    { name: 'extra unauthorized argument', response: { success: true, data: validBase() }, submittedArgs: { ticker: 'AAPL', nested: { k1: 'v1' }, adminOverride: true } },
+    { name: 'malformed approvedArguments array', response: { success: true, data: { ...validBase(), approvedArguments: ['bad'] } } },
+    { name: 'missing approvedArguments when required', response: { success: true, data: { ...validBase(), approvedArguments: undefined } }, execOptions: { requireApprovedArguments: true } },
+    { name: 'post-discovery 403 revocation on /execute', response: { success: false, error: 'FLOOR_ACCESS_DENIED', message: 'Revoked' }, httpStatus: 403 },
+  ];
+
+  for (const scenario of authFailScenarios) {
+    let mcpCalls = 0;
+    const scenarioFetch = (async (url: string, init?: any) => {
+      if (url.includes('/floor/tools/') && url.endsWith('/invoke')) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: { invocationId: 'inv_1', toolId: authorizedTool.id, status: 'approved' },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (url.includes('/execute')) {
+        return new Response(JSON.stringify(scenario.response), {
+          status: scenario.httpStatus || 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.includes('mcp.example.internal') || url.includes('/mcp')) {
+        mcpCalls++;
+      }
+      return mockFetch(url, init);
+    }) as typeof fetch;
+
+    const scenarioClient = new Aamarva({
+      agentId: scenario.clientConfig?.agentId || 'AMR-TEST-AGENT',
+      ...(scenario.clientConfig?.targetAgentId ? { targetAgentId: scenario.clientConfig.targetAgentId } : {}),
+      apiKey: 'sk_test_123',
+      fetch: scenarioFetch,
+    });
+
+    try {
+      await scenarioClient.executeFloorTool(
+        authorizedTool.id,
+        scenario.submittedArgs ?? { ticker: 'AAPL', nested: { k1: 'v1' } },
+        scenario.execOptions as any
+      );
+      assert.fail(`Should have failed for scenario: ${scenario.name}`);
+    } catch (err: any) {
+      assert.strictEqual(mcpCalls, 0, `Zero MCP calls expected for ${scenario.name}`);
+      const serializedErr = `${err?.message || ''} ${JSON.stringify(err || {})}`;
+      assert.strictEqual(serializedErr.includes('super_secret_mcp_token_do_not_leak'), false, `Secret leaked in error for ${scenario.name}`);
+      assert.strictEqual(serializedErr.includes('secret_tok'), false, `Token leaked in error for ${scenario.name}`);
+    }
+  }
+  console.log(`✓ Verified zero external MCP requests and zero credential leaks across ${authFailScenarios.length} security failure scenarios.`);
+
   console.log('--------------------------------------------------');
   console.log('ALL FLOOR MCP FIX TESTS PASSED                    ');
   console.log('--------------------------------------------------');
