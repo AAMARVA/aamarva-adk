@@ -376,7 +376,7 @@ export default function App() {
                <ProtocolCard 
                 title="FLOOR HITL Governance" 
                 badge="HITL APPROVAL" 
-                desc="Human-in-the-Loop approval workflows for sensitive tools with temporary leased credentials."
+                desc="Human-in-the-Loop approval workflows for sensitive tools governed by AAMARVA FLOOR."
                 code={`const req = await client.requestFloorAccess(\n  'tool_sec_edgar', 'Audit filings'\n);\nconsole.log(req.status); // 'pending'`}
               />
                <ProtocolCard 

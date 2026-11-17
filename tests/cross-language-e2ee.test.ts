@@ -18,16 +18,7 @@ import {
   decryptClusterMessagePayload,
   signClusterMessageV2,
   verifyClusterMessageSignatureV2,
-  computeArgsDigest,
-  sha256Hex,
-  signGatewayInstruction,
-  verifyGatewayInstructionSignature,
-  sealGatewayTokenEnvelope,
-  openGatewayTokenEnvelope,
-  signGatewayPop,
-  verifyGatewayPop,
 } from '../src/crypto.js';
-import { GATEWAY_PROTOCOL_VERSION } from '../src/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,9 +26,8 @@ const pyScript = path.join(__dirname, 'py_e2ee_interop.py');
 
 function isPythonCryptographyAvailable(): boolean {
   try {
-    const res = spawnSync('python3', ['-c', 'from aamarva.crypto import HAS_CRYPTOGRAPHY; assert HAS_CRYPTOGRAPHY'], {
+    const res = spawnSync('python3', ['-c', 'from cryptography.hazmat.primitives.asymmetric import ec'], {
       encoding: 'utf-8',
-      env: { ...process.env, PYTHONPATH: path.join(__dirname, '../python') },
     });
     return res.status === 0;
   } catch {
@@ -330,191 +320,7 @@ async function runCrossLanguageE2EETest() {
   assert.strictEqual(tsClusterPlain, 'Cluster Workflow 2 reply from Python');
   console.log('✓ Workflow 2 TS <-> Python wrap/unwrap, IEEE P1363 ECDSA sign/verify, and decrypt verified.');
 
-  // 10. Gateway RFC 9180 HPKE + X25519 Binding + Signed Instructions + Proof-of-Possession TS <-> Python Interop
-  const pyGwKeys = callPython('gw-gen-keys', { agentId: 'AMR-PYTHON' });
-  assert.strictEqual(pyGwKeys.success, true);
-  assert.strictEqual(
-    verifyAgentEncryptionKeyBinding(
-      pyGwKeys.identityPublicKeyJwk,
-      {
-        agentId: 'AMR-PYTHON',
-        keyId: pyGwKeys.keyId,
-        keyVersion: pyGwKeys.keyVersion,
-        fingerprint: pyGwKeys.x25519Fingerprint,
-        publicKey: pyGwKeys.x25519PublicKeyJwk,
-      },
-      pyGwKeys.encBindingSignature
-    ),
-    true,
-    'TypeScript must verify Python X25519 key binding signature'
-  );
-
-  const tsX25519 = generateX25519KeyPair();
-  const tsX25519PubJwk = exportX25519PublicKeyJWK(tsX25519.publicKey);
-  const tsX25519PrivPem = tsX25519.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
-  const tsX25519Fp = computeX25519KeyFingerprint(tsX25519PubJwk);
-  const tsKeyId = computeAgentEncryptionKeyId('AMR-TYPESCRIPT', tsX25519PubJwk, 1);
-
-  const issuerKp = generateECKeyPair();
-  const issuerPrivPem = issuerKp.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
-  const issuerPubJwk = issuerKp.publicKey.export({ format: 'jwk' });
-  const gwKp = generateECKeyPair();
-  const gwPrivPem = gwKp.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
-  const gwPubJwk = gwKp.publicKey.export({ format: 'jwk' });
-
-  const nowIso = new Date().toISOString();
-  const expIso = new Date(Date.now() + 600_000).toISOString();
-  const args = { ticker: 'AAPL', nested: { limit: 10, flags: [true, false] } };
-  const argsDigest = computeArgsDigest(args);
-
-  // 10a. TS signs Gateway Instruction -> Python verifies; Python signs Gateway Instruction -> TS verifies
-  const unsignedInstForPy: any = {
-    version: GATEWAY_PROTOCOL_VERSION,
-    instructionId: 'inst_interop_1',
-    issuer: 'aamarva.platform',
-    audience: 'aamarva.gateway',
-    gatewayId: 'gw_interop',
-    agentId: 'AMR-PYTHON',
-    agentKeyId: pyGwKeys.keyId,
-    agentKeyVersion: pyGwKeys.keyVersion,
-    agentPublicKey: pyGwKeys.x25519PublicKeyJwk,
-    invocationId: 'inv_interop_1',
-    mcpServerId: 'mcp_sec',
-    toolId: 'tool_sec',
-    approvedArguments: args,
-    approvedArgsDigest: argsDigest,
-    decision: 'approved',
-    scope: 'tool:invoke',
-    iat: nowIso,
-    exp: expIso,
-    issuerKeyId: 'iss_1',
-  };
-  const tsSignedInst = {
-    ...unsignedInstForPy,
-    signature: signGatewayInstruction(issuerKp.privateKey, unsignedInstForPy),
-  };
-  const pyVerifyInst = callPython('gw-verify-instruction', {
-    issuerPublicKey: issuerPubJwk,
-    instruction: tsSignedInst,
-  });
-  assert.strictEqual(pyVerifyInst.valid, true, 'Python must verify TS-signed gateway instruction');
-
-  const pySignInst = callPython('gw-sign-instruction', {
-    issuerPrivateKeyPem: issuerPrivPem,
-    instruction: unsignedInstForPy,
-  });
-  assert.strictEqual(pySignInst.success, true);
-  assert.strictEqual(
-    verifyGatewayInstructionSignature(issuerPubJwk, { ...unsignedInstForPy, signature: pySignInst.signature }),
-    true,
-    'TypeScript must verify Python-signed gateway instruction'
-  );
-
-  // 10b. RFC 9180 HPKE Seal in TypeScript -> Open in Python
-  const tokenPayloadForPy: any = {
-    version: GATEWAY_PROTOCOL_VERSION,
-    token: 'gw_tok_ts_to_py_999',
-    gatewayId: 'gw_interop',
-    gatewayUrl: 'https://aamarva.com/api/gateway',
-    agentId: 'AMR-PYTHON',
-    agentKeyId: pyGwKeys.keyId,
-    agentKeyVersion: pyGwKeys.keyVersion,
-    invocationId: 'inv_interop_1',
-    instructionId: 'inst_interop_1',
-    mcpServerId: 'mcp_sec',
-    toolId: 'tool_sec',
-    approvedArgsDigest: argsDigest,
-    scope: 'tool:invoke',
-    iat: nowIso,
-    exp: expIso,
-  };
-  const tsSealedEnvelope = await sealGatewayTokenEnvelope({
-    tokenPayload: tokenPayloadForPy,
-    agentPublicKey: pyGwKeys.x25519PublicKeyJwk,
-    gatewaySigningPrivateKey: gwKp.privateKey,
-    gatewayKeyId: 'gw_k1',
-    gatewayPublicKey: gwPubJwk as any,
-  });
-  const pyOpened = callPython('gw-open-envelope', {
-    envelope: tsSealedEnvelope,
-    agentPrivateKeyPem: pyGwKeys.x25519PrivateKeyPem,
-    trustedGatewayPublicKeys: { gw_k1: gwPubJwk },
-    expectedContext: { agentId: 'AMR-PYTHON', toolId: 'tool_sec', approvedArgsDigest: argsDigest },
-  });
-  assert.strictEqual(pyOpened.success, true, `Python failed to open TS HPKE envelope: ${pyOpened.error}`);
-  assert.strictEqual(pyOpened.payload.token, 'gw_tok_ts_to_py_999');
-
-  // 10c. RFC 9180 HPKE Seal in Python -> Open in TypeScript
-  const tokenPayloadForTs: any = {
-    version: GATEWAY_PROTOCOL_VERSION,
-    token: 'gw_tok_py_to_ts_777',
-    gatewayId: 'gw_interop',
-    gatewayUrl: 'https://aamarva.com/api/gateway',
-    agentId: 'AMR-TYPESCRIPT',
-    agentKeyId: tsKeyId,
-    agentKeyVersion: 1,
-    invocationId: 'inv_interop_2',
-    instructionId: 'inst_interop_2',
-    mcpServerId: 'mcp_sec',
-    toolId: 'tool_sec',
-    approvedArgsDigest: argsDigest,
-    scope: 'tool:invoke',
-    iat: nowIso,
-    exp: expIso,
-  };
-  const pySealed = callPython('gw-seal-envelope', {
-    tokenPayload: tokenPayloadForTs,
-    agentPublicKey: tsX25519PubJwk,
-    gatewaySigningPrivateKeyPem: gwPrivPem,
-    gatewayKeyId: 'gw_k1',
-    gatewayPublicKey: gwPubJwk,
-  });
-  assert.strictEqual(pySealed.success, true, `Python failed to seal HPKE envelope: ${pySealed.error}`);
-  const tsOpened = await openGatewayTokenEnvelope(
-    pySealed.envelope,
-    tsX25519PrivPem,
-    { gw_k1: gwPubJwk as any },
-    { agentId: 'AMR-TYPESCRIPT', toolId: 'tool_sec', approvedArgsDigest: argsDigest }
-  );
-  assert.strictEqual(tsOpened.token, 'gw_tok_py_to_ts_777');
-
-  // 10d. Proof-of-Possession bidirectional TS <-> Python verification
-  const popForPy = {
-    version: GATEWAY_PROTOCOL_VERSION,
-    tokenSha256: sha256Hex('gw_tok_ts_to_py_999'),
-    gatewayId: 'gw_interop',
-    agentId: 'AMR-TYPESCRIPT',
-    agentKeyId: tsKeyId,
-    invocationId: 'inv_interop_1',
-    instructionId: 'inst_interop_1',
-    mcpServerId: 'mcp_sec',
-    toolId: 'tool_sec',
-    approvedArgsDigest: argsDigest,
-    nonce: 'nonce_interop_1',
-    timestamp: nowIso,
-  };
-  const tsPopSig = signGatewayPop(agentAKeyPair.privateKey, popForPy);
-  const pyVerifyPop = callPython('gw-verify-pop', {
-    identityPublicKey: agentAIdentityJwk,
-    params: popForPy,
-    signature: tsPopSig,
-  });
-  assert.strictEqual(pyVerifyPop.valid, true, 'Python must verify TS Proof-of-Possession signature');
-
-  const pyPopSign = callPython('gw-sign-pop', {
-    identityPrivateKeyPem: pyGwKeys.identityPrivateKeyPem,
-    params: popForPy,
-  });
-  assert.strictEqual(pyPopSign.success, true);
-  assert.strictEqual(
-    verifyGatewayPop(pyGwKeys.identityPublicKeyJwk, popForPy, pyPopSign.signature),
-    true,
-    'TypeScript must verify Python Proof-of-Possession signature'
-  );
-  assert.ok(tsX25519Fp.startsWith('SHA256:'));
-  console.log('✓ Mandatory Gateway RFC 9180 HPKE, X25519 binding, SignedExecutionInstruction & PoP TS <-> Python interop verified.');
-
-  console.log('--- ALL CROSS-LANGUAGE E2EE & GATEWAY INTEROPERABILITY TESTS PASSED ---');
+  console.log('--- ALL CROSS-LANGUAGE E2EE INTEROPERABILITY TESTS PASSED ---');
 }
 
 runCrossLanguageE2EETest().catch((err) => {

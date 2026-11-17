@@ -30,7 +30,6 @@ import {
   encryptClusterMessagePayload,
   decryptClusterMessagePayload,
 } from '../../src/index.js';
-import { invokeExternalMcpTool } from '../../src/mcp-executor.js';
 
 async function runPlatformInteropTests() {
   const tempKeyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aamarva-platform-interop-'));
@@ -469,9 +468,9 @@ async function runPlatformInteropTests() {
     console.log('✓ AAMARVA_CLUSTER_KEY_WRAP_V1 round-trip, membership check & tampering rejections verified.');
 
     // -------------------------------------------------------------------------
-    // 6. FLOOR MCP Governance Workflow + All Auth Types + SSRF Guards
+    // 6. FLOOR MCP Governance Workflow (Platform-Mediated, Zero Gateway State)
     // -------------------------------------------------------------------------
-    console.log('6. Testing FLOOR policy, HITL polling, authConfig types, and SSRF hardening...');
+    console.log('6. Testing FLOOR policy, HITL polling, and platform-mediated execution...');
     const floorStore = createMockDataStore();
     const floorMock = createMockFetch(floorStore);
     const floorClient = new Aamarva({
@@ -499,29 +498,17 @@ async function runPlatformInteropTests() {
     });
     assert.strictEqual(approvedPoll.status, 'approved');
 
-    // Step 4 & 5: Redeem via Mandatory MCP Adapter Gateway (zero direct external MCP calls)
+    // Step 4 & 5: Platform-mediated execution via /execute (no external MCP URL or gateway credentials)
     const redeemedResult = await floorClient.executeFloorTool(
       'tool_market_depth',
       { pair: 'ETH-USD' },
       { invocationId: approvedPoll.invocationId }
     );
     assert.strictEqual(redeemedResult.status, 'approved');
-    assert.strictEqual(redeemedResult.mcpServerId, 'mcp_srv_market_depth');
     assert.ok(redeemedResult.result);
-    assert.strictEqual(floorStore.directMcpCalls!.length, 0);
-    assert.strictEqual(floorStore.gatewayExecutedMcpCalls!.length, 1);
-
-    // Direct external MCP executor must fail closed
-    await assert.rejects(
-      () =>
-        invokeExternalMcpTool({
-          serverUrl: 'https://mcp.example.com/rpc',
-          toolId: 'tool_sec_edgar',
-          args: { ticker: 'AAPL' },
-        }),
-      (err: any) => err instanceof AamarvaError && err.code === 'GATEWAY_EXECUTION_REQUIRED'
-    );
-    console.log('✓ FLOOR policy, HITL polling, Mandatory Gateway execution, and direct MCP block verified.');
+    assert.strictEqual((redeemedResult as any).serverUrl, undefined);
+    assert.strictEqual((floorClient as any).obtainFloorExecutionAuthorization, undefined);
+    console.log('✓ FLOOR policy, HITL polling, and platform-mediated execution verified.');
 
     // -------------------------------------------------------------------------
     // 7. Watchtower SSE Streaming, Event Deduplication & Reconnect

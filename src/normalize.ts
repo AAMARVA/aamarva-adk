@@ -254,36 +254,12 @@ export function normalizeFloorRequestStatus(raw: unknown): FloorAccessRequestSta
 
   const obj = raw as Record<string, unknown>;
   const invId = obj.invocationId ?? obj.invocation_id;
-  const gatewayEnvelope =
-    (obj.gatewayEnvelope && typeof obj.gatewayEnvelope === 'object' ? obj.gatewayEnvelope : undefined) ||
-    (obj.gateway_envelope && typeof obj.gateway_envelope === 'object' ? obj.gateway_envelope : undefined);
-  const approvedArgs = obj.approvedArguments ?? obj.approved_arguments;
-  const verificationInfo = obj.verificationInfo ?? obj.verification_info;
   return {
     requestId: String(obj.requestId || obj.request_id || obj.id || ''),
     status: String(obj.status || 'pending').trim().toLowerCase(),
     toolId: typeof obj.toolId === 'string' ? obj.toolId : typeof obj.tool_id === 'string' ? obj.tool_id : undefined,
     invocationId: typeof invId === 'string' && invId.trim() ? invId.trim() : undefined,
     agentId: typeof obj.agentId === 'string' ? obj.agentId : typeof obj.agent_id === 'string' ? obj.agent_id : undefined,
-    agentName: typeof obj.agentName === 'string' ? obj.agentName : typeof obj.agent_name === 'string' ? obj.agent_name : undefined,
-    mcpServerId: typeof obj.mcpServerId === 'string' ? obj.mcpServerId : typeof obj.mcp_server_id === 'string' ? obj.mcp_server_id : undefined,
-    gatewayId: typeof obj.gatewayId === 'string' ? obj.gatewayId : typeof obj.gateway_id === 'string' ? obj.gateway_id : undefined,
-    gatewayUrl: typeof obj.gatewayUrl === 'string' ? obj.gatewayUrl : typeof obj.gateway_url === 'string' ? obj.gateway_url : undefined,
-    approvedArgsDigest:
-      typeof obj.approvedArgsDigest === 'string'
-        ? obj.approvedArgsDigest
-        : typeof obj.approved_args_digest === 'string'
-        ? obj.approved_args_digest
-        : undefined,
-    ...(approvedArgs && typeof approvedArgs === 'object' && !Array.isArray(approvedArgs)
-      ? { approvedArguments: approvedArgs as Record<string, unknown> }
-      : {}),
-    ...(obj.scope !== undefined ? { scope: obj.scope as string | string[] } : {}),
-    expiresAt: typeof obj.expiresAt === 'string' ? obj.expiresAt : typeof obj.expires_at === 'string' ? obj.expires_at : undefined,
-    ...(verificationInfo && typeof verificationInfo === 'object' && !Array.isArray(verificationInfo)
-      ? { verificationInfo: verificationInfo as Record<string, unknown> }
-      : {}),
-    ...(gatewayEnvelope ? { gatewayEnvelope: gatewayEnvelope as any } : {}),
     reason: typeof obj.reason === 'string' ? obj.reason : undefined,
     createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,

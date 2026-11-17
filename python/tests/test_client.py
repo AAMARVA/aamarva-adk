@@ -8,46 +8,26 @@ from aamarva.errors import (
     AamarvaAuthenticationError,
     AamarvaValidationError
 )
-import datetime
-import urllib.request
 from aamarva.crypto import (
-    GATEWAY_PROTOCOL_VERSION,
-    compute_args_digest,
     compute_key_fingerprint,
     compute_roster_hash,
     compute_audience_hash,
     export_public_key_jwk,
-    get_local_agent_encryption_key_pair,
     get_local_identity_key,
-    open_gateway_token_envelope,
-    reset_local_agent_encryption_keys,
     reset_local_identity_key,
-    seal_gateway_token_envelope,
-    sha256_hex,
-    sign_gateway_instruction,
-    sign_identity_binding,
-    verify_gateway_instruction_signature,
-    verify_gateway_pop,
+    sign_identity_binding
 )
 try:
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives import serialization
     HAS_CRYPTOGRAPHY = True
 except ImportError:
-    try:
-        from aamarva._openssl_backend import ec, serialization
-        HAS_CRYPTOGRAPHY = True
-    except ImportError:
-        ec = None
-        serialization = None
-        HAS_CRYPTOGRAPHY = False
+    ec = None
+    serialization = None
+    HAS_CRYPTOGRAPHY = False
 
 class TestAamarvaFleetClient(unittest.TestCase):
     def setUp(self):
-        reset_local_identity_key()
-        reset_local_agent_encryption_keys()
-        self.addCleanup(reset_local_identity_key)
-        self.addCleanup(reset_local_agent_encryption_keys)
         self.client = Aamarva(agent_id="AMR-TEST-1111", api_key="sk_amr_test_123")
         self.client.http.request = MagicMock()
         if HAS_CRYPTOGRAPHY:
@@ -65,101 +45,6 @@ class TestAamarvaFleetClient(unittest.TestCase):
             self.peer_identity_priv = None
             self.peer_identity_pub_jwk = None
             self.peer_sig = None
-
-    def _build_gateway_fixture(self, agent_id="AMR-TEST-1111"):
-        issuer_priv = ec.generate_private_key(ec.SECP256R1())
-        issuer_jwk = export_public_key_jwk(issuer_priv.public_key())
-        gw_priv = ec.generate_private_key(ec.SECP256R1())
-        gw_jwk = export_public_key_jwk(gw_priv.public_key())
-        agent_id_priv = get_local_identity_key(agent_id)
-        agent_id_jwk = export_public_key_jwk(agent_id_priv.public_key())
-        agent_enc = get_local_agent_encryption_key_pair(agent_id)
-        now = datetime.datetime.now(datetime.timezone.utc)
-        iat = now.isoformat().replace("+00:00", "Z")
-        exp = (now + datetime.timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
-
-        def make_instruction(
-            invocation_id="inv_123",
-            tool_id="tool_sec",
-            arguments=None,
-            decision="approved",
-            scope="tool:invoke",
-            target_agent=agent_id,
-            expires_at=exp,
-            mcp_server_id="mcp_sec_1",
-            gateway_id="gw_main",
-        ):
-            args_obj = arguments if isinstance(arguments, dict) else {}
-            enc_info = get_local_agent_encryption_key_pair(target_agent)
-            inst = {
-                "version": GATEWAY_PROTOCOL_VERSION,
-                "instructionId": f"inst_{invocation_id}",
-                "issuer": "aamarva.platform",
-                "audience": "aamarva.gateway",
-                "gatewayId": gateway_id,
-                "agentId": target_agent,
-                "agentKeyId": enc_info["key_id"],
-                "agentKeyVersion": enc_info["key_version"],
-                "agentPublicKey": enc_info["public_key_jwk"],
-                "invocationId": invocation_id,
-                "mcpServerId": mcp_server_id,
-                "toolId": tool_id,
-                "approvedArguments": args_obj,
-                "approvedArgsDigest": compute_args_digest(args_obj),
-                "decision": decision,
-                "scope": scope,
-                "iat": iat,
-                "exp": expires_at,
-                "issuerKeyId": "iss_k1",
-            }
-            inst["signature"] = sign_gateway_instruction(issuer_priv, inst)
-            return inst
-
-        def make_envelope(instruction, token_str="gw_tok_single_1"):
-            payload = {
-                "version": GATEWAY_PROTOCOL_VERSION,
-                "token": token_str,
-                "gatewayId": instruction["gatewayId"],
-                "gatewayUrl": "https://aamarva.com/api/gateway",
-                "agentId": instruction["agentId"],
-                "agentKeyId": instruction["agentKeyId"],
-                "agentKeyVersion": instruction["agentKeyVersion"],
-                "invocationId": instruction["invocationId"],
-                "instructionId": instruction["instructionId"],
-                "mcpServerId": instruction["mcpServerId"],
-                "toolId": instruction["toolId"],
-                "approvedArgsDigest": instruction["approvedArgsDigest"],
-                "scope": instruction.get("scope"),
-                "iat": instruction["iat"],
-                "exp": instruction["exp"],
-            }
-            return seal_gateway_token_envelope(
-                token_payload=payload,
-                agent_public_key=instruction["agentPublicKey"],
-                gateway_signing_private_key=gw_priv,
-                gateway_key_id="gw_k1",
-                gateway_public_key=gw_jwk,
-            )
-
-        return {
-            "issuer_priv": issuer_priv,
-            "issuer_jwk": issuer_jwk,
-            "gw_priv": gw_priv,
-            "gw_jwk": gw_jwk,
-            "agent_id_jwk": agent_id_jwk,
-            "agent_enc": agent_enc,
-            "iat": iat,
-            "exp": exp,
-            "make_instruction": make_instruction,
-            "make_envelope": make_envelope,
-            "keys_response": {
-                "success": True,
-                "data": {
-                    "gatewayKeys": {"gw_k1": gw_jwk},
-                    "issuerKeys": {"iss_k1": issuer_jwk},
-                },
-            },
-        }
 
     def test_unapproved_endpoint_rejection(self):
         from aamarva.http import HttpClient
@@ -300,16 +185,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(res.requestId, "req_tool_99")
 
     def test_floor_execute(self):
-        fx = self._build_gateway_fixture("AMR-TEST-1111")
-        inst = fx["make_instruction"](invocation_id="inv_123", tool_id="tool_sec", arguments={"ticker": "AAPL"})
-        captured_calls = []
-
         def mock_req(method, path, **kwargs):
-            captured_calls.append((method, path))
-            if path == "/agents/me/gateway-key" and method == "PUT":
-                return {"success": True, "data": kwargs.get("json_data")}
-            if path == "/gateway/keys":
-                return fx["keys_response"]
             if path == "/floor/agent/tools":
                 return {"success": True, "data": [{"id": "tool_sec", "name": "SEC Extractor", "description": "", "inputSchema": {"properties": {"ticker": {"type": "string"}}}, "accessStatus": "authorized"}]}
             if path == "/floor/tools/tool_sec/invoke":
@@ -322,61 +198,31 @@ class TestAamarvaFleetClient(unittest.TestCase):
                         "invocationId": "inv_123",
                         "toolId": "tool_sec",
                         "agentId": "AMR-TEST-1111",
-                        "gatewayId": "gw_main",
-                        "gatewayUrl": "https://aamarva.com/api/gateway",
-                        "mcpServerId": "mcp_sec_1",
                         "verificationInfo": {"verified": True, "toolId": "tool_sec", "agentId": "AMR-TEST-1111"},
                         "approvedArguments": {"ticker": "AAPL"},
-                        "instruction": inst,
+                        "result": {"data": 123},
                         "grant": {
                             "grantId": "g1",
                             "status": "active",
                             "agentId": "AMR-TEST-1111",
                             "toolId": "tool_sec",
                             "scope": "tool:invoke",
-                            "expiresAt": fx["exp"],
+                            "expiresAt": "2099-01-01T00:00:00Z",
                         },
                     },
                 }
-            if path == "/gateway/tokens" and method == "POST":
-                sent_inst = (kwargs.get("json_data") or {}).get("instruction")
-                self.assertTrue(verify_gateway_instruction_signature(fx["issuer_jwk"], sent_inst))
-                return {"success": True, "data": {"envelope": fx["make_envelope"](sent_inst, "gw_tok_1")}}
-            if path == "/gateway/mcp" and method == "POST":
-                body = kwargs.get("json_data") or {}
-                self.assertEqual(body.get("token"), "gw_tok_1")
-                self.assertTrue(
-                    verify_gateway_pop(
-                        fx["agent_id_jwk"],
-                        {**body, "tokenSha256": sha256_hex(body["token"])},
-                        body.get("proofOfPossession"),
-                    )
-                )
-                return {
-                    "success": True,
-                    "data": {
-                        "status": "approved",
-                        "invocationId": "inv_123",
-                        "toolId": "tool_sec",
-                        "mcpServerId": "mcp_sec_1",
-                        "gatewayId": "gw_main",
-                        "result": {"data": 123},
-                    },
-                }
             return {}
-
         self.client.http.request.side_effect = mock_req
-        with unittest.mock.patch("urllib.request.urlopen", side_effect=AssertionError("Direct external urlopen prohibited")):
+        urlopen_called = [False]
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=lambda *a, **kw: urlopen_called.__setitem__(0, True)):
             res = self.client.execute_floor_tool("tool_sec", {"ticker": "AAPL"})
         self.assertEqual(res.status, "approved")
         self.assertEqual(res.result, {"data": 123})
-        self.assertEqual(res.gatewayId, "gw_main")
-        self.assertEqual(res.mcpServerId, "mcp_sec_1")
-        self.assertIn(("POST", "/gateway/tokens"), captured_calls)
-        self.assertIn(("POST", "/gateway/mcp"), captured_calls)
+        self.assertFalse(hasattr(res, "serverUrl"))
+        self.assertFalse(urlopen_called[0])
 
     def test_legacy_removal_on_client(self):
-        # Assert obsolete methods do not exist
+        # Assert obsolete and gateway methods do not exist
         self.assertFalse(hasattr(self.client, "discover"))
         self.assertFalse(hasattr(self.client, "emit"))
         self.assertFalse(hasattr(self.client, "intake"))
@@ -387,6 +233,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertFalse(hasattr(self.client, "establish_connection"))
         self.assertFalse(hasattr(self.client, "get_floor_temporary_access"))
         self.assertFalse(hasattr(self.client, "invoke_floor_tool"))
+        self.assertFalse(hasattr(self.client, "obtain_floor_execution_authorization"))
 
     @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
     def test_login_auto_registers_public_key(self):
@@ -406,12 +253,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(len(e2ee_calls), 1)
 
     def test_floor_execute_fail_closed_missing_status(self):
-        fx = self._build_gateway_fixture("AMR-TEST-1111")
         def mock_req(method, path, **kwargs):
-            if path == "/agents/me/gateway-key" and method == "PUT":
-                return {"success": True, "data": kwargs.get("json_data")}
-            if path == "/gateway/keys":
-                return fx["keys_response"]
             if path == "/floor/agent/tools":
                 return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
             if path == "/floor/tools/tool_sec/invoke":
@@ -425,12 +267,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "FLOOR_EXECUTION_FAILED")
 
     def test_floor_execute_fail_closed_unknown_status(self):
-        fx = self._build_gateway_fixture("AMR-TEST-1111")
         def mock_req(method, path, **kwargs):
-            if path == "/agents/me/gateway-key" and method == "PUT":
-                return {"success": True, "data": kwargs.get("json_data")}
-            if path == "/gateway/keys":
-                return fx["keys_response"]
             if path == "/floor/agent/tools":
                 return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
             if path == "/floor/tools/tool_sec/invoke":
@@ -444,12 +281,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "FLOOR_EXECUTION_FAILED")
 
     def test_floor_execute_fail_closed_malformed_data(self):
-        fx = self._build_gateway_fixture("AMR-TEST-1111")
         def mock_req(method, path, **kwargs):
-            if path == "/agents/me/gateway-key" and method == "PUT":
-                return {"success": True, "data": kwargs.get("json_data")}
-            if path == "/gateway/keys":
-                return fx["keys_response"]
             if path == "/floor/agent/tools":
                 return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
             if path == "/floor/tools/tool_sec/invoke":
@@ -463,16 +295,9 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(ctx1.exception.code, "FLOOR_EXECUTION_FAILED")
 
     def test_floor_execute_reconciled_docs_contract_and_scoping(self):
-        fx = self._build_gateway_fixture("AMR-TEST-1111")
-        approved_args = {"ticker": "AAPL", "nested": {"b": 2, "a": [True, {"y": 9, "x": 8}]}}
-        inst = fx["make_instruction"](invocation_id="inv_docs_1", tool_id="tool_sec", arguments=approved_args)
         call_order = []
 
         def mock_req(method, path, **kwargs):
-            if path == "/agents/me/gateway-key" and method == "PUT":
-                return {"success": True, "data": kwargs.get("json_data")}
-            if path == "/gateway/keys":
-                return fx["keys_response"]
             if path == "/floor/agent/tools":
                 call_order.append("floor:discover")
                 return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
@@ -481,34 +306,32 @@ class TestAamarvaFleetClient(unittest.TestCase):
                 return {
                     "success": True,
                     "data": {
-                        "status": "approved",
                         "invocationId": "inv_docs_1",
                         "toolId": "tool_sec",
                         "tool": {"id": "tool_sec", "name": "SEC"},
-                        "gatewayId": "gw_main",
-                        "gatewayUrl": "https://aamarva.com/api/gateway",
-                        "mcpServerId": "mcp_sec_1",
-                        "verificationInfo": {"verified": True, "toolId": "tool_sec", "agentId": "AMR-TEST-1111"},
+                        "verificationInfo": {
+                            "verified": True,
+                            "toolId": "tool_sec",
+                            "agentId": "AMR-TEST-1111",
+                        },
                         "scope": "tool:invoke",
-                        "expiresAt": fx["exp"],
-                        "approvedArguments": approved_args,
-                        "instruction": inst,
+                        "expiresAt": "2099-01-01T00:00:00Z",
+                        "approvedArguments": {
+                            "ticker": "AAPL",
+                            "nested": {"b": 2, "a": [True, {"y": 9, "x": 8}]},
+                        },
+                        "result": {"ok": True},
                     },
                 }
-            if path == "/gateway/tokens" and method == "POST":
-                call_order.append("gateway:tokens")
-                return {"success": True, "data": {"envelope": fx["make_envelope"](inst, "gw_tok_docs")}}
-            if path == "/gateway/mcp" and method == "POST":
-                call_order.append("gateway:mcp")
-                return {"success": True, "data": {"status": "approved", "invocationId": "inv_docs_1", "toolId": "tool_sec", "mcpServerId": "mcp_sec_1", "gatewayId": "gw_main", "result": {"ok": True}}}
             return {}
 
+        urlopen_called = [False]
         self.client.http.request.side_effect = mock_req
         submitted_args = {
             "nested": {"a": [True, {"x": 8, "y": 9}], "b": 2},
             "ticker": "AAPL",
         }
-        with unittest.mock.patch("urllib.request.urlopen", side_effect=AssertionError("Direct external MCP call must never occur")):
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=lambda *a, **kw: urlopen_called.__setitem__(0, True)):
             res = self.client.execute_floor_tool(
                 "tool_sec",
                 submitted_args,
@@ -518,77 +341,53 @@ class TestAamarvaFleetClient(unittest.TestCase):
             )
 
         self.assertEqual(res.status, "approved")
-        self.assertEqual(call_order, ["floor:discover", "floor:execute", "gateway:tokens", "gateway:mcp"])
+        self.assertEqual(res.result, {"ok": True})
+        self.assertFalse(hasattr(res, "serverUrl"))
+        self.assertEqual(call_order, ["floor:discover", "floor:execute"])
+        self.assertFalse(urlopen_called[0])
 
         # Target-agent (slave) scoping test
-        fx_slave = self._build_gateway_fixture("AMR-SLAVE-01")
-        slave_inst = fx_slave["make_instruction"](
-            invocation_id="inv_slave_ok",
-            tool_id="tool_sec",
-            arguments={"ticker": "MSFT"},
-            target_agent="AMR-SLAVE-01",
-        )
         slave_client = Aamarva(agent_id="AMR-MASTER-01", api_key="sk_m", target_agent_id="AMR-SLAVE-01")
-
-        def mock_slave(method, path, **kw):
-            if path == "/agents/me/gateway-key" and method == "PUT":
-                return {"success": True, "data": kw.get("json_data")}
-            if path == "/gateway/keys":
-                return fx_slave["keys_response"]
-            if path == "/floor/agent/tools":
-                return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
-            if path == "/floor/invocations/inv_slave_ok/execute":
-                return {
-                    "success": True,
-                    "data": {
-                        "status": "approved",
-                        "invocationId": "inv_slave_ok",
-                        "toolId": "tool_sec",
-                        "agentId": "AMR-SLAVE-01",
-                        "gatewayId": "gw_main",
-                        "gatewayUrl": "https://aamarva.com/api/gateway",
-                        "mcpServerId": "mcp_sec_1",
-                        "verificationInfo": {"verified": True, "toolId": "tool_sec", "agentId": "AMR-SLAVE-01"},
-                        "instruction": slave_inst,
-                        "grant": {"status": "active", "agentId": "AMR-SLAVE-01", "toolId": "tool_sec", "expiresAt": fx_slave["exp"]},
-                    },
-                }
-            if path == "/gateway/tokens" and method == "POST":
-                return {"success": True, "data": {"envelope": fx_slave["make_envelope"](slave_inst, "gw_tok_slave")}}
-            if path == "/gateway/mcp" and method == "POST":
-                return {"success": True, "data": {"status": "approved", "invocationId": "inv_slave_ok", "toolId": "tool_sec", "mcpServerId": "mcp_sec_1", "gatewayId": "gw_main", "result": {"ok": True}}}
-            return {}
-
-        slave_client.http.request = MagicMock(side_effect=mock_slave)
-        with unittest.mock.patch("urllib.request.urlopen", side_effect=AssertionError("Direct external MCP call must never occur")):
+        slave_client.http.request = MagicMock(side_effect=lambda method, path, **kw: (
+            {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
+            if path == "/floor/agent/tools" else
+            {
+                "success": True,
+                "data": {
+                    "status": "approved",
+                    "invocationId": "inv_slave_ok",
+                    "toolId": "tool_sec",
+                    "agentId": "AMR-SLAVE-01",
+                    "verificationInfo": {"verified": True, "toolId": "tool_sec", "agentId": "AMR-SLAVE-01"},
+                    "grant": {"status": "active", "agentId": "AMR-SLAVE-01", "toolId": "tool_sec", "expiresAt": "2099-01-01T00:00:00Z"},
+                    "result": {"slaveOk": True},
+                },
+            }
+        ))
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=lambda *a, **kw: urlopen_called.__setitem__(0, True)):
             slave_res = slave_client.execute_floor_tool("tool_sec", {"ticker": "MSFT"}, invocation_id="inv_slave_ok")
         self.assertEqual(slave_res.status, "approved")
+        self.assertEqual(slave_res.result, {"slaveOk": True})
+        self.assertFalse(urlopen_called[0])
 
     def test_floor_execute_zero_mcp_requests_on_auth_failures(self):
-        fx = self._build_gateway_fixture("AMR-TEST-1111")
-        default_args = {"ticker": "AAPL", "flag": True, "nested": {"k1": "v1"}}
-        valid_inst = fx["make_instruction"](invocation_id="inv_1", tool_id="tool_sec", arguments=default_args)
-
         def valid_base():
             return {
                 "status": "approved",
                 "invocationId": "inv_1",
                 "toolId": "tool_sec",
                 "agentId": "AMR-TEST-1111",
-                "gatewayId": "gw_main",
-                "gatewayUrl": "https://aamarva.com/api/gateway",
-                "mcpServerId": "mcp_sec_1",
                 "verificationInfo": {"verified": True, "toolId": "tool_sec", "agentId": "AMR-TEST-1111"},
-                "instruction": dict(valid_inst),
                 "grant": {
                     "grantId": "g_1",
                     "status": "active",
                     "agentId": "AMR-TEST-1111",
                     "toolId": "tool_sec",
                     "scope": "tool:invoke",
-                    "expiresAt": fx["exp"],
+                    "expiresAt": "2099-01-01T00:00:00Z",
                 },
-                "approvedArguments": default_args,
+                "approvedArguments": {"ticker": "AAPL", "flag": True, "nested": {"k1": "v1"}},
+                "result": {"ok": True},
             }
 
         def mutated(**overrides):
@@ -597,26 +396,28 @@ class TestAamarvaFleetClient(unittest.TestCase):
             return obj
 
         scenarios = [
-            ("missing instruction", mutated(instruction=None), None, None, {}),
-            ("forged instruction signature", mutated(instruction={**valid_inst, "signature": "AAAA"}), None, None, {}),
-            ("exposed serverUrl", mutated(serverUrl="https://mcp.example.internal/rpc"), None, None, {}),
-            ("exposed auth credential", mutated(auth={"type": "bearer", "token": "super_secret_mcp_token_do_not_leak"}), None, None, {}),
-            ("exposed grantToken", mutated(grantToken="super_secret_mcp_token_do_not_leak"), None, None, {}),
+            ("missing grant without docs proof", {"invocationId": "inv_1", "toolId": "tool_sec", "agentId": "AMR-TEST-1111", "status": "approved", "result": {"ok": True}}, None, None, {}),
             ("empty grant object {}", mutated(grant={}), None, None, {}),
-            ("missing grant.status (no fallback)", mutated(grant={"grantId": "g1", "agentId": "AMR-TEST-1111", "expiresAt": fx["exp"]}), None, None, {}),
+            ("missing grant.status (no fallback)", mutated(grant={"grantId": "g1", "agentId": "AMR-TEST-1111", "expiresAt": "2099-01-01T00:00:00Z"}), None, None, {}),
             ("pending status", mutated(status="pending", grant={**valid_base()["grant"], "status": "pending"}), None, None, {}),
             ("rejected status", mutated(status="rejected", grant={**valid_base()["grant"], "status": "rejected"}), None, None, {}),
             ("expired grant.expiresAt", mutated(grant={**valid_base()["grant"], "expiresAt": "2020-01-01T00:00:00Z"}), None, None, {}),
-            ("expired instruction.exp", mutated(instruction=fx["make_instruction"](invocation_id="inv_1", arguments=default_args, expires_at="2020-01-01T00:00:00Z")), None, None, {}),
+            ("expired top-level expiresAt", mutated(expiresAt="2020-01-01T00:00:00Z"), None, None, {}),
             ("malformed non-ISO expiresAt", mutated(grant={**valid_base()["grant"], "expiresAt": "9999"}), None, None, {}),
             ("null expiresAt", mutated(grant={**valid_base()["grant"], "expiresAt": None}), None, None, {}),
             ("revoked grant status", mutated(grant={**valid_base()["grant"], "status": "revoked"}), None, None, {}),
             ("revoked scope token", mutated(grant={**valid_base()["grant"], "scope": "revoked"}), None, None, {}),
             ("missing required_scope", valid_base(), None, None, {"required_scope": "admin:write"}),
-            ("unsupported gatewayUrl scheme ftp://", mutated(gatewayUrl="ftp://mcp.example.internal/rpc"), None, None, {}),
-            ("malformed gatewayUrl", mutated(gatewayUrl="not-a-valid-url"), None, None, {}),
+            ("missing result and output", mutated(result=None), None, None, {}),
+            ("gateway serverUrl leaked", mutated(serverUrl="https://mcp.example.internal/rpc"), None, None, {}),
+            ("gateway mcpServerUrl leaked", mutated(mcpServerUrl="https://mcp.example.internal/rpc"), None, None, {}),
+            ("gateway auth dict leaked", mutated(auth={"type": "bearer", "token": "super_secret_mcp_token_do_not_leak"}), None, None, {}),
+            ("gateway authConfig leaked", mutated(authConfig={"authType": "bearer", "headerValue": "Bearer secret_tok"}), None, None, {}),
+            ("gateway grantToken leaked", mutated(grantToken="secret_tok"), None, None, {}),
+            ("gateway accessToken leaked", mutated(accessToken="secret_tok"), None, None, {}),
             ("verificationInfo.verified false", mutated(verificationInfo={"verified": False, "toolId": "tool_sec", "agentId": "AMR-TEST-1111"}), None, None, {}),
             ("verificationInfo.verified string true", mutated(verificationInfo={"verified": "true", "toolId": "tool_sec", "agentId": "AMR-TEST-1111"}), None, None, {}),
+            ("missing verificationInfo when grant omitted", {"invocationId": "inv_1", "toolId": "tool_sec", "agentId": "AMR-TEST-1111", "expiresAt": "2099-01-01T00:00:00Z", "result": {"ok": True}}, None, None, {}),
             ("missing agentId when client has agent_id", mutated(agentId=None, verificationInfo={"verified": True, "toolId": "tool_sec"}, grant={**valid_base()["grant"], "agentId": None}), None, None, {}),
             ("mismatched grant.agentId", mutated(grant={**valid_base()["grant"], "agentId": "AMR-HIJACKED"}), None, None, {}),
             ("master agentId returned instead of slave target_agent_id", mutated(agentId="AMR-MASTER-01", grant={**valid_base()["grant"], "agentId": "AMR-MASTER-01"}, verificationInfo={"verified": True, "toolId": "tool_sec", "agentId": "AMR-MASTER-01"}), None, ("AMR-MASTER-01", "AMR-SLAVE-01"), {}),
@@ -632,14 +433,9 @@ class TestAamarvaFleetClient(unittest.TestCase):
             ("post-discovery 403 revocation", "RAISE_403", None, None, {}),
         ]
         for name, resp_data, sub_args, client_ident, exec_kw in scenarios:
-            gw_calls = [0]
             urlopen_called = [False]
 
             def mock_req(method, path, **kwargs):
-                if path == "/agents/me/gateway-key" and method == "PUT":
-                    return {"success": True, "data": kwargs.get("json_data")}
-                if path == "/gateway/keys":
-                    return fx["keys_response"]
                 if path == "/floor/agent/tools":
                     return {"success": True, "data": [{"id": "tool_sec", "name": "SEC", "description": "", "inputSchema": {}, "accessStatus": "authorized"}]}
                 if path == "/floor/tools/tool_sec/invoke":
@@ -648,8 +444,6 @@ class TestAamarvaFleetClient(unittest.TestCase):
                     if resp_data == "RAISE_403":
                         raise AamarvaAPIError("Revoked", status_code=403)
                     return {"success": True, "data": resp_data}
-                if path in ("/gateway/tokens", "/gateway/mcp"):
-                    gw_calls[0] += 1
                 return {}
 
             test_client = (
@@ -657,14 +451,14 @@ class TestAamarvaFleetClient(unittest.TestCase):
                 if client_ident else self.client
             )
             test_client.http.request = MagicMock(side_effect=mock_req)
-            args_to_send = sub_args if sub_args is not None else default_args
+            args_to_send = sub_args if sub_args is not None else {"ticker": "AAPL", "flag": True, "nested": {"k1": "v1"}}
 
             with unittest.mock.patch("urllib.request.urlopen", side_effect=lambda *a, **kw: urlopen_called.__setitem__(0, True)):
                 with self.assertRaises(AamarvaError) as err_ctx:
                     test_client.execute_floor_tool("tool_sec", args_to_send, **exec_kw)
                 self.assertFalse(urlopen_called[0], f"urllib.request.urlopen called for scenario '{name}'")
-                self.assertEqual(gw_calls[0], 0, f"Gateway token/mcp endpoint called for failing scenario '{name}'")
                 self.assertNotIn("super_secret_mcp_token_do_not_leak", str(err_ctx.exception))
+                self.assertNotIn("secret_tok", str(err_ctx.exception))
 
     @unittest.skipUnless(HAS_CRYPTOGRAPHY, "cryptography library not installed in environment")
     def test_registration_cache_identity_aware(self):
@@ -1117,12 +911,7 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "MASTER_RESOLUTION_FAILED")
 
     def test_floor_execute_denied_status_raises(self):
-        fx = self._build_gateway_fixture("AMR-TEST-1111")
         def mock_req(method, path, **kwargs):
-            if path == "/agents/me/gateway-key" and method == "PUT":
-                return {"success": True, "data": kwargs.get("json_data")}
-            if path == "/gateway/keys":
-                return fx["keys_response"]
             if path == "/floor/agent/tools":
                 return {"success": True, "data": [{"id": "tool_denied", "name": "Denied Tool", "description": "", "inputSchema": {}, "accessStatus": "denied"}]}
             if path == "/floor/tools/tool_denied/invoke":
@@ -1629,154 +1418,6 @@ class TestAamarvaFleetClient(unittest.TestCase):
             with self.assertRaises(AamarvaError) as ctx:
                 self.client.decrypt_cluster_message("c_1", valid_msg)
             self.assertEqual(ctx.exception.code, "ROSTER_HASH_MISMATCH")
-
-    def test_gateway_direct_mcp_execution_permanently_blocked(self):
-        from aamarva.mcp_executor import invoke_external_mcp_tool
-        from aamarva.http import is_approved_endpoint
-        with self.assertRaises(AamarvaError) as ctx:
-            invoke_external_mcp_tool("https://mcp.example.internal/rpc", "tool_sec", {"ticker": "AAPL"})
-        self.assertEqual(ctx.exception.code, "GATEWAY_EXECUTION_REQUIRED")
-        self.assertFalse(hasattr(__import__("aamarva.client", fromlist=["*"]), "invoke_external_mcp_tool"))
-
-        self.assertTrue(is_approved_endpoint("PUT", "/agents/me/gateway-key"))
-        self.assertTrue(is_approved_endpoint("GET", "/agents/me/gateway-key"))
-        self.assertTrue(is_approved_endpoint("POST", "/agents/me/gateway-key/rotate"))
-        self.assertTrue(is_approved_endpoint("POST", "/agents/me/gateway-key/revoke"))
-        self.assertTrue(is_approved_endpoint("GET", "/agents/AMR-1/gateway-key"))
-        self.assertTrue(is_approved_endpoint("GET", "/gateway/keys"))
-        self.assertTrue(is_approved_endpoint("POST", "/gateway/tokens"))
-        self.assertTrue(is_approved_endpoint("POST", "/gateway/mcp"))
-
-    def test_gateway_e2e_single_use_replay_hitl_rotation_and_credential_isolation(self):
-        fx = self._build_gateway_fixture("AMR-TEST-1111")
-        used_tokens = set()
-        used_nonces = set()
-        hitl_polls = [0]
-
-        def mock_gateway_req(method, path, **kwargs):
-            if path == "/agents/me/gateway-key" and method == "PUT":
-                return {"success": True, "data": kwargs.get("json_data")}
-            if path == "/agents/me/gateway-key/rotate" and method == "POST":
-                return {"success": True, "data": kwargs.get("json_data")}
-            if path == "/agents/me/gateway-key/revoke" and method == "POST":
-                return {"success": True, "data": {"revoked": True}}
-            if path == "/gateway/keys":
-                return fx["keys_response"]
-            if path == "/floor/agent/tools":
-                return {
-                    "success": True,
-                    "data": [
-                        {"id": "tool_order", "name": "Orderbook", "description": "", "inputSchema": {}, "accessStatus": "required"},
-                    ],
-                }
-            if path == "/floor/tools/tool_order/invoke":
-                return {"success": True, "data": {"status": "pending", "requestId": "req_hitl_1", "invocationId": "req_hitl_1", "toolId": "tool_order"}}
-            if path == "/floor/requests/req_hitl_1":
-                hitl_polls[0] += 1
-                if hitl_polls[0] < 2:
-                    return {"success": True, "data": {"status": "pending", "requestId": "req_hitl_1", "toolId": "tool_order"}}
-                return {"success": True, "data": {"status": "approved", "requestId": "req_hitl_1", "invocationId": "inv_hitl_1", "toolId": "tool_order", "agentId": "AMR-TEST-1111"}}
-            if path == "/floor/invocations/inv_hitl_1/execute":
-                inst = fx["make_instruction"](invocation_id="inv_hitl_1", tool_id="tool_order", arguments={"pair": "BTC-USD"})
-                return {
-                    "success": True,
-                    "data": {
-                        "status": "approved",
-                        "invocationId": "inv_hitl_1",
-                        "toolId": "tool_order",
-                        "agentId": "AMR-TEST-1111",
-                        "gatewayId": "gw_main",
-                        "gatewayUrl": "https://aamarva.com/api/gateway",
-                        "mcpServerId": "mcp_sec_1",
-                        "approvedArguments": {"pair": "BTC-USD"},
-                        "instruction": inst,
-                    },
-                }
-            if path == "/gateway/tokens" and method == "POST":
-                sent_inst = (kwargs.get("json_data") or {}).get("instruction")
-                tok = f"gw_tok_{len(used_tokens) + 1}"
-                return {"success": True, "data": {"envelope": fx["make_envelope"](sent_inst, tok)}}
-            if path == "/gateway/mcp" and method == "POST":
-                body = kwargs.get("json_data") or {}
-                tok = body.get("token")
-                nonce = body.get("nonce")
-                if tok in used_tokens:
-                    raise AamarvaAPIError("Token already consumed", status_code=409, code="TOKEN_ALREADY_USED")
-                if nonce in used_nonces:
-                    raise AamarvaAPIError("Nonce replayed", status_code=409, code="TOKEN_REPLAY_DETECTED")
-                used_tokens.add(tok)
-                used_nonces.add(nonce)
-                return {
-                    "success": True,
-                    "data": {
-                        "status": "approved",
-                        "invocationId": body.get("invocationId"),
-                        "toolId": body.get("toolId"),
-                        "mcpServerId": body.get("mcpServerId"),
-                        "gatewayId": body.get("gatewayId"),
-                        "result": {"price": 99500},
-                    },
-                }
-            return {}
-
-        self.client.http.request.side_effect = mock_gateway_req
-
-        # 1. HITL pending -> approved -> gateway token -> /gateway/mcp
-        with unittest.mock.patch("urllib.request.urlopen", side_effect=AssertionError("Direct external MCP call prohibited")):
-            res = self.client.execute_floor_tool(
-                "tool_order",
-                {"pair": "BTC-USD"},
-                wait_for_approval=True,
-                poll_interval_ms=5,
-                poll_timeout_ms=2000,
-            )
-        self.assertEqual(res.status, "approved")
-        self.assertEqual(res.result, {"price": 99500})
-        self.assertEqual(hitl_polls[0], 2)
-
-        # 2. Single-use token replay enforcement
-        inst2 = fx["make_instruction"](invocation_id="inv_replay", tool_id="tool_order", arguments={"pair": "ETH-USD"})
-        env2 = self.client.issue_gateway_token(inst2)
-        opened2 = open_gateway_token_envelope(
-            env2,
-            get_local_agent_encryption_key_pair("AMR-TEST-1111"),
-            fx["keys_response"]["data"]["gatewayKeys"],
-        )
-        redemption1 = self.client.redeem_gateway_token(env2, opened2, {"pair": "ETH-USD"}, agent_id="AMR-TEST-1111")
-        self.assertEqual(redemption1.status, "approved")
-        with self.assertRaises(AamarvaAPIError) as replay_ctx:
-            self.client.redeem_gateway_token(env2, opened2, {"pair": "ETH-USD"}, agent_id="AMR-TEST-1111")
-        self.assertEqual(replay_ctx.exception.status_code, 409)
-
-        # 3. Credential exposure rejection even inside nested objects
-        self.client.http.request.side_effect = lambda m, p, **kw: (
-            fx["keys_response"] if p == "/gateway/keys" else {
-                "success": True,
-                "data": {
-                    "status": "approved",
-                    "invocationId": "inv_leak",
-                    "toolId": "tool_order",
-                    "agentId": "AMR-TEST-1111",
-                    "gatewayId": "gw_main",
-                    "mcpServerId": "mcp_sec_1",
-                    "server": {"url": "https://secret-mcp.internal/sse", "headers": {"Authorization": "Bearer leak"}},
-                    "instruction": inst2,
-                },
-            }
-        )
-        with self.assertRaises(AamarvaError) as leak_ctx:
-            self.client.obtain_floor_execution_authorization("inv_leak", {"pair": "ETH-USD"}, tool_id="tool_order")
-        self.assertEqual(leak_ctx.exception.code, "FLOOR_CREDENTIAL_EXPOSURE")
-
-        # 4. Key rotation + revocation enforcement
-        self.client.http.request.side_effect = mock_gateway_req
-        rot = self.client.rotate_gateway_key(revoke_previous=True)
-        self.assertEqual(rot["keyVersion"], 2)
-        revoked_key_id = fx["agent_enc"]["key_id"]
-        with self.assertRaises(AamarvaError) as rev_ctx:
-            self.client.revoke_gateway_key(key_id=revoked_key_id)
-            get_local_agent_encryption_key_pair("AMR-TEST-1111", key_id=revoked_key_id)
-        self.assertEqual(rev_ctx.exception.code, "AGENT_ENCRYPTION_KEY_REVOKED")
 
 
 if __name__ == "__main__":

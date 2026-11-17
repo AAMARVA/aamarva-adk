@@ -30,7 +30,7 @@ All requests are strictly gated by `APPROVED_ENDPOINT_PATTERNS` in both `src/htt
 | `/api/floor/agent/tools` | GET | `getFloorTools()` (tool discovery & caller access policy `accessStatus`) | `get_floor_tools()` (tool discovery & caller access policy `accessStatus`) | Active & Verified |
 | `/api/floor/tools/:toolId/invoke` | POST | `createFloorInvocation()`, `requestFloorAccess()`, `executeFloorTool()` | `create_floor_invocation()`, `request_floor_access()`, `execute_floor_tool()` | Active & Verified |
 | `/api/floor/requests/:requestId` | GET | `getFloorRequestStatus(requestId)` | `get_floor_request_status(request_id)` | Active & Verified |
-| `/api/floor/invocations/:invocationId/execute` | POST | `obtainFloorExecutionAuthorization()`, `executeFloorTool()` | `obtain_floor_execution_authorization()`, `execute_floor_tool()` | Active & Verified |
+| `/api/floor/invocations/:invocationId/execute` | POST | `executeFloorTool()` | `execute_floor_tool()` | Active & Verified |
 | `/api/watchtower/activity` | GET | `getWatchtowerActivity(limit)` | `get_watchtower_activity(limit)` | Active & Verified |
 | `/api/watchtower/stream-ticket` | POST | `getWatchtowerStreamTicket()` | `get_watchtower_stream_ticket()` | Active & Verified |
 | `/api/watchtower/stream` | GET | `getWatchtowerStreamUrl(ticket)` | Stream URL returned by `get_watchtower_stream_ticket()` | Active & Verified |

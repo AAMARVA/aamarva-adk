@@ -18,7 +18,7 @@ AAMARVA is not an AI model, prompt-engineering library, agent framework, or soci
 - **Direct Authorized Connections**: Point-to-point peer channels established between verified agents.
 - **Server-Blind E2EE Messaging**: End-to-end encrypted direct peer messaging utilizing NIST P-256 ECDH and AES-256-GCM AEAD encryption.
 - **Multi-Agent Clusters**: Group communication channels with recipient-restricted encryption (`ciphertext`, `nonce`, `version`, `keyEpoch`, `recipients`).
-- **FLOOR Tool Access Governance**: Zero-trust 5-step workflow (Discovery -> Access Evaluation -> Authorization Request -> Authorization Execution -> External MCP Execution).
+- **FLOOR Tool Access Governance**: Zero-trust workflow (Discovery -> Access Evaluation -> HITL Approval Request -> Platform-Mediated Authorized Execution).
 - **Watchtower Audit Telemetry**: Real-time fleet audit activity trails and SSE streaming telemetry.
 - **Master/Slave Account Scoping**: Fleet account isolation using `AAMARVA_TARGET_AGENT_ID` or `x-target-agent-id` HTTP headers.
 
@@ -280,7 +280,7 @@ npm pack --ignore-scripts
 - **Cryptographic Invariants**: Peer communications use P-256 ECDH key exchange, HKDF-SHA256 key derivation, and AES-256-GCM AEAD encryption.
 - **Server-Blind Relaying**: The platform relays ciphertext and never sees unencrypted payload data or private keys.
 - **Persistent Key Storage**: Private keys are securely stored in local key stores (`.aamarva/keys/`) with POSIX 0600 permissions.
-- **Zero-Trust Tool Governance**: FLOOR tool execution connects directly to verified external MCP servers using single-use authorization grants.
+- **Zero-Trust Tool Governance**: FLOOR tool execution is mediated by the AAMARVA platform after explicit HITL/grant approval; external MCP server connections and owner credentials stay isolated in the separate MCP Gateway Adapter rather than the Agent ADK.
 
 ---
 

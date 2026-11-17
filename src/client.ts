@@ -6,7 +6,7 @@
  * 2. Direct Connections & End-to-End Encrypted (E2EE) Messaging
  * 3. Multi-Agent Clusters & Recipient-Restricted Messaging
  * 4. Watchtower Fleet Telemetry & Event Streaming
- * 5. FLOOR MCP Tool Governance (Discovery, HITL Access Requests, Status)
+ * 5. FLOOR MCP Tool Governance (Discovery, HITL Access Requests, Status, Platform Execution)
  */
 
 import { HttpClient } from './http.js';
@@ -40,12 +40,6 @@ import {
   GetClusterKeyDistributionOptions,
   AgentE2eeKeyResponse,
   ClusterKeyDistributionResponse,
-  GATEWAY_PROTOCOL_VERSION,
-  DecryptedGatewayTokenPayload,
-  GatewayTokenEnvelope,
-  GatewayRedemptionRequest,
-  TrustedGatewayKeysResponse,
-  ECJWK,
 } from './types.js';
 import {
   normalizeAgent,
@@ -56,7 +50,6 @@ import {
   normalizeWatchtowerActivity,
 } from './normalize.js';
 import {
-  ensurePersistentKeyStore,
   getLocalIdentityKeyPair,
   exportPublicKeyJWK,
   normalizeAgentId,
@@ -74,11 +67,6 @@ import {
   decryptClusterMessagePayload,
   signClusterMessageV2,
   verifyClusterMessageSignatureV2,
-  canonicalJsonStringify,
-  sha256Hex,
-  computeArgsDigest,
-  openGatewayTokenEnvelope,
-  signGatewayPop,
 } from './crypto.js';
 import { AamarvaValidationError, AamarvaError, AamarvaForbiddenError } from './errors.js';
 
@@ -97,12 +85,9 @@ export class Aamarva {
   private isRegisteringKey = false;
   private clusterKeyCache = new Map<string, CachedClusterKeyEntry>();
   private pendingFloorRequests = new Map<string, string>();
-  private trustedGatewayPublicKeys?: Record<string, ECJWK | string>;
-  private cachedGatewayKeysResponse?: TrustedGatewayKeysResponse;
 
   constructor(config: AamarvaConfig = {}) {
     this.http = new HttpClient(config);
-    this.trustedGatewayPublicKeys = config.trustedGatewayPublicKeys;
     this.http.setOnAuthSuccess(() => this.registerPublicKey());
   }
 
@@ -139,7 +124,7 @@ export class Aamarva {
       return;
     }
 
-    let myAgentId = options?.agentId || this.http.getAgentId() || this.agentId || this.http.getTargetAgentId();
+    let myAgentId = options?.agentId || this.http.getAgentId() || this.agentId;
     if ((!myAgentId || myAgentId === 'me') && this.http.getTokens().accessToken) {
       try {
         const meRes = await this.http.request<any>({
@@ -2176,49 +2161,31 @@ export class Aamarva {
       : data.invocationId
       ? String(data.invocationId).trim()
       : undefined;
-    const invocationId = typeof (data.invocationId || data.id || requestId) === 'string'
-      ? String(data.invocationId || data.id || requestId).trim()
-      : undefined;
+    const invocationId = String(data.invocationId || data.id || requestId || '').trim();
 
     if (status === 'pending' && requestId) {
       this.pendingFloorRequests.set(this.getFloorScopeKey(toolId.trim()), requestId);
     }
 
-    const gatewayEnvelope = isPlainObject(data.gatewayEnvelope)
-      ? data.gatewayEnvelope
-      : isPlainObject(resAny.gatewayEnvelope)
-      ? resAny.gatewayEnvelope
-      : undefined;
+    const forbiddenGatewayFields = ['serverUrl', 'mcpServerUrl', 'server', 'auth', 'authentication', 'authConfig', 'grantToken', 'accessToken'];
+    for (const field of forbiddenGatewayFields) {
+      if (field in data && data[field] !== undefined) {
+        throw new AamarvaError(
+          'FLOOR invocation failed: platform returned external MCP gateway URL or credentials; the Agent ADK does not perform external MCP execution.',
+          { code: 'FLOOR_EXECUTION_FAILED' }
+        );
+      }
+    }
+
+    const hasDirectResult = ('result' in data && data.result !== undefined) || ('output' in data && data.output !== undefined);
+    const directResult = 'result' in data && data.result !== undefined ? data.result : data.output;
 
     return {
-      ...(invocationId ? { invocationId } : {}),
-      ...(requestId ? { requestId } : {}),
+      invocationId,
+      requestId,
       toolId: String(data.toolId || toolId.trim()).trim(),
       status,
-      ...(typeof data.agentId === 'string' ? { agentId: data.agentId.trim() } : {}),
-      ...(typeof data.agentName === 'string' ? { agentName: data.agentName.trim() } : {}),
-      ...(typeof data.mcpServerId === 'string' ? { mcpServerId: data.mcpServerId.trim() } : {}),
-      ...(typeof data.gatewayId === 'string' ? { gatewayId: data.gatewayId.trim() } : {}),
-      ...(typeof data.gatewayUrl === 'string' ? { gatewayUrl: data.gatewayUrl.trim() } : {}),
-      ...(typeof data.approvedArgsDigest === 'string' ? { approvedArgsDigest: data.approvedArgsDigest.trim() } : {}),
-      ...(isPlainObject(data.approvedArguments) ? { approvedArguments: data.approvedArguments } : {}),
-      ...(data.scope !== undefined ? { scope: data.scope } : {}),
-      ...(typeof data.expiresAt === 'string' ? { expiresAt: data.expiresAt.trim() } : {}),
-      ...(data.verificationInfo !== undefined ? { verificationInfo: data.verificationInfo } : {}),
-      ...(gatewayEnvelope ? { gatewayEnvelope } : {}),
-      ...('serverUrl' in data ? { serverUrl: data.serverUrl } : {}),
-      ...('mcpServerUrl' in data ? { mcpServerUrl: data.mcpServerUrl } : {}),
-      ...('auth' in data ? { auth: data.auth } : {}),
-      ...('authentication' in data ? { authentication: data.authentication } : {}),
-      ...('authConfig' in data ? { authConfig: data.authConfig } : {}),
-      ...('credentials' in data ? { credentials: data.credentials } : {}),
-      ...('mcpAuth' in data ? { mcpAuth: data.mcpAuth } : {}),
-      ...('mcpCredentials' in data ? { mcpCredentials: data.mcpCredentials } : {}),
-      ...('grantToken' in data ? { grantToken: data.grantToken } : {}),
-      ...('accessToken' in data ? { accessToken: data.accessToken } : {}),
-      ...('fleetId' in data ? { fleetId: data.fleetId } : {}),
-      ...('grant' in data ? { grant: data.grant } : {}),
-      ...('server' in data ? { server: data.server } : {}),
+      ...(hasDirectResult ? { result: directResult, hasDirectResult: true } : {}),
       message: resAny.message || data.message,
     };
   }
@@ -2245,6 +2212,12 @@ export class Aamarva {
       const st = (statusRes.status || 'pending').trim().toLowerCase();
 
       if (st === 'approved') {
+        if (!statusRes.invocationId) {
+          throw new AamarvaError(
+            `FLOOR approval response for request "${reqId}" omitted required invocationId.`,
+            { code: 'FLOOR_EXECUTION_FAILED' }
+          );
+        }
         return statusRes;
       }
 
@@ -2280,130 +2253,12 @@ export class Aamarva {
     }
   }
 
-  private getEffectiveAgentId(overrideAgentId?: string): string {
-    return (
-      overrideAgentId ||
-      this.http.getAgentId() ||
-      this.agentId ||
-      this.http.getTargetAgentId() ||
-      'default'
-    ).trim();
-  }
-
   /**
-   * Fetch trusted MCP Adapter Gateway P-256 envelope signing public keys.
-   * Maps to GET /api/gateway/keys
-   */
-  public async getTrustedGatewayKeys(options: { forceRefresh?: boolean } = {}): Promise<TrustedGatewayKeysResponse> {
-    if (this.cachedGatewayKeysResponse && !options.forceRefresh) {
-      return this.cachedGatewayKeysResponse;
-    }
-
-    const response = await this.http.request<TrustedGatewayKeysResponse>({
-      method: 'GET',
-      path: '/gateway/keys',
-      auth: true,
-    });
-    const data = (response?.data && typeof response.data === 'object' ? response.data : response) as TrustedGatewayKeysResponse;
-    if (!data || !isPlainObject(data.gatewayKeys)) {
-      throw new AamarvaError('Platform returned invalid trusted gateway keys payload.', {
-        code: 'GATEWAY_UNTRUSTED_KEY',
-      });
-    }
-
-    this.cachedGatewayKeysResponse = data;
-    return data;
-  }
-
-  /**
-   * Redeem an HPKE-decrypted single-use gateway token with a fresh Proof-of-Possession signature.
-   * Maps to POST /api/gateway/mcp
-   */
-  public async redeemGatewayToken(
-    envelope: GatewayTokenEnvelope,
-    decryptedPayload: DecryptedGatewayTokenPayload,
-    args: Record<string, unknown> = {},
-    options: { agentId?: string } = {}
-  ): Promise<FloorToolInvokeResult> {
-    if (!envelope || !decryptedPayload || !decryptedPayload.token?.trim()) {
-      throw new AamarvaValidationError('Decrypted gateway token payload is required for redemption.');
-    }
-
-    const effectiveAgentId = this.getEffectiveAgentId(options.agentId || decryptedPayload.agentId);
-    const normalizedArgs = isPlainObject(args) ? args : {};
-    const approvedArgsDigest = computeArgsDigest(normalizedArgs);
-    if (approvedArgsDigest !== decryptedPayload.approvedArgsDigest) {
-      throw new AamarvaError('Execution arguments do not match approvedArgsDigest in gateway token.', {
-        code: 'GATEWAY_ARGS_MISMATCH',
-      });
-    }
-
-    const identityKp = getLocalIdentityKeyPair(effectiveAgentId);
-    const randomBytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
-    const nonce = Buffer.from(randomBytes).toString('base64url');
-    const timestamp = new Date().toISOString();
-    const tokenSha256 = sha256Hex(decryptedPayload.token.trim());
-
-    const proofOfPossession = signGatewayPop(identityKp.privateKey, {
-      version: GATEWAY_PROTOCOL_VERSION,
-      tokenSha256,
-      gatewayId: decryptedPayload.gatewayId,
-      agentId: decryptedPayload.agentId,
-      mcpServerId: decryptedPayload.mcpServerId,
-      toolId: decryptedPayload.toolId,
-      approvedArgsDigest,
-      nonce,
-      timestamp,
-    });
-
-    const redemptionRequest: GatewayRedemptionRequest = {
-      version: GATEWAY_PROTOCOL_VERSION,
-      token: decryptedPayload.token.trim(),
-      gatewayId: decryptedPayload.gatewayId,
-      agentId: decryptedPayload.agentId,
-      mcpServerId: decryptedPayload.mcpServerId,
-      toolId: decryptedPayload.toolId,
-      arguments: normalizedArgs,
-      approvedArgsDigest,
-      nonce,
-      timestamp,
-      proofOfPossession,
-    };
-
-    const response = await this.http.request<Record<string, unknown>>({
-      method: 'POST',
-      path: '/gateway/mcp',
-      body: redemptionRequest,
-      auth: true,
-    });
-
-    const resAny = (response || {}) as Record<string, any>;
-    if (resAny.success === false) {
-      throw new AamarvaError(String(resAny.error || resAny.message || 'Gateway MCP execution failed.'), {
-        code: String(resAny.code || 'FLOOR_EXECUTION_FAILED'),
-      });
-    }
-
-    const resData = (isPlainObject(resAny.data) ? resAny.data : resAny) as Record<string, any>;
-    return {
-      status: String(resData.status || 'approved'),
-      ...(typeof resData.requestId === 'string' ? { requestId: resData.requestId } : {}),
-      ...(typeof resData.invocationId === 'string' ? { invocationId: resData.invocationId } : {}),
-      toolId: String(resData.toolId || decryptedPayload.toolId),
-      mcpServerId: String(resData.mcpServerId || decryptedPayload.mcpServerId),
-      gatewayId: String(resData.gatewayId || decryptedPayload.gatewayId),
-      result: resData.result,
-      ...(typeof resData.message === 'string' ? { message: resData.message } : {}),
-    };
-  }
-
-  /**
-   * Execute a FLOOR tool strictly through the Three-Party Mandatory MCP Adapter Gateway flow:
-   * 1. Discover tool metadata via AAMARVA (GET /floor/agent/tools)
-   * 2. Request / poll access via AAMARVA (POST /floor/tools/:toolId/invoke & GET /floor/requests/:requestId)
-   * 3. Receive gateway's signed, P-256 HPKE-encrypted token envelope relayed via AAMARVA (zero MCP credentials/URLs)
-   * 4. Verify gateway authenticity (GET /gateway/keys) & decrypt token locally with agent's P-256 identity private key
-   * 5. Sign Proof-of-Possession with agent's P-256 identity private key & redeem single-use token (POST /gateway/mcp)
+   * Execute an authorized FLOOR tool through the AAMARVA platform API.
+   * Discovery -> Access evaluation -> Approval status/polling -> Platform-mediated execution.
+   *
+   * The Agent ADK never connects directly to external MCP servers and never retrieves
+   * or handles MCP server-owner credentials.
    */
   public async executeFloorTool(
     toolId: string,
@@ -2423,16 +2278,11 @@ export class Aamarva {
     const shouldWait = Boolean(
       options.waitForApproval || (options.pollTimeoutMs !== undefined && options.pollTimeoutMs > 0)
     );
-    const expectedAgentId = (this.http.getAgentId() || this.agentId || this.http.getTargetAgentId() || '').trim();
-    const effectiveAgentId = this.getEffectiveAgentId();
+    const authAgentId = (this.http.getAgentId() || this.agentId || '').trim();
+    const targetAgentId = (this.http.getTargetAgentId() || '').trim();
+    const expectedAgentId = targetAgentId || authAgentId;
 
-    if (options.requirePersistentKeyStore) {
-      ensurePersistentKeyStore(true);
-    }
-
-    await this.registerPublicKey();
-
-    // Stage 1: Tool discovery (non-secret metadata only; never authorizes execution)
+    // Stage 1: Tool discovery (informational only; never authorizes execution)
     const tools = await this.getFloorTools();
     const tool = tools.find((t) => t.id === cleanToolId);
     if (!tool) {
@@ -2442,7 +2292,9 @@ export class Aamarva {
     }
 
     const accessStatus = (tool.accessStatus || '').trim().toLowerCase();
-    if (['revoked', 'denied', 'rejected', 'expired'].includes(accessStatus)) {
+    let invocationId = options.invocationId?.trim() || undefined;
+
+    if (!invocationId && ['revoked', 'denied', 'rejected', 'expired'].includes(accessStatus)) {
       this.pendingFloorRequests.delete(scopeKey);
       throw new AamarvaError(
         `Agent access to tool "${cleanToolId}" is ${accessStatus}.`,
@@ -2465,302 +2317,495 @@ export class Aamarva {
       }
     };
 
-    // Stage 2 & 3: Access evaluation via AAMARVA (request / poll for approval & relayed gatewayEnvelope)
-    const hasGrant = ['authorized', 'granted', 'approved'].includes(accessStatus);
-    const explicitRequestId = options.requestId?.trim();
-    const pendingRequestId = explicitRequestId || (!hasGrant ? (tool.requestId?.trim() || this.pendingFloorRequests.get(scopeKey)) : undefined);
+    // Stage 2 & 3: Access evaluation, reuse existing pending request, and optional HITL polling
+    if (!invocationId) {
+      const existingRequestId =
+        options.requestId?.trim() ||
+        tool.requestId?.trim() ||
+        this.pendingFloorRequests.get(scopeKey);
 
-    let relayPayload: Record<string, any>;
-
-    if (pendingRequestId) {
-      if (shouldWait) {
-        const approvedStatus = await this.waitForFloorApproval(pendingRequestId, {
-          pollIntervalMs: options.pollIntervalMs,
-          timeoutMs: options.pollTimeoutMs,
-          toolId: cleanToolId,
-        });
-        assertRequestBinding(approvedStatus);
-        this.pendingFloorRequests.delete(scopeKey);
-        relayPayload = approvedStatus as unknown as Record<string, any>;
-      } else {
-        const statusRes = await this.getFloorRequestStatus(pendingRequestId);
-        const reqStatus = (statusRes.status || 'pending').trim().toLowerCase();
-        if (reqStatus === 'approved') {
-          assertRequestBinding(statusRes);
-          this.pendingFloorRequests.delete(scopeKey);
-          relayPayload = statusRes as unknown as Record<string, any>;
-        } else if (reqStatus === 'pending') {
-          throw new AamarvaError(
-            `Agent is not authorized to execute tool "${cleanToolId}". Access request ${pendingRequestId} is pending human approval.`,
-            {
-              code: 'FLOOR_ACCESS_DENIED',
-              details: { requestId: pendingRequestId, status: 'pending', toolId: cleanToolId },
-            }
-          );
-        } else if (['denied', 'rejected', 'revoked', 'expired'].includes(reqStatus)) {
-          this.pendingFloorRequests.delete(scopeKey);
-          throw new AamarvaError(
-            `Agent access to tool "${cleanToolId}" was ${reqStatus}.`,
-            {
-              code: 'FLOOR_ACCESS_DENIED',
-              details: { requestId: pendingRequestId, status: reqStatus, toolId: cleanToolId },
-            }
-          );
-        } else {
-          throw new AamarvaError(
-            `FLOOR access request ${pendingRequestId} returned unexpected status "${reqStatus}".`,
-            { code: 'FLOOR_EXECUTION_FAILED' }
-          );
-        }
-      }
-    } else {
-      const invRes = await this.createFloorInvocation(cleanToolId, {
-        reason: options.reason || (hasGrant ? 'Authorized execution run' : 'Agent requested execution'),
-        arguments: submittedArgs,
-      });
-
-      if (invRes.toolId && String(invRes.toolId).trim() !== cleanToolId) {
-        throw new AamarvaError(
-          `FLOOR invocation toolId "${invRes.toolId}" does not match requested tool "${cleanToolId}".`,
-          { code: 'FLOOR_EXECUTION_FAILED' }
-        );
-      }
-
-      if (invRes.status === 'pending') {
-        const reqId = invRes.requestId || invRes.invocationId;
-        if (reqId) {
-          this.pendingFloorRequests.set(scopeKey, reqId);
-        }
-        if (shouldWait && reqId) {
-          const approvedStatus = await this.waitForFloorApproval(reqId, {
+      if (existingRequestId) {
+        if (shouldWait) {
+          const approvedStatus = await this.waitForFloorApproval(existingRequestId, {
             pollIntervalMs: options.pollIntervalMs,
             timeoutMs: options.pollTimeoutMs,
             toolId: cleanToolId,
           });
           assertRequestBinding(approvedStatus);
           this.pendingFloorRequests.delete(scopeKey);
-          relayPayload = approvedStatus as unknown as Record<string, any>;
+          invocationId = approvedStatus.invocationId;
         } else {
-          throw new AamarvaError(
-            `Agent is not authorized to execute tool "${cleanToolId}". Access request ${reqId} is pending human approval.`,
-            {
-              code: 'FLOOR_ACCESS_DENIED',
-              details: { requestId: reqId, status: 'pending', toolId: cleanToolId },
+          const statusRes = await this.getFloorRequestStatus(existingRequestId);
+          const reqStatus = (statusRes.status || 'pending').trim().toLowerCase();
+          if (reqStatus === 'approved') {
+            assertRequestBinding(statusRes);
+            this.pendingFloorRequests.delete(scopeKey);
+            if (!statusRes.invocationId) {
+              throw new AamarvaError(
+                `FLOOR approval for request "${existingRequestId}" omitted invocationId.`,
+                { code: 'FLOOR_EXECUTION_FAILED' }
+              );
             }
+            invocationId = statusRes.invocationId;
+          } else if (reqStatus === 'pending') {
+            throw new AamarvaError(
+              `Agent is not authorized to execute tool "${cleanToolId}". Access request ${existingRequestId} is pending human approval.`,
+              {
+                code: 'FLOOR_ACCESS_DENIED',
+                details: { requestId: existingRequestId, status: 'pending', toolId: cleanToolId },
+              }
+            );
+          } else if (['denied', 'rejected', 'revoked', 'expired'].includes(reqStatus)) {
+            this.pendingFloorRequests.delete(scopeKey);
+            throw new AamarvaError(
+              `Agent access to tool "${cleanToolId}" was ${reqStatus}.`,
+              {
+                code: 'FLOOR_ACCESS_DENIED',
+                details: { requestId: existingRequestId, status: reqStatus, toolId: cleanToolId },
+              }
+            );
+          } else {
+            throw new AamarvaError(
+              `FLOOR access request ${existingRequestId} returned unexpected status "${reqStatus}".`,
+              { code: 'FLOOR_EXECUTION_FAILED' }
+            );
+          }
+        }
+      } else {
+        const hasGrant = ['authorized', 'granted', 'approved'].includes(accessStatus);
+        const invRes = await this.createFloorInvocation(cleanToolId, {
+          reason: options.reason || (hasGrant ? 'Authorized execution run' : 'Agent requested execution'),
+          arguments: submittedArgs,
+        });
+
+        if (invRes.toolId && String(invRes.toolId).trim() !== cleanToolId) {
+          throw new AamarvaError(
+            `FLOOR invocation toolId "${invRes.toolId}" does not match requested tool "${cleanToolId}".`,
+            { code: 'FLOOR_EXECUTION_FAILED' }
           );
         }
-      } else if (['denied', 'rejected', 'revoked', 'expired'].includes(invRes.status)) {
-        throw new AamarvaError(
-          `Agent access to tool "${cleanToolId}" was denied (status: ${invRes.status}).`,
-          { code: 'FLOOR_ACCESS_DENIED' }
-        );
-      } else if (!['approved', 'authorized', 'granted'].includes(invRes.status)) {
-        throw new AamarvaError(
-          `FLOOR invocation creation returned unexpected status "${invRes.status}".`,
-          { code: 'FLOOR_EXECUTION_FAILED' }
-        );
-      } else {
-        relayPayload = invRes as Record<string, any>;
+
+        if (invRes.status === 'pending') {
+          const reqId = invRes.requestId || invRes.invocationId;
+          if (reqId) {
+            this.pendingFloorRequests.set(scopeKey, reqId);
+          }
+          if (shouldWait && reqId) {
+            const approvedStatus = await this.waitForFloorApproval(reqId, {
+              pollIntervalMs: options.pollIntervalMs,
+              timeoutMs: options.pollTimeoutMs,
+              toolId: cleanToolId,
+            });
+            assertRequestBinding(approvedStatus);
+            this.pendingFloorRequests.delete(scopeKey);
+            invocationId = approvedStatus.invocationId;
+          } else {
+            throw new AamarvaError(
+              `Agent is not authorized to execute tool "${cleanToolId}". Access request ${reqId} is pending human approval.`,
+              {
+                code: 'FLOOR_ACCESS_DENIED',
+                details: { requestId: reqId, status: 'pending', toolId: cleanToolId },
+              }
+            );
+          }
+        } else if (['denied', 'rejected', 'revoked', 'expired'].includes(invRes.status)) {
+          throw new AamarvaError(
+            `Agent access to tool "${cleanToolId}" was denied (status: ${invRes.status}).`,
+            { code: 'FLOOR_ACCESS_DENIED' }
+          );
+        } else if (!['approved', 'authorized', 'granted', 'executed', 'completed'].includes(invRes.status)) {
+          throw new AamarvaError(
+            `FLOOR invocation creation returned unexpected status "${invRes.status}".`,
+            { code: 'FLOOR_EXECUTION_FAILED' }
+          );
+        } else if ((invRes.status === 'executed' || invRes.status === 'completed') && invRes.hasDirectResult) {
+          return {
+            status: invRes.status,
+            ...(invRes.invocationId ? { invocationId: invRes.invocationId } : {}),
+            toolId: cleanToolId,
+            result: invRes.result,
+            ...(typeof invRes.message === 'string' ? { message: invRes.message } : {}),
+          };
+        } else {
+          invocationId = invRes.invocationId;
+        }
       }
     }
 
-    // Stage 4: Fail-closed credential isolation & relay metadata verification
-    assertNoExternalMcpCredentialExposure(relayPayload, 'data');
-
-    const rawRelayStatus = String(relayPayload.status || '').trim().toLowerCase();
-    if (!rawRelayStatus) {
-      throw new AamarvaError(`FLOOR authorization failed: expected status 'approved', got ''.`, {
+    if (!invocationId) {
+      throw new AamarvaError('FLOOR invocation creation failed to return a valid invocationId.', {
         code: 'FLOOR_EXECUTION_FAILED',
       });
     }
-    if (['denied', 'rejected', 'revoked', 'expired', 'unassigned', 'pending'].includes(rawRelayStatus)) {
-      throw new AamarvaError(`FLOOR execution authorization denied: status is '${rawRelayStatus}'.`, {
+
+    // Stage 4: Platform-mediated tool execution (POST /api/floor/invocations/:invocationId/execute)
+    let response: any;
+    try {
+      response = await this.http.request<any>({
+        method: 'POST',
+        path: `/floor/invocations/${encodeURIComponent(invocationId)}/execute`,
+        body: {
+          arguments: submittedArgs,
+        },
+        auth: true,
+      });
+    } catch (err: any) {
+      if (err instanceof AamarvaForbiddenError || err?.statusCode === 403) {
+        throw new AamarvaError('FLOOR execution denied by platform.', {
+          code: 'FLOOR_ACCESS_DENIED',
+          statusCode: 403,
+        });
+      }
+      throw err;
+    }
+
+    if (!isPlainObject(response)) {
+      throw new AamarvaError('FLOOR execution failed: response payload is not an object.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+
+    if (response.success === false) {
+      throw new AamarvaError('FLOOR execution was rejected by platform.', {
         code: 'FLOOR_ACCESS_DENIED',
       });
     }
-    if (!['approved', 'authorized', 'granted'].includes(rawRelayStatus)) {
-      throw new AamarvaError(`FLOOR authorization failed: expected status 'approved', got '${rawRelayStatus}'.`, {
+
+    const data = isPlainObject(response.data) ? (response.data as Record<string, unknown>) : null;
+    if (!data) {
+      throw new AamarvaError('FLOOR execution failed: malformed execution payload.', {
         code: 'FLOOR_EXECUTION_FAILED',
       });
     }
 
-    if ('verificationInfo' in relayPayload && relayPayload.verificationInfo !== undefined) {
-      if (!isPlainObject(relayPayload.verificationInfo)) {
-        throw new AamarvaError('FLOOR authorization failed: malformed verificationInfo object.', {
+    // Reject any external MCP gateway destination or credential fields in the Agent ADK
+    const forbiddenGatewayFields = ['serverUrl', 'mcpServerUrl', 'server', 'auth', 'authentication', 'authConfig', 'grantToken', 'accessToken'];
+    for (const field of forbiddenGatewayFields) {
+      if (field in data && data[field] !== undefined) {
+        throw new AamarvaError(
+          'FLOOR execution failed: platform returned external MCP gateway URL or credentials; the Agent ADK does not execute external MCP servers or handle gateway credentials.',
+          { code: 'FLOOR_EXECUTION_FAILED' }
+        );
+      }
+    }
+
+    // Validate invocationId binding
+    const returnedInvocationId = typeof data.invocationId === 'string' ? data.invocationId.trim() : '';
+
+    // Validate verificationInfo when present
+    let verificationInfo: Record<string, unknown> | undefined;
+    if ('verificationInfo' in data && data.verificationInfo !== undefined) {
+      if (!isPlainObject(data.verificationInfo)) {
+        throw new AamarvaError('FLOOR execution failed: malformed verificationInfo object.', {
           code: 'FLOOR_EXECUTION_FAILED',
         });
       }
-      const vInfo = relayPayload.verificationInfo as Record<string, unknown>;
-      if (vInfo.verified === false) {
-        throw new AamarvaError('FLOOR authorization failed: verificationInfo.verified is false.', {
+      verificationInfo = data.verificationInfo;
+      if (verificationInfo.verified === false) {
+        throw new AamarvaError('FLOOR execution failed: verificationInfo.verified is false.', {
           code: 'FLOOR_ACCESS_DENIED',
         });
       }
-      if (vInfo.verified !== true) {
-        throw new AamarvaError('FLOOR authorization failed: verificationInfo.verified must be true.', {
+      if (verificationInfo.verified !== true) {
+        throw new AamarvaError('FLOOR execution failed: verificationInfo.verified must be true.', {
           code: 'FLOOR_EXECUTION_FAILED',
         });
       }
-      if (vInfo.toolId !== undefined && String(vInfo.toolId).trim() !== cleanToolId) {
-        throw new AamarvaError('FLOOR authorization failed: verificationInfo.toolId mismatch.', {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-      if (expectedAgentId && vInfo.agentId !== undefined && String(vInfo.agentId).trim().toUpperCase() !== expectedAgentId.toUpperCase()) {
-        throw new AamarvaError('FLOOR authorization failed: verificationInfo.agentId mismatch.', {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-    }
-
-    if (relayPayload.toolId !== undefined && String(relayPayload.toolId).trim() !== cleanToolId) {
-      throw new AamarvaError(
-        `FLOOR authorization failed: authorized tool "${relayPayload.toolId}" does not match requested tool "${cleanToolId}".`,
-        { code: 'FLOOR_EXECUTION_FAILED' }
-      );
-    }
-
-    if (expectedAgentId && relayPayload.agentId !== undefined && String(relayPayload.agentId).trim().toUpperCase() !== expectedAgentId.toUpperCase()) {
-      throw new AamarvaError('FLOOR authorization failed: agent fleet context mismatch in gateway relay.', {
-        code: 'FLOOR_EXECUTION_FAILED',
-      });
-    }
-
-    if (options.fleetId?.trim()) {
-      const fid = typeof relayPayload.fleetId === 'string' ? relayPayload.fleetId.trim() : '';
-      if (!fid || fid.toUpperCase() !== options.fleetId.trim().toUpperCase()) {
-        throw new AamarvaError('FLOOR authorization failed: fleet context mismatch in response.', {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-    }
-
-    if (relayPayload.expiresAt !== undefined) {
-      validateIsoExpiration(relayPayload.expiresAt, true);
-    }
-
-    if (relayPayload.gatewayUrl !== undefined) {
-      if (typeof relayPayload.gatewayUrl !== 'string' || !relayPayload.gatewayUrl.trim()) {
-        throw new AamarvaError('FLOOR authorization failed: malformed gatewayUrl.', {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-      let parsedGwUrl: URL;
-      try {
-        parsedGwUrl = new URL(relayPayload.gatewayUrl.trim());
-      } catch {
-        throw new AamarvaError('FLOOR authorization failed: malformed gatewayUrl in response.', {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-      if (parsedGwUrl.protocol !== 'http:' && parsedGwUrl.protocol !== 'https:') {
-        throw new AamarvaError('FLOOR authorization failed: unsupported gatewayUrl protocol.', {
-          code: 'FLOOR_EXECUTION_FAILED',
-        });
-      }
-    }
-
-    const reqScope = options.requiredScope?.trim();
-    if (reqScope || relayPayload.scope !== undefined) {
-      const grantedTokens = relayPayload.scope !== undefined
-        ? parseAndValidateScopeTokens(relayPayload.scope, 'scope')
-        : [];
-      if (reqScope) {
-        const grantedSet = new Set(grantedTokens);
-        if (grantedSet.size === 0 || (!grantedSet.has(reqScope) && !grantedSet.has('*') && !grantedSet.has('tool:*'))) {
-          throw new AamarvaError(`FLOOR authorization denied: required scope '${reqScope}' is not granted.`, {
-            code: 'FLOOR_ACCESS_DENIED',
+      if ('invocationId' in verificationInfo && verificationInfo.invocationId !== undefined) {
+        if (typeof verificationInfo.invocationId !== 'string' || verificationInfo.invocationId.trim() !== invocationId) {
+          throw new AamarvaError('FLOOR execution failed: verificationInfo.invocationId does not match invocation.', {
+            code: 'FLOOR_EXECUTION_FAILED',
           });
         }
       }
     }
 
-    if (relayPayload.approvedArguments !== undefined && !isPlainObject(relayPayload.approvedArguments)) {
-      throw new AamarvaError('FLOOR authorization failed: malformed approvedArguments in response.', {
-        code: 'FLOOR_EXECUTION_FAILED',
-      });
-    }
-    if (options.requireApprovedArguments && !isPlainObject(relayPayload.approvedArguments)) {
-      throw new AamarvaError('FLOOR authorization failed: approvedArguments missing in response.', {
-        code: 'FLOOR_EXECUTION_FAILED',
-      });
-    }
-    const submittedDigest = computeArgsDigest(submittedArgs);
-    if (relayPayload.approvedArgsDigest !== undefined && relayPayload.approvedArgsDigest !== submittedDigest) {
-      throw new AamarvaError('FLOOR authorization failed: submitted arguments do not match approvedArgsDigest.', {
-        code: 'FLOOR_EXECUTION_FAILED',
-      });
-    }
-    if (
-      isPlainObject(relayPayload.approvedArguments) &&
-      canonicalJsonStringify(relayPayload.approvedArguments) !== canonicalJsonStringify(submittedArgs)
-    ) {
-      throw new AamarvaError('FLOOR authorization failed: execution arguments do not match approved arguments.', {
-        code: 'FLOOR_EXECUTION_FAILED',
-      });
-    }
-    const authorizedArgs = isPlainObject(relayPayload.approvedArguments)
-      ? { ...relayPayload.approvedArguments }
-      : { ...submittedArgs };
-
-    // Gateway envelope relayed through AAMARVA is mandatory
-    const envelope = relayPayload.gatewayEnvelope as GatewayTokenEnvelope | undefined;
-    if (!envelope || !isPlainObject(envelope)) {
+    // Validate status (empty status is only accepted for the reconciled docs contract when verificationInfo.verified === true)
+    const rawStatus = String(data.status || (response as any).status || '').trim().toLowerCase();
+    const hasVerifiedProof = Boolean(verificationInfo && verificationInfo.verified === true);
+    if (!rawStatus) {
+      if (!hasVerifiedProof || !returnedInvocationId) {
+        throw new AamarvaError(
+          `FLOOR execution failed: expected status 'approved' or 'executed', got ''.`,
+          { code: 'FLOOR_EXECUTION_FAILED' }
+        );
+      }
+    } else if (['denied', 'rejected', 'revoked', 'expired', 'unassigned', 'pending'].includes(rawStatus)) {
       throw new AamarvaError(
-        'FLOOR execution failed: gatewayEnvelope was not returned in AAMARVA authorization relay.',
-        { code: 'GATEWAY_ENVELOPE_INVALID' }
+        `FLOOR execution denied: status is '${rawStatus}'.`,
+        { code: 'FLOOR_ACCESS_DENIED' }
+      );
+    } else if (!['approved', 'executed', 'completed'].includes(rawStatus)) {
+      throw new AamarvaError(
+        `FLOOR execution failed: expected status 'approved' or 'executed', got '${rawStatus}'.`,
+        { code: 'FLOOR_EXECUTION_FAILED' }
       );
     }
 
-    // Stage 5: Verify gateway authenticity & decrypt HPKE token locally with agent's P-256 identity private key
-    let trustedGatewayKeys = options.trustedGatewayPublicKeys || this.trustedGatewayPublicKeys;
-    if (!trustedGatewayKeys) {
-      const fetchedKeys = await this.getTrustedGatewayKeys();
-      trustedGatewayKeys = {
-        ...(fetchedKeys.gatewayKeys || {}),
-        ...(this.trustedGatewayPublicKeys || {}),
-        ...(options.trustedGatewayPublicKeys || {}),
-      };
+    if (!returnedInvocationId || returnedInvocationId !== invocationId) {
+      throw new AamarvaError('FLOOR execution failed: invocation ID missing or mismatched in platform response.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
     }
 
-    const targetIdentityId = envelope.agentId || effectiveAgentId;
-    const identityKp = getLocalIdentityKeyPair(targetIdentityId);
-    const localIdentityFp = computeKeyFingerprint(identityKp.publicKey);
+    // Validate grant metadata when present
+    let grant: Record<string, unknown> | undefined;
+    if ('grant' in data && data.grant !== undefined) {
+      if (!isPlainObject(data.grant) || Object.keys(data.grant).length === 0) {
+        throw new AamarvaError('FLOOR execution failed: grant details missing or empty in response.', {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+      grant = data.grant;
+      if (grant.revoked === true || Boolean(grant.revokedAt)) {
+        throw new AamarvaError('FLOOR execution denied: grant has been revoked.', {
+          code: 'FLOOR_ACCESS_DENIED',
+        });
+      }
+      const grantStatus = typeof grant.status === 'string' ? grant.status.trim().toLowerCase() : '';
+      if (grantStatus && ['denied', 'rejected', 'revoked', 'expired', 'inactive', 'pending'].includes(grantStatus)) {
+        throw new AamarvaError(`FLOOR execution denied: grant status is '${grantStatus}'.`, {
+          code: 'FLOOR_ACCESS_DENIED',
+        });
+      }
+      if (!grantStatus || !['authorized', 'granted', 'approved', 'active'].includes(grantStatus)) {
+        throw new AamarvaError(`FLOOR execution denied: grant status is missing or inactive ('${grantStatus}').`, {
+          code: 'FLOOR_ACCESS_DENIED',
+        });
+      }
+      if ('invocationId' in grant && grant.invocationId !== undefined) {
+        if (typeof grant.invocationId !== 'string' || grant.invocationId.trim() !== invocationId) {
+          throw new AamarvaError('FLOOR execution failed: grant.invocationId does not match invocation.', {
+            code: 'FLOOR_EXECUTION_FAILED',
+          });
+        }
+      }
+    }
 
-    const decryptedPayload = await openGatewayTokenEnvelope(envelope, identityKp, trustedGatewayKeys, {
-      ...(options.gatewayId || relayPayload.gatewayId
-        ? { gatewayId: options.gatewayId || String(relayPayload.gatewayId) }
-        : {}),
-      ...(options.gatewayUrl || relayPayload.gatewayUrl
-        ? { gatewayUrl: options.gatewayUrl || String(relayPayload.gatewayUrl) }
-        : {}),
-      agentId: targetIdentityId,
-      agentPublicKeyFingerprint: localIdentityFp,
-      ...(relayPayload.mcpServerId || tool.mcpServerId
-        ? { mcpServerId: String(relayPayload.mcpServerId || tool.mcpServerId) }
-        : {}),
+    if (!grant && !hasVerifiedProof) {
+      throw new AamarvaError('FLOOR execution failed: missing grant or verified proof in platform response.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+
+    // Validate toolId binding
+    if ('tool' in data && data.tool !== undefined && !isPlainObject(data.tool)) {
+      throw new AamarvaError('FLOOR execution failed: malformed tool object in response.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+    const toolObj = isPlainObject(data.tool) ? data.tool : undefined;
+    const readRequiredStringField = (obj: Record<string, unknown> | undefined, field: string, label: string): string | undefined => {
+      if (!obj || !(field in obj) || obj[field] === undefined) return undefined;
+      if (typeof obj[field] !== 'string' || !obj[field].trim()) {
+        throw new AamarvaError(`FLOOR execution failed: malformed ${label} in platform response.`, {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+      return obj[field].trim();
+    };
+
+    const topToolId = readRequiredStringField(data, 'toolId', 'toolId');
+    const nestedToolId = readRequiredStringField(toolObj, 'id', 'tool.id');
+    const grantToolId = readRequiredStringField(grant, 'toolId', 'grant.toolId');
+    const verifiedToolId = readRequiredStringField(verificationInfo, 'toolId', 'verificationInfo.toolId');
+
+    const toolIdCandidates = [topToolId, nestedToolId, grantToolId, verifiedToolId].filter((v): v is string => Boolean(v));
+    const returnedToolId = topToolId || nestedToolId || '';
+    if (!returnedToolId) {
+      throw new AamarvaError('FLOOR execution failed: toolId is missing in platform response.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+    if (toolIdCandidates.some((tid) => tid !== returnedToolId) || returnedToolId !== cleanToolId) {
+      throw new AamarvaError('FLOOR execution failed: toolId mismatch across execution response.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+
+    // Validate present expiration timestamps
+    validateIsoExpiration(data.expiresAt, 'expiresAt' in data && data.expiresAt !== undefined);
+    validateIsoExpiration(grant?.expiresAt, Boolean(grant && 'expiresAt' in grant && grant.expiresAt !== undefined));
+
+    // Validate scope when present or required
+    const scopeSources: string[][] = [];
+    for (const [container, label] of [
+      [data, 'data.scope'],
+      [grant, 'grant.scope'],
+      [verificationInfo, 'verificationInfo.scope'],
+    ] as const) {
+      if (container && 'scope' in container && container.scope !== undefined) {
+        scopeSources.push(parseAndValidateScopeTokens(container.scope, label));
+      }
+    }
+    if (scopeSources.length > 1) {
+      const baseSet = JSON.stringify([...new Set(scopeSources[0])].sort());
+      for (let i = 1; i < scopeSources.length; i++) {
+        if (JSON.stringify([...new Set(scopeSources[i])].sort()) !== baseSet) {
+          throw new AamarvaError('FLOOR execution denied: conflicting scopes across response.', {
+            code: 'FLOOR_ACCESS_DENIED',
+          });
+        }
+      }
+    }
+    const reqScope = options.requiredScope?.trim();
+    if (reqScope) {
+      const grantedSet = new Set(scopeSources.flat());
+      if (grantedSet.size === 0 || (!grantedSet.has(reqScope) && !grantedSet.has('*') && !grantedSet.has('tool:*'))) {
+        throw new AamarvaError(`FLOOR execution denied: required scope '${reqScope}' is not granted.`, {
+          code: 'FLOOR_ACCESS_DENIED',
+        });
+      }
+    }
+
+    // Validate agent identity, target-agent scoping, and fleet context
+    const returnedAgentFields: string[] = [];
+    for (const [obj, field, label] of [
+      [data, 'agentId', 'data.agentId'],
+      [grant, 'agentId', 'grant.agentId'],
+      [verificationInfo, 'agentId', 'verificationInfo.agentId'],
+      [data, 'targetAgentId', 'data.targetAgentId'],
+      [grant, 'targetAgentId', 'grant.targetAgentId'],
+      [verificationInfo, 'targetAgentId', 'verificationInfo.targetAgentId'],
+    ] as const) {
+      const val = readRequiredStringField(obj, field, label);
+      if (val) returnedAgentFields.push(val);
+    }
+
+    if (expectedAgentId) {
+      if (returnedAgentFields.length === 0) {
+        throw new AamarvaError('FLOOR execution failed: authorized agent identity missing in platform response.', {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+      const expectedUpper = expectedAgentId.toUpperCase();
+      for (const returnedId of returnedAgentFields) {
+        if (returnedId.toUpperCase() !== expectedUpper) {
+          throw new AamarvaError('FLOOR execution failed: agent fleet context mismatch in platform response.', {
+            code: 'FLOOR_EXECUTION_FAILED',
+          });
+        }
+      }
+    } else if (returnedAgentFields.length > 1) {
+      const firstUpper = returnedAgentFields[0].toUpperCase();
+      if (returnedAgentFields.some((id) => id.toUpperCase() !== firstUpper)) {
+        throw new AamarvaError('FLOOR execution failed: conflicting agent identities in platform response.', {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+    }
+
+    const fleetIds: string[] = [];
+    for (const [obj, label] of [
+      [data, 'data.fleetId'],
+      [grant, 'grant.fleetId'],
+      [verificationInfo, 'verificationInfo.fleetId'],
+    ] as const) {
+      const fid = readRequiredStringField(obj, 'fleetId', label);
+      if (fid) fleetIds.push(fid);
+    }
+    const expectedFleetId = options.fleetId?.trim() || '';
+    if (expectedFleetId && (fleetIds.length === 0 || fleetIds.some((f) => f.toUpperCase() !== expectedFleetId.toUpperCase()))) {
+      throw new AamarvaError('FLOOR execution failed: fleet context mismatch in platform response.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+    if (fleetIds.length > 1 && fleetIds.some((f) => f.toUpperCase() !== fleetIds[0].toUpperCase())) {
+      throw new AamarvaError('FLOOR execution failed: conflicting fleet identifiers in platform response.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+
+    const masterIds: string[] = [];
+    for (const [obj, label] of [
+      [data, 'data.masterId'],
+      [grant, 'grant.masterId'],
+      [verificationInfo, 'verificationInfo.masterId'],
+    ] as const) {
+      const mid = readRequiredStringField(obj, 'masterId', label);
+      if (mid) masterIds.push(mid);
+    }
+    if (masterIds.length > 1 && masterIds.some((m) => m.toUpperCase() !== masterIds[0].toUpperCase())) {
+      throw new AamarvaError('FLOOR execution failed: conflicting master agent identifiers in platform response.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+
+    // Validate approvedArguments binding
+    let dataApprovedArgs: Record<string, unknown> | undefined;
+    if ('approvedArguments' in data && data.approvedArguments !== undefined) {
+      if (!isPlainObject(data.approvedArguments)) {
+        throw new AamarvaError('FLOOR execution failed: malformed approvedArguments in response.', {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+      dataApprovedArgs = data.approvedArguments;
+    }
+
+    let grantApprovedArgs: Record<string, unknown> | undefined;
+    if (grant && 'approvedArguments' in grant && grant.approvedArguments !== undefined) {
+      if (!isPlainObject(grant.approvedArguments)) {
+        throw new AamarvaError('FLOOR execution failed: malformed grant.approvedArguments in response.', {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+      grantApprovedArgs = grant.approvedArguments;
+    }
+
+    if (dataApprovedArgs && grantApprovedArgs) {
+      if (canonicalJsonStringify(dataApprovedArgs) !== canonicalJsonStringify(grantApprovedArgs)) {
+        throw new AamarvaError('FLOOR execution failed: conflicting approvedArguments in execution response.', {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+    }
+
+    const approvedArgs = dataApprovedArgs ?? grantApprovedArgs;
+    if (options.requireApprovedArguments && !approvedArgs) {
+      throw new AamarvaError('FLOOR execution failed: approvedArguments missing in execution response.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+    if (approvedArgs) {
+      if (canonicalJsonStringify(approvedArgs) !== canonicalJsonStringify(submittedArgs)) {
+        throw new AamarvaError('FLOOR execution failed: execution arguments do not match approved arguments.', {
+          code: 'FLOOR_EXECUTION_FAILED',
+        });
+      }
+    }
+
+    // Require platform-mediated execution result
+    const hasResult = ('result' in data && data.result !== undefined) || ('output' in data && data.output !== undefined);
+    if (!hasResult) {
+      throw new AamarvaError('FLOOR execution failed: platform response omitted execution result.', {
+        code: 'FLOOR_EXECUTION_FAILED',
+      });
+    }
+    const executionResult = 'result' in data && data.result !== undefined ? data.result : data.output;
+
+    return {
+      status: rawStatus === 'executed' || rawStatus === 'completed' ? rawStatus : 'approved',
+      invocationId,
       toolId: cleanToolId,
-      approvedArgsDigest: submittedDigest,
-    });
-
-    // Stage 6: Proof-of-Possession signing + single-use token redemption & server-side MCP execution (POST /gateway/mcp)
-    return this.redeemGatewayToken(envelope, decryptedPayload, authorizedArgs, {
-      agentId: decryptedPayload.agentId || targetIdentityId,
-    });
+      result: executionResult,
+      ...(typeof data.message === 'string' ? { message: data.message } : {}),
+    };
   }
 
   /**
-   * Request human-in-the-loop (HITL) approval to access an unauthorized FLOOR tool.
+   * Request access to a FLOOR tool without executing it.
+   * Reuses an existing pending request when already pending.
    * Maps to POST /api/floor/tools/:toolId/invoke
    */
   public async requestFloorAccess(
     toolId: string,
-    reason = 'Autonomous agent requires tool access',
-    args: Record<string, unknown> = {}
-  ): Promise<{ status: string; requestId?: string; invocationId?: string; toolId: string; message?: string }> {
+    reason?: string,
+    args?: Record<string, unknown>
+  ): Promise<FloorToolInvokeResult> {
     if (!toolId?.trim()) {
       throw new AamarvaValidationError('toolId is required.');
     }
+
     const cleanToolId = toolId.trim();
     const scopeKey = this.getFloorScopeKey(cleanToolId);
 
@@ -2831,7 +2876,6 @@ export class Aamarva {
     });
 
     const data = (response && typeof response === 'object' && 'data' in response ? response.data : response) ?? {};
-    assertNoExternalMcpCredentialExposure(data, 'data');
     return normalizeFloorRequestStatus(data);
   }
 
@@ -2851,59 +2895,6 @@ export class Aamarva {
 
 function isPlainObject(val: unknown): val is Record<string, unknown> {
   return typeof val === 'object' && val !== null && !Array.isArray(val);
-}
-
-const FORBIDDEN_CREDENTIAL_FIELDS = new Set([
-  'serverUrl',
-  'mcpServerUrl',
-  'auth',
-  'authentication',
-  'authConfig',
-  'credentials',
-  'mcpAuth',
-  'mcpCredentials',
-  'grantToken',
-  'accessToken',
-]);
-
-function assertNoExternalMcpCredentialExposure(
-  obj: unknown,
-  containerName = 'data',
-  seen = new Set<unknown>()
-): void {
-  if (!obj || typeof obj !== 'object' || seen.has(obj)) {
-    return;
-  }
-  seen.add(obj);
-
-  if (Array.isArray(obj)) {
-    obj.forEach((item, idx) => {
-      assertNoExternalMcpCredentialExposure(item, `${containerName}[${idx}]`, seen);
-    });
-    return;
-  }
-
-  const record = obj as Record<string, unknown>;
-  for (const field of FORBIDDEN_CREDENTIAL_FIELDS) {
-    if (field in record && record[field] !== undefined && record[field] !== null) {
-      throw new AamarvaError(
-        `FLOOR authorization rejected: platform exposed forbidden external MCP field "${containerName}.${field}". Gateway-only execution prohibits exposing MCP URLs or credentials to the ADK.`,
-        { code: 'FLOOR_CREDENTIAL_EXPOSURE' }
-      );
-    }
-  }
-  if ((containerName === 'server' || containerName.endsWith('.server')) && 'url' in record && record.url !== undefined && record.url !== null) {
-    throw new AamarvaError(
-      `FLOOR authorization rejected: platform exposed forbidden external MCP field "${containerName}.url".`,
-      { code: 'FLOOR_CREDENTIAL_EXPOSURE' }
-    );
-  }
-
-  for (const [key, val] of Object.entries(record)) {
-    if (val && typeof val === 'object') {
-      assertNoExternalMcpCredentialExposure(val, `${containerName}.${key}`, seen);
-    }
-  }
 }
 
 function validateIsoExpiration(rawValue: unknown, isPresent: boolean): string | undefined {
@@ -2972,6 +2963,27 @@ function parseAndValidateScopeTokens(rawScope: unknown, label: string): string[]
   return tokens;
 }
 
+function canonicalJsonStringify(obj: unknown): string {
+  if (obj === null || typeof obj !== 'object') {
+    if (typeof obj === 'number' && Object.is(obj, -0)) {
+      return '0';
+    }
+    return JSON.stringify(obj);
+  }
+  if (Array.isArray(obj)) {
+    return '[' + obj.map((item) => (item === undefined ? 'null' : canonicalJsonStringify(item))).join(',') + ']';
+  }
+  const record = obj as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const entries: string[] = [];
+  for (const k of keys) {
+    const val = record[k];
+    if (val !== undefined) {
+      entries.push(`${JSON.stringify(k)}:${canonicalJsonStringify(val)}`);
+    }
+  }
+  return `{${entries.join(',')}}`;
+}
 
 
 

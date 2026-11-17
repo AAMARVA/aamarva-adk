@@ -178,9 +178,6 @@ def normalize_floor_tool(raw: Any) -> FloorTool:
 
     schema = raw.get("inputSchema") or raw.get("input_schema") or raw.get("parameters") or {"type": "object"}
     req_id = raw.get("requestId") or raw.get("request_id") or raw.get("pendingRequestId") or raw.get("pending_request_id")
-    mcp_server_id = raw.get("mcpServerId") or raw.get("mcp_server_id")
-    gateway_id = raw.get("gatewayId") or raw.get("gateway_id")
-    gateway_url = raw.get("gatewayUrl") or raw.get("gateway_url")
     return FloorTool(
         id=str(raw.get("id") or raw.get("toolId") or raw.get("tool_id") or ""),
         name=str(raw.get("name") or ""),
@@ -188,9 +185,6 @@ def normalize_floor_tool(raw: Any) -> FloorTool:
         inputSchema=schema if isinstance(schema, dict) else {"type": "object"},
         accessStatus=str(raw.get("accessStatus") or raw.get("access_status") or raw.get("status") or "required").strip().lower(),
         requestId=str(req_id).strip() if isinstance(req_id, str) and req_id.strip() else None,
-        mcpServerId=str(mcp_server_id).strip() if isinstance(mcp_server_id, str) and mcp_server_id.strip() else None,
-        gatewayId=str(gateway_id).strip() if isinstance(gateway_id, str) and gateway_id.strip() else None,
-        gatewayUrl=str(gateway_url).strip() if isinstance(gateway_url, str) and gateway_url.strip() else None,
     )
 
 def normalize_floor_request_status(raw: Any) -> FloorAccessRequestStatus:
@@ -198,27 +192,12 @@ def normalize_floor_request_status(raw: Any) -> FloorAccessRequestStatus:
         return FloorAccessRequestStatus(requestId="", status="pending")
 
     inv_id = raw.get("invocationId") or raw.get("invocation_id")
-    gateway_envelope = raw.get("gatewayEnvelope") if isinstance(raw.get("gatewayEnvelope"), dict) else (
-        raw.get("gateway_envelope") if isinstance(raw.get("gateway_envelope"), dict) else None
-    )
-    approved_args = raw.get("approvedArguments") if raw.get("approvedArguments") is not None else raw.get("approved_arguments")
-    verification_info = raw.get("verificationInfo") if raw.get("verificationInfo") is not None else raw.get("verification_info")
     return FloorAccessRequestStatus(
         requestId=str(raw.get("requestId") or raw.get("request_id") or raw.get("id") or ""),
         status=str(raw.get("status") or "pending").strip().lower(),
         toolId=raw.get("toolId") or raw.get("tool_id"),
         invocationId=str(inv_id).strip() if isinstance(inv_id, str) and inv_id.strip() else None,
         agentId=raw.get("agentId") or raw.get("agent_id"),
-        agentName=raw.get("agentName") or raw.get("agent_name"),
-        mcpServerId=raw.get("mcpServerId") or raw.get("mcp_server_id"),
-        gatewayId=raw.get("gatewayId") or raw.get("gateway_id"),
-        gatewayUrl=raw.get("gatewayUrl") or raw.get("gateway_url"),
-        approvedArgsDigest=raw.get("approvedArgsDigest") or raw.get("approved_args_digest"),
-        approvedArguments=approved_args if isinstance(approved_args, dict) else None,
-        scope=raw.get("scope"),
-        expiresAt=raw.get("expiresAt") or raw.get("expires_at"),
-        verificationInfo=verification_info if isinstance(verification_info, dict) else None,
-        gatewayEnvelope=gateway_envelope,
         reason=raw.get("reason"),
         createdAt=raw.get("createdAt"),
         updatedAt=raw.get("updatedAt"),

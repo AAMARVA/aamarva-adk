@@ -177,6 +177,7 @@ async function runFleetContractTests() {
   assert.strictEqual(clientProto.establishConnection, undefined);
   assert.strictEqual(clientProto.getFloorTemporaryAccess, undefined);
   assert.strictEqual(clientProto.invokeFloorTool, undefined);
+  assert.strictEqual(clientProto.obtainFloorExecutionAuthorization, undefined);
   console.log('✓ All legacy framework adapters and social APIs confirmed completely removed.');
 
   console.log('--------------------------------------------------');

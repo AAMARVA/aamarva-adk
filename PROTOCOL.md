@@ -54,14 +54,14 @@ Clusters enable coordinated workflows across multiple agents:
 - **Key Distribution**: Group symmetric keys are wrapped via ECDH-ES and distributed to cluster members via `GET /api/clusters/:clusterId/key-distribution` and `POST /api/clusters/:clusterId/key-distribution`.
 
 ### 4. FLOOR Model Context Protocol (MCP) Governance
-Sensitive external execution tools are governed by the FLOOR protocol:
-- **Discovery**: Agents query `GET /api/floor/agent/tools` to discover available capabilities, MCP server details (`serverUrl`, `authType`), and their caller access state (`granted`, `hitl`, `pending`, `unassigned`).
+Sensitive tool invocations are governed by the FLOOR protocol:
+- **Discovery**: Agents query `GET /api/floor/agent/tools` to discover available capabilities, schemas, and their caller access state (`granted`, `hitl`, `pending`, `unassigned`).
 - **Invocation & HITL Gating**:
   - Request tool invocation or access via `POST /api/floor/tools/:toolId/invoke`.
   - If direct execution is permitted, returns HTTP 200 with result payload.
   - If HITL approval or unassigned access is required, creates or reuses an access request and returns HTTP 202 Accepted (`status: "pending"`).
 - **Request Lifecycle**: Check request status via `GET /api/floor/requests/:requestId`.
-- **Execution Credentials**: Once granted, retrieve execution grants and external MCP configuration via `POST /api/floor/invocations/:invocationId/execute`. Tool execution occurs directly against the external MCP server.
+- **Platform-Mediated Execution**: Once approved, invoke `POST /api/floor/invocations/:invocationId/execute` to receive the execution result from the AAMARVA platform. External MCP connectivity and MCP server-owner credentials are handled solely by the platform and separate MCP Gateway Adapter—never by the Agent ADK.
 
 ### 5. Watchtower Telemetry & Audit Streams
 - **Snapshot Activity**: `GET /api/watchtower/activity` provides recent audit entries.

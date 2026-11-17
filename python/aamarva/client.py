@@ -2,7 +2,6 @@ import base64
 import datetime
 import json
 import math
-import os
 import re
 import time
 from typing import Optional, List, Dict, Any, Union
@@ -11,8 +10,7 @@ from .http import HttpClient
 from .types import (
     Agent, Connection, Message,
     ClusterMember, Cluster, ClusterMessage, FloorTool, FloorToolInvokeResult,
-    FloorAccessRequestStatus, WatchtowerActivity, WatchtowerStreamTicket,
-    GATEWAY_PROTOCOL_VERSION,
+    FloorAccessRequestStatus, WatchtowerActivity, WatchtowerStreamTicket
 )
 from .errors import AamarvaValidationError, AamarvaError
 from .normalize import (
@@ -44,12 +42,6 @@ from .crypto import (
     decrypt_cluster_message,
     sign_cluster_message_v2,
     verify_cluster_message_signature_v2,
-    canonical_json_stringify,
-    sha256_hex,
-    compute_args_digest,
-    verify_gateway_instruction_signature,
-    open_gateway_token_envelope,
-    sign_gateway_pop,
 )
 
 class Aamarva:
@@ -59,8 +51,6 @@ class Aamarva:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         target_agent_id: Optional[str] = None,
-        trusted_gateway_public_keys: Optional[Dict[str, Any]] = None,
-        trusted_instruction_issuer_keys: Optional[Dict[str, Any]] = None,
     ):
         self.http = HttpClient(
             base_url=base_url,
@@ -73,10 +63,6 @@ class Aamarva:
         self.is_registering_key: bool = False
         self.cluster_key_cache: Dict[str, bytes] = {}
         self._pending_floor_requests: Dict[str, str] = {}
-        self._registered_gateway_keys: Dict[str, Dict[str, Any]] = {}
-        self._trusted_gateway_public_keys = trusted_gateway_public_keys
-        self._trusted_instruction_issuer_keys = trusted_instruction_issuer_keys
-        self._cached_gateway_keys_response: Optional[Dict[str, Any]] = None
         self.http.on_auth_success = lambda: self.register_public_key()
 
     @property
@@ -1746,13 +1732,37 @@ class Aamarva:
         if status == "pending" and req_id:
             self._pending_floor_requests[self._floor_scope_key(clean_tool_id)] = req_id
 
-        return {
+        forbidden_gateway_fields = (
+            "serverUrl",
+            "mcpServerUrl",
+            "server",
+            "auth",
+            "authentication",
+            "authConfig",
+            "grantToken",
+            "accessToken",
+        )
+        for field in forbidden_gateway_fields:
+            if field in data and data[field] is not None:
+                raise AamarvaError(
+                    "FLOOR invocation failed: platform returned external MCP gateway URL or credentials; the Agent ADK does not perform external MCP execution.",
+                    code="FLOOR_EXECUTION_FAILED",
+                )
+
+        has_direct_result = ("result" in data and data["result"] is not None) or ("output" in data and data["output"] is not None)
+        direct_result = data["result"] if ("result" in data and data["result"] is not None) else data.get("output")
+
+        out = {
             "invocationId": inv_id,
             "requestId": req_id,
             "toolId": str(data.get("toolId") or clean_tool_id).strip(),
             "status": status,
             "message": res_dict.get("message") or data.get("message"),
         }
+        if has_direct_result:
+            out["result"] = direct_result
+            out["hasDirectResult"] = True
+        return out
 
     def wait_for_floor_approval(
         self,
@@ -1814,527 +1824,6 @@ class Aamarva:
 
             time.sleep(min(interval_sec, max(0.001, deadline - now)))
 
-    def _get_effective_agent_id(self, override_agent_id: Optional[str] = None) -> str:
-        return (override_agent_id or self.http.target_agent_id or self.http.agent_id or "default").strip()
-
-    def register_gateway_key(
-        self,
-        agent_id: Optional[str] = None,
-        require_persistent_key_store: bool = False,
-        key_info: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Register the agent's X25519 gateway encryption key signed by its P-256 identity key.
-        Maps to PUT /api/agents/me/gateway-key
-        """
-        effective_agent = self._get_effective_agent_id(agent_id)
-        payload = build_agent_encryption_key_registration_payload(
-            agent_id=effective_agent,
-            require_persistent=require_persistent_key_store,
-            key_info=key_info,
-        )
-        res = self.http.request("PUT", "/agents/me/gateway-key", auth=True, json_data=payload)
-        data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
-        if not isinstance(data, dict) or not data.get("keyId") or data.get("status") == "revoked":
-            raise AamarvaError("Failed to register agent X25519 gateway encryption key with platform.", code="AGENT_ENCRYPTION_KEY_INVALID")
-
-        norm_scope = normalize_agent_id(effective_agent) or "DEFAULT"
-        self._registered_gateway_keys[norm_scope] = {
-            "keyId": payload["keyId"],
-            "keyVersion": payload["keyVersion"],
-        }
-        return data
-
-    def ensure_gateway_key_registered(
-        self,
-        agent_id: Optional[str] = None,
-        require_persistent_key_store: bool = False,
-        force: bool = False,
-    ) -> Dict[str, Any]:
-        effective_agent = self._get_effective_agent_id(agent_id)
-        key_info = get_local_agent_encryption_key_pair(
-            agent_id=effective_agent,
-            require_persistent=require_persistent_key_store,
-            create_if_missing=True,
-        )
-        norm_scope = normalize_agent_id(effective_agent) or "DEFAULT"
-        cached = self._registered_gateway_keys.get(norm_scope)
-        if (
-            not force
-            and cached
-            and cached.get("keyId") == key_info["key_id"]
-            and cached.get("keyVersion") == key_info["key_version"]
-        ):
-            return key_info
-
-        self.register_gateway_key(
-            agent_id=effective_agent,
-            require_persistent_key_store=require_persistent_key_store,
-            key_info=key_info,
-        )
-        return key_info
-
-    def get_gateway_key(self, agent_id: Optional[str] = None) -> Dict[str, Any]:
-        if agent_id and agent_id.strip():
-            path = f"/agents/{urllib.parse.quote(agent_id.strip(), safe='')}/gateway-key"
-        else:
-            path = "/agents/me/gateway-key"
-        res = self.http.request("GET", path, auth=True)
-        data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
-        if not isinstance(data, dict) or not data.get("publicKey") or not data.get("keyId"):
-            raise AamarvaError("Gateway encryption key metadata is unavailable.", code="AGENT_ENCRYPTION_KEY_UNAVAILABLE")
-        return data
-
-    def rotate_gateway_key(
-        self,
-        agent_id: Optional[str] = None,
-        revoke_previous: bool = False,
-        require_persistent_key_store: bool = False,
-    ) -> Dict[str, Any]:
-        effective_agent = self._get_effective_agent_id(agent_id)
-        rotated = rotate_local_agent_encryption_key_pair(
-            agent_id=effective_agent,
-            require_persistent=require_persistent_key_store,
-            revoke_previous=revoke_previous,
-        )
-        payload = build_agent_encryption_key_registration_payload(
-            agent_id=effective_agent,
-            require_persistent=require_persistent_key_store,
-            key_info=rotated,
-        )
-        body = dict(payload)
-        if rotated.get("previous_key_id"):
-            body["previousKeyId"] = rotated["previous_key_id"]
-        if rotated.get("previous_key_version") is not None:
-            body["previousKeyVersion"] = rotated["previous_key_version"]
-        body["revokePrevious"] = bool(revoke_previous)
-
-        res = self.http.request("POST", "/agents/me/gateway-key/rotate", auth=True, json_data=body)
-        data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
-        norm_scope = normalize_agent_id(effective_agent) or "DEFAULT"
-        self._registered_gateway_keys[norm_scope] = {
-            "keyId": payload["keyId"],
-            "keyVersion": payload["keyVersion"],
-        }
-        return data
-
-    def revoke_gateway_key(
-        self,
-        agent_id: Optional[str] = None,
-        key_id: Optional[str] = None,
-        key_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        effective_agent = self._get_effective_agent_id(agent_id)
-        body: Dict[str, Any] = {}
-        if key_id:
-            body["keyId"] = key_id
-        if key_version is not None:
-            body["keyVersion"] = key_version
-        res = self.http.request("POST", "/agents/me/gateway-key/revoke", auth=True, json_data=body)
-        revoke_local_agent_encryption_key_pair(effective_agent, key_id if key_id is not None else key_version)
-        norm_scope = normalize_agent_id(effective_agent) or "DEFAULT"
-        self._registered_gateway_keys.pop(norm_scope, None)
-        return res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
-
-    def get_trusted_gateway_keys(self, force_refresh: bool = False) -> Dict[str, Any]:
-        if self._cached_gateway_keys_response is not None and not force_refresh:
-            return self._cached_gateway_keys_response
-        res = self.http.request("GET", "/gateway/keys", auth=True)
-        data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
-        if not isinstance(data, dict) or not isinstance(data.get("gatewayKeys"), dict):
-            raise AamarvaError("Platform returned invalid trusted gateway keys payload.", code="GATEWAY_UNTRUSTED_KEY")
-        self._cached_gateway_keys_response = data
-        return data
-
-    def issue_gateway_token(self, instruction: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(instruction, dict):
-            raise AamarvaValidationError("Signed execution instruction is required")
-        if instruction.get("version") != GATEWAY_PROTOCOL_VERSION or instruction.get("decision") != "approved":
-            raise AamarvaError("Cannot issue gateway token from unapproved or unsupported execution instruction.", code="GATEWAY_INSTRUCTION_INVALID")
-
-        res = self.http.request("POST", "/gateway/tokens", auth=True, json_data={"instruction": instruction})
-        data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
-        envelope = data.get("envelope") if isinstance(data, dict) and isinstance(data.get("envelope"), dict) else data
-        if not isinstance(envelope, dict) or not isinstance(envelope.get("ciphertext"), str) or not isinstance(envelope.get("enc"), str):
-            raise AamarvaError("Gateway token issuance failed: response omitted valid HPKE token envelope.", code="GATEWAY_ENVELOPE_INVALID")
-        return envelope
-
-    def redeem_gateway_token(
-        self,
-        envelope: Dict[str, Any],
-        decrypted_payload: Dict[str, Any],
-        arguments: Optional[Dict[str, Any]] = None,
-        agent_id: Optional[str] = None,
-    ) -> FloorToolInvokeResult:
-        if not isinstance(envelope, dict) or not isinstance(decrypted_payload, dict) or not str(decrypted_payload.get("token") or "").strip():
-            raise AamarvaValidationError("Decrypted gateway token payload is required for redemption")
-
-        effective_agent = self._get_effective_agent_id(agent_id or decrypted_payload.get("agentId"))
-        normalized_args = arguments if isinstance(arguments, dict) else {}
-        approved_args_digest = compute_args_digest(normalized_args)
-        if approved_args_digest != decrypted_payload.get("approvedArgsDigest"):
-            raise AamarvaError("Execution arguments do not match approvedArgsDigest in gateway token.", code="GATEWAY_ARGS_MISMATCH")
-
-        identity_priv = get_local_identity_key(effective_agent)
-        nonce = base64.urlsafe_b64encode(os.urandom(16)).decode("ascii").rstrip("=")
-        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-        token_str = str(decrypted_payload["token"]).strip()
-        token_sha256 = sha256_hex(token_str)
-
-        pop_sig = sign_gateway_pop(identity_priv, {
-            "version": GATEWAY_PROTOCOL_VERSION,
-            "tokenSha256": token_sha256,
-            "gatewayId": decrypted_payload["gatewayId"],
-            "agentId": decrypted_payload["agentId"],
-            "agentKeyId": decrypted_payload["agentKeyId"],
-            "invocationId": decrypted_payload["invocationId"],
-            "instructionId": decrypted_payload["instructionId"],
-            "mcpServerId": decrypted_payload["mcpServerId"],
-            "toolId": decrypted_payload["toolId"],
-            "approvedArgsDigest": approved_args_digest,
-            "nonce": nonce,
-            "timestamp": timestamp,
-        })
-
-        redemption_req = {
-            "version": GATEWAY_PROTOCOL_VERSION,
-            "token": token_str,
-            "gatewayId": decrypted_payload["gatewayId"],
-            "agentId": decrypted_payload["agentId"],
-            "agentKeyId": decrypted_payload["agentKeyId"],
-            "invocationId": decrypted_payload["invocationId"],
-            "instructionId": decrypted_payload["instructionId"],
-            "mcpServerId": decrypted_payload["mcpServerId"],
-            "toolId": decrypted_payload["toolId"],
-            "arguments": normalized_args,
-            "approvedArgsDigest": approved_args_digest,
-            "nonce": nonce,
-            "timestamp": timestamp,
-            "proofOfPossession": pop_sig,
-        }
-
-        res = self.http.request("POST", "/gateway/mcp", auth=True, json_data=redemption_req)
-        if not isinstance(res, dict):
-            raise AamarvaError("Gateway MCP execution failed: malformed response.", code="FLOOR_EXECUTION_FAILED")
-        if res.get("success") is False:
-            raise AamarvaError(str(res.get("error") or res.get("message") or "Gateway MCP execution failed."), code=str(res.get("code") or "FLOOR_EXECUTION_FAILED"))
-
-        res_data = res.get("data") if isinstance(res.get("data"), dict) else res
-        return FloorToolInvokeResult(
-            status=str(res_data.get("status") or "approved"),
-            invocationId=str(res_data.get("invocationId") or decrypted_payload["invocationId"]),
-            toolId=str(res_data.get("toolId") or decrypted_payload["toolId"]),
-            mcpServerId=str(res_data.get("mcpServerId") or decrypted_payload["mcpServerId"]),
-            gatewayId=str(res_data.get("gatewayId") or decrypted_payload["gatewayId"]),
-            result=res_data.get("result"),
-            message=res_data.get("message") if isinstance(res_data.get("message"), str) else None,
-        )
-
-    def obtain_floor_execution_authorization(
-        self,
-        invocation_id: str,
-        arguments: Optional[Dict[str, Any]] = None,
-        tool_id: Optional[str] = None,
-        required_scope: Optional[str] = None,
-        fleet_id: Optional[str] = None,
-        require_approved_arguments: bool = False,
-        trusted_instruction_issuer_keys: Optional[Dict[str, Any]] = None,
-        require_persistent_key_store: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Obtain signed gateway execution authorization for a FLOOR invocation (never accepts external MCP credentials or URLs).
-        Maps to POST /api/floor/invocations/:invocation_id/execute
-        """
-        if not invocation_id or not isinstance(invocation_id, str) or not invocation_id.strip():
-            raise AamarvaValidationError("invocation_id is required")
-
-        if arguments is not None and not isinstance(arguments, dict):
-            raise AamarvaValidationError("arguments must be a dictionary")
-
-        expected_iid = invocation_id.strip()
-        submitted_args = arguments if arguments is not None else {}
-        expected_tool_id = tool_id.strip() if isinstance(tool_id, str) and tool_id.strip() else ""
-        iid_quoted = urllib.parse.quote(expected_iid, safe='')
-        body = {
-            "arguments": submitted_args,
-        }
-        try:
-            res = self.http.request("POST", f"/floor/invocations/{iid_quoted}/execute", auth=True, json_data=body)
-        except Exception as err:
-            if getattr(err, "status_code", None) == 403:
-                raise AamarvaError(
-                    str(err) or "FLOOR execution authorization denied by platform.",
-                    code=getattr(err, "code", None) if getattr(err, "code", None) not in (None, "API_ERROR") else "FLOOR_ACCESS_DENIED",
-                    status_code=403,
-                )
-            raise err
-
-        if not isinstance(res, dict):
-            raise AamarvaError("FLOOR authorization failed: response payload is not an object.", code="FLOOR_EXECUTION_FAILED")
-
-        if res.get("success") is False:
-            raise AamarvaError("FLOOR execution authorization was rejected by platform.", code="FLOOR_ACCESS_DENIED")
-
-        data = res.get("data")
-        if not isinstance(data, dict):
-            raise AamarvaError("FLOOR authorization failed: malformed authorization payload.", code="FLOOR_EXECUTION_FAILED")
-
-        # Fail-closed Credential & Direct URL Isolation Check
-        _assert_no_external_mcp_credential_exposure(data, "data")
-        if isinstance(data.get("grant"), dict):
-            _assert_no_external_mcp_credential_exposure(data["grant"], "grant")
-        if isinstance(data.get("tool"), dict):
-            _assert_no_external_mcp_credential_exposure(data["tool"], "tool")
-        if isinstance(data.get("server"), dict):
-            _assert_no_external_mcp_credential_exposure(data["server"], "server")
-        if isinstance(data.get("instruction"), dict):
-            _assert_no_external_mcp_credential_exposure(data["instruction"], "instruction")
-
-        # 1. Validate verificationInfo when present
-        verification_info: Optional[Dict[str, Any]] = None
-        if "verificationInfo" in data and data["verificationInfo"] is not None:
-            if not isinstance(data["verificationInfo"], dict):
-                raise AamarvaError("FLOOR authorization failed: malformed verificationInfo object.", code="FLOOR_EXECUTION_FAILED")
-            verification_info = data["verificationInfo"]
-            if verification_info.get("verified") is False:
-                raise AamarvaError("FLOOR authorization failed: verificationInfo.verified is false.", code="FLOOR_ACCESS_DENIED")
-            if verification_info.get("verified") is not True:
-                raise AamarvaError("FLOOR authorization failed: verificationInfo.verified must be true.", code="FLOOR_EXECUTION_FAILED")
-            if "invocationId" in verification_info and verification_info["invocationId"] is not None:
-                v_iid = verification_info["invocationId"]
-                if not isinstance(v_iid, str) or v_iid.strip() != expected_iid:
-                    raise AamarvaError("FLOOR authorization failed: verificationInfo.invocationId does not match invocation.", code="FLOOR_EXECUTION_FAILED")
-
-        # 2. Top-level status validation
-        raw_status = str(data.get("status") or res.get("status") or "").strip().lower()
-        if not raw_status:
-            raise AamarvaError("FLOOR authorization failed: expected status 'approved', got ''.", code="FLOOR_EXECUTION_FAILED")
-        if raw_status in ["denied", "rejected", "revoked", "expired", "unassigned", "pending"]:
-            raise AamarvaError(f"FLOOR execution authorization denied: status is '{raw_status}'.", code="FLOOR_ACCESS_DENIED")
-        if raw_status != "approved":
-            raise AamarvaError(f"FLOOR authorization failed: expected status 'approved', got '{raw_status}'.", code="FLOOR_EXECUTION_FAILED")
-
-        # 3. Invocation ID binding
-        raw_iid = data.get("invocationId")
-        returned_iid = raw_iid.strip() if isinstance(raw_iid, str) else ""
-        if not returned_iid or returned_iid != expected_iid:
-            raise AamarvaError("FLOOR authorization failed: invocation ID missing or mismatched in platform response.", code="FLOOR_EXECUTION_FAILED")
-
-        # 4. Signed Execution Instruction validation (mandatory)
-        instruction = data.get("instruction")
-        if not isinstance(instruction, dict):
-            raise AamarvaError("FLOOR authorization failed: signed execution instruction is missing in platform response.", code="GATEWAY_INSTRUCTION_INVALID")
-        if instruction.get("version") != GATEWAY_PROTOCOL_VERSION:
-            raise AamarvaError(f"FLOOR authorization failed: unsupported instruction version '{instruction.get('version')}'.", code="GATEWAY_INSTRUCTION_INVALID")
-        if str(instruction.get("decision") or "").lower() != "approved":
-            raise AamarvaError(f"FLOOR execution denied by instruction decision: '{instruction.get('decision')}'.", code="FLOOR_ACCESS_DENIED")
-
-        key_ver = instruction.get("agentKeyVersion")
-        if (
-            not isinstance(instruction.get("instructionId"), str) or not instruction["instructionId"].strip()
-            or not isinstance(instruction.get("gatewayId"), str) or not instruction["gatewayId"].strip()
-            or not isinstance(instruction.get("mcpServerId"), str) or not instruction["mcpServerId"].strip()
-            or not isinstance(instruction.get("agentId"), str) or not instruction["agentId"].strip()
-            or not isinstance(instruction.get("agentKeyId"), str) or not instruction["agentKeyId"].strip()
-            or isinstance(key_ver, bool) or not isinstance(key_ver, int) or key_ver < 1
-            or not isinstance(instruction.get("issuerKeyId"), str) or not instruction["issuerKeyId"].strip()
-            or not isinstance(instruction.get("signature"), str) or not instruction["signature"].strip()
-        ):
-            raise AamarvaError("FLOOR authorization failed: signed execution instruction is missing required gateway claims.", code="GATEWAY_INSTRUCTION_INVALID")
-
-        if instruction.get("invocationId") != expected_iid:
-            raise AamarvaError("FLOOR authorization failed: instruction.invocationId does not match invocation.", code="GATEWAY_INSTRUCTION_INVALID")
-
-        issuer_keys = trusted_instruction_issuer_keys or self._trusted_instruction_issuer_keys
-        if not issuer_keys:
-            gw_keys_res = self.get_trusted_gateway_keys()
-            issuer_keys = gw_keys_res.get("issuerKeys") or gw_keys_res.get("gatewayKeys") or {}
-
-        issuer_key_id = instruction["issuerKeyId"]
-        issuer_pub_key = (
-            issuer_keys.get(issuer_key_id)
-            or issuer_keys.get("default")
-            or (next(iter(issuer_keys.values())) if len(issuer_keys) == 1 else None)
-        )
-        if not issuer_pub_key:
-            raise AamarvaError(f'No trusted instruction issuer public key found for issuerKeyId="{issuer_key_id}".', code="GATEWAY_UNTRUSTED_KEY")
-        if not verify_gateway_instruction_signature(issuer_pub_key, instruction):
-            raise AamarvaError("FLOOR authorization failed: execution instruction signature verification failed.", code="GATEWAY_INSTRUCTION_INVALID")
-
-        # 5. Grant validation (if present)
-        grant: Optional[Dict[str, Any]] = None
-        if "grant" in data and data["grant"] is not None:
-            raw_grant = data["grant"]
-            if not isinstance(raw_grant, dict) or len(raw_grant) == 0:
-                raise AamarvaError("FLOOR authorization failed: grant details missing or empty in response.", code="FLOOR_EXECUTION_FAILED")
-            grant = raw_grant
-            if grant.get("revoked") is True or bool(grant.get("revokedAt")):
-                raise AamarvaError("FLOOR authorization denied: grant has been revoked.", code="FLOOR_ACCESS_DENIED")
-            raw_grant_status = grant.get("status")
-            grant_status = raw_grant_status.strip().lower() if isinstance(raw_grant_status, str) else ""
-            if grant_status in ["denied", "rejected", "revoked", "expired", "inactive", "pending"]:
-                raise AamarvaError(f"FLOOR authorization denied: grant status is '{grant_status}'.", code="FLOOR_ACCESS_DENIED")
-            if not grant_status or grant_status not in ["authorized", "granted", "approved", "active"]:
-                raise AamarvaError(f"FLOOR authorization denied: grant status is missing or inactive ('{grant_status}').", code="FLOOR_ACCESS_DENIED")
-            if "invocationId" in grant and grant["invocationId"] is not None:
-                g_iid = grant["invocationId"]
-                if not isinstance(g_iid, str) or g_iid.strip() != expected_iid:
-                    raise AamarvaError("FLOOR authorization failed: grant.invocationId does not match invocation.", code="FLOOR_EXECUTION_FAILED")
-
-        # 6. Strict invocation-to-tool binding
-        if "tool" in data and data["tool"] is not None and not isinstance(data["tool"], dict):
-            raise AamarvaError("FLOOR authorization failed: malformed tool object in response.", code="FLOOR_EXECUTION_FAILED")
-        tool_obj = data.get("tool") if isinstance(data.get("tool"), dict) else None
-
-        def _read_req_str(obj: Optional[Dict[str, Any]], field: str, label: str) -> Optional[str]:
-            if obj is None or field not in obj:
-                return None
-            val = obj[field]
-            if not isinstance(val, str) or not val.strip():
-                raise AamarvaError(f"FLOOR authorization failed: malformed {label} in platform response.", code="FLOOR_EXECUTION_FAILED")
-            return val.strip()
-
-        top_tool_id = _read_req_str(data, "toolId", "toolId")
-        nested_tool_id = _read_req_str(tool_obj, "id", "tool.id")
-        grant_tool_id = _read_req_str(grant, "toolId", "grant.toolId")
-        verified_tool_id = _read_req_str(verification_info, "toolId", "verificationInfo.toolId")
-        inst_tool_id = instruction["toolId"].strip()
-
-        tool_id_candidates = [c for c in [top_tool_id, nested_tool_id, grant_tool_id, verified_tool_id, inst_tool_id] if c]
-        returned_tool_id = top_tool_id or inst_tool_id
-        if any(tid != returned_tool_id for tid in tool_id_candidates) or (expected_tool_id and returned_tool_id != expected_tool_id):
-            raise AamarvaError("FLOOR authorization failed: authorized toolId mismatch across authorization payload.", code="FLOOR_EXECUTION_FAILED")
-
-        # 7. Non-secret Gateway URL & metadata validation
-        gateway_id = str(data.get("gatewayId") or instruction["gatewayId"]).strip()
-        mcp_server_id = str(data.get("mcpServerId") or instruction["mcpServerId"]).strip()
-        if gateway_id != instruction["gatewayId"] or mcp_server_id != instruction["mcpServerId"]:
-            raise AamarvaError("FLOOR authorization failed: gatewayId/mcpServerId mismatch with signed instruction.", code="GATEWAY_INSTRUCTION_INVALID")
-
-        gateway_url = data.get("gatewayUrl") if "gatewayUrl" in data and data["gatewayUrl"] is not None else f"{self.http.base_url}/gateway"
-        if not isinstance(gateway_url, str) or not gateway_url.strip():
-            raise AamarvaError("FLOOR authorization failed: valid gatewayUrl is missing.", code="FLOOR_EXECUTION_FAILED")
-        parsed_gw_url = urllib.parse.urlparse(gateway_url.strip())
-        if parsed_gw_url.scheme not in ("http", "https") or not parsed_gw_url.netloc:
-            raise AamarvaError("FLOOR authorization failed: malformed or unsupported gatewayUrl.", code="FLOOR_EXECUTION_FAILED")
-
-        # 8. Validate expiration timestamps
-        inst_expires = _validate_iso_expiration(instruction.get("exp"), True)
-        top_expires = _validate_iso_expiration(data.get("expiresAt"), "expiresAt" in data)
-        grant_expires = _validate_iso_expiration(grant.get("expiresAt") if grant else None, bool(grant and "expiresAt" in grant))
-        resolved_expires_at = grant_expires or top_expires or inst_expires
-
-        # 9. Validate scopes
-        scope_sources: List[List[str]] = []
-        resolved_scope: Optional[Union[str, List[str]]] = instruction.get("scope")
-        for container, label in [
-            (instruction, "instruction.scope"),
-            (data, "data.scope"),
-            (grant, "grant.scope"),
-            (verification_info, "verificationInfo.scope"),
-        ]:
-            if container is not None and "scope" in container and container["scope"] is not None:
-                tokens = _parse_and_validate_scope_tokens(container["scope"], label)
-                scope_sources.append(tokens)
-                if resolved_scope is None:
-                    resolved_scope = container["scope"]
-        if len(scope_sources) > 1:
-            base_set = sorted(set(scope_sources[0]))
-            for other in scope_sources[1:]:
-                if sorted(set(other)) != base_set:
-                    raise AamarvaError("FLOOR authorization denied: conflicting scopes across authorization response.", code="FLOOR_ACCESS_DENIED")
-        req_scope = required_scope.strip() if isinstance(required_scope, str) and required_scope.strip() else ""
-        if req_scope:
-            granted_set = set(t for group in scope_sources for t in group)
-            if not granted_set or (req_scope not in granted_set and "*" not in granted_set and "tool:*" not in granted_set):
-                raise AamarvaError(f"FLOOR authorization denied: required scope '{req_scope}' is not granted.", code="FLOOR_ACCESS_DENIED")
-
-        # 10. Agent identity & fleet context binding
-        auth_agent_id = (self.http.agent_id or "").strip()
-        target_agent_id = (self.http.target_agent_id or "").strip()
-        expected_agent = target_agent_id or auth_agent_id
-
-        returned_agent_fields: List[str] = [instruction["agentId"].strip()]
-        for obj, field, label in [
-            (data, "agentId", "data.agentId"),
-            (grant, "agentId", "grant.agentId"),
-            (verification_info, "agentId", "verificationInfo.agentId"),
-            (data, "targetAgentId", "data.targetAgentId"),
-            (grant, "targetAgentId", "grant.targetAgentId"),
-            (verification_info, "targetAgentId", "verificationInfo.targetAgentId"),
-        ]:
-            val = _read_req_str(obj, field, label)
-            if val:
-                returned_agent_fields.append(val)
-
-        if expected_agent:
-            expected_upper = expected_agent.upper()
-            for returned_id in returned_agent_fields:
-                if returned_id.upper() != expected_upper:
-                    raise AamarvaError("FLOOR authorization failed: agent fleet context mismatch in authorization response.", code="FLOOR_EXECUTION_FAILED")
-        elif len(returned_agent_fields) > 1:
-            first_upper = returned_agent_fields[0].upper()
-            if any(rid.upper() != first_upper for rid in returned_agent_fields):
-                raise AamarvaError("FLOOR authorization failed: conflicting agent identities in authorization response.", code="FLOOR_EXECUTION_FAILED")
-
-        bound_agent_id = instruction["agentId"].strip()
-        if is_agent_encryption_key_revoked(bound_agent_id, instruction["agentKeyId"], key_ver):
-            raise AamarvaError(f'Agent encryption key "{instruction["agentKeyId"]}" has been revoked.', code="AGENT_ENCRYPTION_KEY_REVOKED")
-        export_x25519_public_key_jwk(instruction.get("agentPublicKey"))
-
-        fleet_ids: List[str] = []
-        for obj, label in [
-            (data, "data.fleetId"),
-            (grant, "grant.fleetId"),
-            (verification_info, "verificationInfo.fleetId"),
-        ]:
-            fid = _read_req_str(obj, "fleetId", label)
-            if fid:
-                fleet_ids.append(fid)
-        expected_fleet_id = fleet_id.strip() if isinstance(fleet_id, str) and fleet_id.strip() else ""
-        if expected_fleet_id and (not fleet_ids or any(f.upper() != expected_fleet_id.upper() for f in fleet_ids)):
-            raise AamarvaError("FLOOR authorization failed: fleet context mismatch in authorization response.", code="FLOOR_EXECUTION_FAILED")
-        if len(fleet_ids) > 1 and any(f.upper() != fleet_ids[0].upper() for f in fleet_ids):
-            raise AamarvaError("FLOOR authorization failed: conflicting fleet identifiers in authorization response.", code="FLOOR_EXECUTION_FAILED")
-
-        # 11. Strict argument digest & approvedArguments binding
-        submitted_digest = compute_args_digest(submitted_args)
-        inst_approved_args = instruction.get("approvedArguments") if isinstance(instruction.get("approvedArguments"), dict) else {}
-        inst_args_digest = compute_args_digest(inst_approved_args)
-        if instruction.get("approvedArgsDigest") != inst_args_digest or instruction.get("approvedArgsDigest") != submitted_digest:
-            raise AamarvaError("FLOOR authorization failed: execution arguments do not match instruction approvedArgsDigest.", code="FLOOR_EXECUTION_FAILED")
-
-        data_approved_args: Optional[Dict[str, Any]] = None
-        if "approvedArguments" in data and data["approvedArguments"] is not None:
-            if not isinstance(data["approvedArguments"], dict):
-                raise AamarvaError("FLOOR authorization failed: malformed approvedArguments in response.", code="FLOOR_EXECUTION_FAILED")
-            data_approved_args = data["approvedArguments"]
-
-        if require_approved_arguments and data_approved_args is None:
-            raise AamarvaError("FLOOR authorization failed: approvedArguments missing in authorization response.", code="FLOOR_EXECUTION_FAILED")
-        approved_args = data_approved_args if data_approved_args is not None else inst_approved_args
-        if not _deep_equal_values(approved_args, submitted_args):
-            raise AamarvaError("FLOOR authorization failed: execution arguments do not match approved arguments.", code="FLOOR_EXECUTION_FAILED")
-
-        return {
-            "invocationId": returned_iid,
-            "toolId": returned_tool_id,
-            "status": "approved",
-            "gatewayId": gateway_id,
-            "gatewayUrl": gateway_url.strip(),
-            "mcpServerId": mcp_server_id,
-            "agentId": bound_agent_id,
-            "agentKeyId": instruction["agentKeyId"],
-            "instructionId": instruction["instructionId"],
-            "approvedArgsDigest": instruction["approvedArgsDigest"],
-            "scope": resolved_scope,
-            "expiresAt": resolved_expires_at,
-            "approvedArguments": approved_args,
-            "instruction": instruction,
-            "issuerKeyId": instruction["issuerKeyId"],
-            "grant": grant,
-        }
-
     def execute_floor_tool(
         self,
         tool_id: str,
@@ -2348,19 +1837,13 @@ class Aamarva:
         required_scope: Optional[str] = None,
         fleet_id: Optional[str] = None,
         require_approved_arguments: bool = False,
-        trusted_gateway_public_keys: Optional[Dict[str, Any]] = None,
-        trusted_instruction_issuer_keys: Optional[Dict[str, Any]] = None,
-        require_persistent_key_store: bool = False,
     ) -> FloorToolInvokeResult:
         """
-        Execute a FLOOR tool strictly through the Mandatory MCP Adapter Gateway:
-        1. Ensure X25519 gateway key registered
-        2. Discovery (non-secret metadata only)
-        3. Invocation / HITL approval polling
-        4. Authorization -> SignedExecutionInstruction (zero external MCP credentials/URLs)
-        5. Gateway token issuance (POST /gateway/tokens) -> HPKE-sealed envelope
-        6. Trusted gateway signature verify + RFC 9180 HPKE local decrypt
-        7. Proof-of-Possession signing + single-use token redemption (POST /gateway/mcp)
+        Execute an authorized FLOOR tool through the AAMARVA platform API.
+        Discovery -> Access evaluation -> Approval status/polling -> Platform-mediated execution.
+
+        The Agent ADK never connects directly to external MCP servers and never retrieves
+        or handles MCP server-owner credentials.
         """
         if not tool_id or not isinstance(tool_id, str) or not tool_id.strip():
             raise AamarvaValidationError("tool_id is required")
@@ -2368,19 +1851,15 @@ class Aamarva:
             raise AamarvaValidationError("arguments must be a dictionary")
 
         clean_tool_id = tool_id.strip()
+        submitted_args = arguments if arguments is not None else {}
         scope_key = self._floor_scope_key(clean_tool_id)
         should_wait = bool(wait_for_approval or (poll_timeout_ms is not None and poll_timeout_ms > 0))
         effective_timeout_ms = poll_timeout_ms if poll_timeout_ms is not None and poll_timeout_ms > 0 else 30000
-        expected_agent = (self.http.target_agent_id or self.http.agent_id or "").strip()
-        effective_agent = self._get_effective_agent_id()
+        auth_agent_id = (self.http.agent_id or "").strip()
+        target_agent_id = (self.http.target_agent_id or "").strip()
+        expected_agent = target_agent_id or auth_agent_id
 
-        # Stage 0: Ensure local X25519 gateway encryption key is active and registered
-        self.ensure_gateway_key_registered(
-            agent_id=effective_agent,
-            require_persistent_key_store=require_persistent_key_store,
-        )
-
-        # Stage 1: Tool discovery (non-secret metadata only; never authorizes execution)
+        # Stage 1: Tool discovery (informational only; never authorizes execution)
         tools = self.get_floor_tools()
         tool = next((t for t in tools if t.id == clean_tool_id), None)
         if not tool:
@@ -2462,7 +1941,7 @@ class Aamarva:
                 inv_res = self.create_floor_invocation(
                     clean_tool_id,
                     reason=reason or ("Authorized execution run" if has_grant else "Agent requested execution"),
-                    arguments=arguments,
+                    arguments=submitted_args,
                 )
                 if inv_res.get("toolId") and str(inv_res["toolId"]).strip() != clean_tool_id:
                     raise AamarvaError(
@@ -2494,10 +1973,18 @@ class Aamarva:
                         f'Agent access to tool "{clean_tool_id}" was denied (status: {inv_res["status"]}).',
                         code="FLOOR_ACCESS_DENIED",
                     )
-                elif inv_res["status"] not in ["approved", "authorized", "granted"]:
+                elif inv_res["status"] not in ["approved", "authorized", "granted", "executed", "completed"]:
                     raise AamarvaError(
                         f'FLOOR invocation creation returned unexpected status "{inv_res["status"]}".',
                         code="FLOOR_EXECUTION_FAILED",
+                    )
+                elif inv_res["status"] in ["executed", "completed"] and inv_res.get("hasDirectResult"):
+                    return FloorToolInvokeResult(
+                        status=inv_res["status"],
+                        invocationId=inv_res.get("invocationId") or None,
+                        toolId=clean_tool_id,
+                        result=inv_res.get("result"),
+                        message=inv_res.get("message") if isinstance(inv_res.get("message"), str) else None,
                     )
                 else:
                     resolved_invocation_id = inv_res["invocationId"]
@@ -2505,78 +1992,254 @@ class Aamarva:
         if not resolved_invocation_id:
             raise AamarvaError("FLOOR invocation creation failed to return a valid invocationId.", code="FLOOR_EXECUTION_FAILED")
 
-        # Resolve trusted gateway & issuer keys before verification
-        resolved_gw_keys = trusted_gateway_public_keys or self._trusted_gateway_public_keys
-        resolved_issuer_keys = trusted_instruction_issuer_keys or self._trusted_instruction_issuer_keys
-        if not resolved_gw_keys or not resolved_issuer_keys:
-            fetched_keys = self.get_trusted_gateway_keys()
-            resolved_gw_keys = {
-                **(fetched_keys.get("gatewayKeys") or {}),
-                **(self._trusted_gateway_public_keys or {}),
-                **(trusted_gateway_public_keys or {}),
-            }
-            resolved_issuer_keys = {
-                **(fetched_keys.get("issuerKeys") or fetched_keys.get("gatewayKeys") or {}),
-                **(self._trusted_instruction_issuer_keys or {}),
-                **(trusted_instruction_issuer_keys or {}),
-            }
+        # Stage 4: Platform-mediated tool execution (POST /api/floor/invocations/:invocation_id/execute)
+        expected_iid = resolved_invocation_id.strip()
+        iid_quoted = urllib.parse.quote(expected_iid, safe='')
+        body = {
+            "arguments": submitted_args,
+        }
+        try:
+            res = self.http.request("POST", f"/floor/invocations/{iid_quoted}/execute", auth=True, json_data=body)
+        except Exception as err:
+            if getattr(err, "status_code", None) == 403:
+                raise AamarvaError(
+                    "FLOOR execution denied by platform.",
+                    code="FLOOR_ACCESS_DENIED",
+                    status_code=403,
+                )
+            raise err
 
-        # Stage 4: Mandatory execution authorization -> SignedExecutionInstruction (zero MCP credentials/URLs)
-        auth_details = self.obtain_floor_execution_authorization(
-            resolved_invocation_id,
-            arguments=arguments,
-            tool_id=clean_tool_id,
-            required_scope=required_scope,
-            fleet_id=fleet_id,
-            require_approved_arguments=require_approved_arguments,
-            trusted_instruction_issuer_keys=resolved_issuer_keys,
-            require_persistent_key_store=require_persistent_key_store,
+        if not isinstance(res, dict):
+            raise AamarvaError("FLOOR execution failed: response payload is not an object.", code="FLOOR_EXECUTION_FAILED")
+
+        if res.get("success") is False:
+            raise AamarvaError("FLOOR execution was rejected by platform.", code="FLOOR_ACCESS_DENIED")
+
+        data = res.get("data")
+        if not isinstance(data, dict):
+            raise AamarvaError("FLOOR execution failed: malformed execution payload.", code="FLOOR_EXECUTION_FAILED")
+
+        # Reject any external MCP gateway destination or credential fields in the Agent ADK
+        forbidden_gateway_fields = (
+            "serverUrl",
+            "mcpServerUrl",
+            "server",
+            "auth",
+            "authentication",
+            "authConfig",
+            "grantToken",
+            "accessToken",
         )
+        for field in forbidden_gateway_fields:
+            if field in data and data[field] is not None:
+                raise AamarvaError(
+                    "FLOOR execution failed: platform returned external MCP gateway URL or credentials; the Agent ADK does not execute external MCP servers or handle gateway credentials.",
+                    code="FLOOR_EXECUTION_FAILED",
+                )
 
-        if auth_details["status"] != "approved":
-            raise AamarvaError(f"FLOOR execution denied: status is '{auth_details['status']}'.", code="FLOOR_ACCESS_DENIED")
+        # Validate invocationId binding
+        raw_iid = data.get("invocationId")
+        returned_iid = raw_iid.strip() if isinstance(raw_iid, str) else ""
 
-        if auth_details["toolId"].strip() != clean_tool_id:
+        # Validate verificationInfo when present
+        verification_info: Optional[Dict[str, Any]] = None
+        if "verificationInfo" in data and data["verificationInfo"] is not None:
+            if not isinstance(data["verificationInfo"], dict):
+                raise AamarvaError("FLOOR execution failed: malformed verificationInfo object.", code="FLOOR_EXECUTION_FAILED")
+            verification_info = data["verificationInfo"]
+            if verification_info.get("verified") is False:
+                raise AamarvaError("FLOOR execution failed: verificationInfo.verified is false.", code="FLOOR_ACCESS_DENIED")
+            if verification_info.get("verified") is not True:
+                raise AamarvaError("FLOOR execution failed: verificationInfo.verified must be true.", code="FLOOR_EXECUTION_FAILED")
+            if "invocationId" in verification_info and verification_info["invocationId"] is not None:
+                v_iid = verification_info["invocationId"]
+                if not isinstance(v_iid, str) or v_iid.strip() != expected_iid:
+                    raise AamarvaError("FLOOR execution failed: verificationInfo.invocationId does not match invocation.", code="FLOOR_EXECUTION_FAILED")
+
+        # Validate status (empty status is only accepted for the reconciled docs contract when verificationInfo.verified is True)
+        raw_status = str(data.get("status") or res.get("status") or "").strip().lower()
+        has_verified_proof = verification_info is not None and verification_info.get("verified") is True
+        if not raw_status:
+            if not has_verified_proof or not returned_iid:
+                raise AamarvaError(
+                    "FLOOR execution failed: expected status 'approved' or 'executed', got ''.",
+                    code="FLOOR_EXECUTION_FAILED",
+                )
+        elif raw_status in ["denied", "rejected", "revoked", "expired", "unassigned", "pending"]:
             raise AamarvaError(
-                f'FLOOR execution authorization mismatch: authorized tool "{auth_details["toolId"]}" does not match requested tool "{clean_tool_id}".',
+                f"FLOOR execution denied: status is '{raw_status}'.",
+                code="FLOOR_ACCESS_DENIED",
+            )
+        elif raw_status not in ["approved", "executed", "completed"]:
+            raise AamarvaError(
+                f"FLOOR execution failed: expected status 'approved' or 'executed', got '{raw_status}'.",
                 code="FLOOR_EXECUTION_FAILED",
             )
 
-        authorized_args = dict(auth_details["approvedArguments"]) if isinstance(auth_details.get("approvedArguments"), dict) else dict(arguments or {})
+        if not returned_iid or returned_iid != expected_iid:
+            raise AamarvaError("FLOOR execution failed: invocation ID missing or mismatched in platform response.", code="FLOOR_EXECUTION_FAILED")
 
-        # Stage 5: Gateway Token Issuance (POST /gateway/tokens) -> HPKE-sealed envelope
-        envelope = auth_details.get("gatewayEnvelope") or self.issue_gateway_token(auth_details["instruction"])
+        # Validate grant metadata when present
+        grant: Optional[Dict[str, Any]] = None
+        if "grant" in data and data["grant"] is not None:
+            raw_grant = data["grant"]
+            if not isinstance(raw_grant, dict) or len(raw_grant) == 0:
+                raise AamarvaError("FLOOR execution failed: grant details missing or empty in response.", code="FLOOR_EXECUTION_FAILED")
+            grant = raw_grant
+            if grant.get("revoked") is True or bool(grant.get("revokedAt")):
+                raise AamarvaError("FLOOR execution denied: grant has been revoked.", code="FLOOR_ACCESS_DENIED")
+            raw_grant_status = grant.get("status")
+            grant_status = raw_grant_status.strip().lower() if isinstance(raw_grant_status, str) else ""
+            if grant_status in ["denied", "rejected", "revoked", "expired", "inactive", "pending"]:
+                raise AamarvaError(f"FLOOR execution denied: grant status is '{grant_status}'.", code="FLOOR_ACCESS_DENIED")
+            if not grant_status or grant_status not in ["authorized", "granted", "approved", "active"]:
+                raise AamarvaError(f"FLOOR execution denied: grant status is missing or inactive ('{grant_status}').", code="FLOOR_ACCESS_DENIED")
+            if "invocationId" in grant and grant["invocationId"] is not None:
+                g_iid = grant["invocationId"]
+                if not isinstance(g_iid, str) or g_iid.strip() != expected_iid:
+                    raise AamarvaError("FLOOR execution failed: grant.invocationId does not match invocation.", code="FLOOR_EXECUTION_FAILED")
 
-        # Stage 6: Verify gateway signature & decrypt HPKE token envelope with local X25519 private key
-        local_enc_key = get_local_agent_encryption_key_pair(
-            agent_id=auth_details.get("agentId") or effective_agent,
-            key_id=envelope.get("agentKeyId"),
-            key_version=envelope.get("agentKeyVersion"),
-            require_persistent=require_persistent_key_store,
-            create_if_missing=False,
-        )
+        if grant is None and not has_verified_proof:
+            raise AamarvaError("FLOOR execution failed: missing grant or verified proof in platform response.", code="FLOOR_EXECUTION_FAILED")
 
-        decrypted_payload = open_gateway_token_envelope(
-            envelope,
-            local_enc_key,
-            resolved_gw_keys,
-            expected_context={
-                "gatewayId": auth_details["gatewayId"],
-                "agentId": auth_details["agentId"],
-                "invocationId": auth_details["invocationId"],
-                "instructionId": auth_details["instructionId"],
-                "mcpServerId": auth_details["mcpServerId"],
-                "toolId": clean_tool_id,
-                "approvedArgsDigest": auth_details["approvedArgsDigest"],
-            },
-        )
+        # Validate toolId binding
+        if "tool" in data and data["tool"] is not None and not isinstance(data["tool"], dict):
+            raise AamarvaError("FLOOR execution failed: malformed tool object in response.", code="FLOOR_EXECUTION_FAILED")
+        tool_obj = data.get("tool") if isinstance(data.get("tool"), dict) else None
 
-        # Stage 7: Proof-of-Possession signing + single-use token redemption & server-side MCP execution (POST /gateway/mcp)
-        return self.redeem_gateway_token(
-            envelope,
-            decrypted_payload,
-            arguments=authorized_args,
-            agent_id=auth_details.get("agentId") or effective_agent,
+        def _read_req_str(obj: Optional[Dict[str, Any]], field: str, label: str) -> Optional[str]:
+            if obj is None or field not in obj or obj[field] is None:
+                return None
+            val = obj[field]
+            if not isinstance(val, str) or not val.strip():
+                raise AamarvaError(f"FLOOR execution failed: malformed {label} in platform response.", code="FLOOR_EXECUTION_FAILED")
+            return val.strip()
+
+        top_tool_id = _read_req_str(data, "toolId", "toolId")
+        nested_tool_id = _read_req_str(tool_obj, "id", "tool.id")
+        grant_tool_id = _read_req_str(grant, "toolId", "grant.toolId")
+        verified_tool_id = _read_req_str(verification_info, "toolId", "verificationInfo.toolId")
+
+        tool_id_candidates = [c for c in [top_tool_id, nested_tool_id, grant_tool_id, verified_tool_id] if c]
+        returned_tool_id = top_tool_id or nested_tool_id or ""
+        if not returned_tool_id:
+            raise AamarvaError("FLOOR execution failed: toolId is missing in platform response.", code="FLOOR_EXECUTION_FAILED")
+        if any(tid != returned_tool_id for tid in tool_id_candidates) or returned_tool_id != clean_tool_id:
+            raise AamarvaError("FLOOR execution failed: toolId mismatch across execution response.", code="FLOOR_EXECUTION_FAILED")
+
+        # Validate present expiration timestamps
+        _validate_iso_expiration(data.get("expiresAt"), "expiresAt" in data)
+        _validate_iso_expiration(grant.get("expiresAt") if grant else None, bool(grant and "expiresAt" in grant))
+
+        # Validate scope when present or required
+        scope_sources: List[List[str]] = []
+        for container, label in [
+            (data, "data.scope"),
+            (grant, "grant.scope"),
+            (verification_info, "verificationInfo.scope"),
+        ]:
+            if container is not None and "scope" in container:
+                scope_sources.append(_parse_and_validate_scope_tokens(container["scope"], label))
+        if len(scope_sources) > 1:
+            base_set = sorted(set(scope_sources[0]))
+            for other in scope_sources[1:]:
+                if sorted(set(other)) != base_set:
+                    raise AamarvaError("FLOOR execution denied: conflicting scopes across response.", code="FLOOR_ACCESS_DENIED")
+        req_scope = required_scope.strip() if isinstance(required_scope, str) and required_scope.strip() else ""
+        if req_scope:
+            granted_set = set(t for group in scope_sources for t in group)
+            if not granted_set or (req_scope not in granted_set and "*" not in granted_set and "tool:*" not in granted_set):
+                raise AamarvaError(f"FLOOR execution denied: required scope '{req_scope}' is not granted.", code="FLOOR_ACCESS_DENIED")
+
+        # Validate agent identity, target-agent scoping, and fleet context
+        returned_agent_fields: List[str] = []
+        for obj, field, label in [
+            (data, "agentId", "data.agentId"),
+            (grant, "agentId", "grant.agentId"),
+            (verification_info, "agentId", "verificationInfo.agentId"),
+            (data, "targetAgentId", "data.targetAgentId"),
+            (grant, "targetAgentId", "grant.targetAgentId"),
+            (verification_info, "targetAgentId", "verificationInfo.targetAgentId"),
+        ]:
+            val = _read_req_str(obj, field, label)
+            if val:
+                returned_agent_fields.append(val)
+
+        if expected_agent:
+            if not returned_agent_fields:
+                raise AamarvaError("FLOOR execution failed: authorized agent identity missing in platform response.", code="FLOOR_EXECUTION_FAILED")
+            expected_upper = expected_agent.upper()
+            for returned_id in returned_agent_fields:
+                if returned_id.upper() != expected_upper:
+                    raise AamarvaError("FLOOR execution failed: agent fleet context mismatch in platform response.", code="FLOOR_EXECUTION_FAILED")
+        elif len(returned_agent_fields) > 1:
+            first_upper = returned_agent_fields[0].upper()
+            if any(rid.upper() != first_upper for rid in returned_agent_fields):
+                raise AamarvaError("FLOOR execution failed: conflicting agent identities in platform response.", code="FLOOR_EXECUTION_FAILED")
+
+        fleet_ids: List[str] = []
+        for obj, label in [
+            (data, "data.fleetId"),
+            (grant, "grant.fleetId"),
+            (verification_info, "verificationInfo.fleetId"),
+        ]:
+            fid = _read_req_str(obj, "fleetId", label)
+            if fid:
+                fleet_ids.append(fid)
+        expected_fleet_id = fleet_id.strip() if isinstance(fleet_id, str) and fleet_id.strip() else ""
+        if expected_fleet_id and (not fleet_ids or any(f.upper() != expected_fleet_id.upper() for f in fleet_ids)):
+            raise AamarvaError("FLOOR execution failed: fleet context mismatch in platform response.", code="FLOOR_EXECUTION_FAILED")
+        if len(fleet_ids) > 1 and any(f.upper() != fleet_ids[0].upper() for f in fleet_ids):
+            raise AamarvaError("FLOOR execution failed: conflicting fleet identifiers in platform response.", code="FLOOR_EXECUTION_FAILED")
+
+        master_ids: List[str] = []
+        for obj, label in [
+            (data, "data.masterId"),
+            (grant, "grant.masterId"),
+            (verification_info, "verificationInfo.masterId"),
+        ]:
+            mid = _read_req_str(obj, "masterId", label)
+            if mid:
+                master_ids.append(mid)
+        if len(master_ids) > 1 and any(m.upper() != master_ids[0].upper() for m in master_ids):
+            raise AamarvaError("FLOOR execution failed: conflicting master agent identifiers in platform response.", code="FLOOR_EXECUTION_FAILED")
+
+        # Validate approvedArguments binding
+        data_approved_args: Optional[Dict[str, Any]] = None
+        if "approvedArguments" in data and data["approvedArguments"] is not None:
+            if not isinstance(data["approvedArguments"], dict):
+                raise AamarvaError("FLOOR execution failed: malformed approvedArguments in response.", code="FLOOR_EXECUTION_FAILED")
+            data_approved_args = data["approvedArguments"]
+
+        grant_approved_args: Optional[Dict[str, Any]] = None
+        if grant is not None and "approvedArguments" in grant and grant["approvedArguments"] is not None:
+            if not isinstance(grant["approvedArguments"], dict):
+                raise AamarvaError("FLOOR execution failed: malformed grant.approvedArguments in response.", code="FLOOR_EXECUTION_FAILED")
+            grant_approved_args = grant["approvedArguments"]
+
+        if data_approved_args is not None and grant_approved_args is not None:
+            if not _deep_equal_values(data_approved_args, grant_approved_args):
+                raise AamarvaError("FLOOR execution failed: conflicting approvedArguments in execution response.", code="FLOOR_EXECUTION_FAILED")
+
+        approved_args = data_approved_args if data_approved_args is not None else grant_approved_args
+        if require_approved_arguments and approved_args is None:
+            raise AamarvaError("FLOOR execution failed: approvedArguments missing in execution response.", code="FLOOR_EXECUTION_FAILED")
+        if approved_args is not None:
+            if not _deep_equal_values(approved_args, submitted_args):
+                raise AamarvaError("FLOOR execution failed: execution arguments do not match approved arguments.", code="FLOOR_EXECUTION_FAILED")
+
+        # Require platform-mediated execution result
+        has_result = ("result" in data and data["result"] is not None) or ("output" in data and data["output"] is not None)
+        if not has_result:
+            raise AamarvaError("FLOOR execution failed: platform response omitted execution result.", code="FLOOR_EXECUTION_FAILED")
+        execution_result = data["result"] if ("result" in data and data["result"] is not None) else data["output"]
+
+        return FloorToolInvokeResult(
+            status=raw_status if raw_status in ("executed", "completed") else "approved",
+            invocationId=expected_iid,
+            toolId=clean_tool_id,
+            result=execution_result,
+            message=data.get("message") if isinstance(data.get("message"), str) else None,
         )
 
     def request_floor_access(
@@ -2695,35 +2358,6 @@ class AamarvaConnection:
 
     def get_encrypted_messages(self) -> List[Dict[str, Any]]:
         return self.client.get_encrypted_messages(self.connectionId)
-
-
-_FORBIDDEN_CREDENTIAL_FIELDS = {
-    "serverUrl",
-    "mcpServerUrl",
-    "auth",
-    "authentication",
-    "authConfig",
-    "credentials",
-    "mcpAuth",
-    "mcpCredentials",
-    "grantToken",
-    "accessToken",
-}
-
-
-def _assert_no_external_mcp_credential_exposure(obj: Dict[str, Any], container_name: str) -> None:
-    for field in _FORBIDDEN_CREDENTIAL_FIELDS:
-        if field in obj and obj[field] is not None:
-            raise AamarvaError(
-                f'FLOOR authorization rejected: platform exposed forbidden external MCP field "{container_name}.{field}". '
-                "Gateway-only execution prohibits exposing MCP URLs or credentials to the ADK.",
-                code="FLOOR_CREDENTIAL_EXPOSURE",
-            )
-    if container_name == "server" and "url" in obj and obj["url"] is not None:
-        raise AamarvaError(
-            'FLOOR authorization rejected: platform exposed forbidden external MCP field "server.url".',
-            code="FLOOR_CREDENTIAL_EXPOSURE",
-        )
 
 
 def _validate_iso_expiration(raw_value: Any, is_present: bool) -> Optional[str]:

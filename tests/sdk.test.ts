@@ -301,6 +301,7 @@ async function runSdkTests() {
   const execRes = await client.executeFloorTool('tool_sec_edgar', { ticker: 'AAPL' });
   assert.ok(execRes.status === 'approved' || execRes.status === 'executed');
   assert.ok(execRes.result);
+  assert.strictEqual((execRes as any).serverUrl, undefined);
 
   console.log('✓ FLOOR MCP tool governance (discovery, HITL request, status, execution) verified.');
 
@@ -343,6 +344,7 @@ async function runSdkTests() {
   assert.strictEqual(rawClient.getConnectionRequests, undefined);
   assert.strictEqual(rawClient.getFloorTemporaryAccess, undefined);
   assert.strictEqual(rawClient.invokeFloorTool, undefined);
+  assert.strictEqual(rawClient.obtainFloorExecutionAuthorization, undefined);
   console.log('✓ Legacy removal assertions verified.');
 
 

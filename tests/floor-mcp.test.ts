@@ -1,12 +1,5 @@
 import assert from 'node:assert';
-import { Aamarva, createMockFetch, createMockDataStore, AamarvaError, GATEWAY_PROTOCOL_VERSION } from '../src/index.js';
-import {
-  computeArgsDigest,
-  exportX25519PublicKeyJWK,
-  getLocalAgentEncryptionKeyPair,
-  signGatewayInstruction,
-} from '../src/crypto.js';
-import { invokeExternalMcpTool } from '../src/mcp-executor.js';
+import { Aamarva, createMockFetch, createMockDataStore, AamarvaError } from '../src/index.js';
 
 /**
  * Validates the 4 logical operations of FLOOR MCP:
@@ -145,21 +138,8 @@ async function runFloorMcpFixTests() {
     console.log('✓ Revoked tool execution denied as expected.');
   }
 
-  // 12. Direct external MCP executor fails closed
-  console.log('12. Verifying invokeExternalMcpTool is disabled (GATEWAY_EXECUTION_REQUIRED)...');
-  await assert.rejects(
-    () =>
-      invokeExternalMcpTool({
-        serverUrl: 'https://mcp.weather.internal/sse',
-        toolId: authorizedTool.id,
-        args: { ticker: 'AAPL' },
-      }),
-    (err: any) => err?.code === 'GATEWAY_EXECUTION_REQUIRED'
-  );
-  console.log('✓ Direct external MCP executor blocked with GATEWAY_EXECUTION_REQUIRED.');
-
-  // 13. Fail closed on missing execution status in response
-  console.log('13. Testing fail-closed behavior on missing execution status...');
+  // 12. Fail closed on missing execution status in response
+  console.log('12. Testing fail-closed behavior on missing execution status...');
   const missingStatusFetch = (async (url: string, init?: any) => {
     if (url.includes('/execute')) {
       return new Response(JSON.stringify({
@@ -184,13 +164,13 @@ async function runFloorMcpFixTests() {
     console.log('✓ Missing execution status rejected with FLOOR_EXECUTION_FAILED.');
   }
 
-  // 14. Fail closed on unknown/unexpected execution status in response
-  console.log('14. Testing fail-closed behavior on unknown execution status...');
+  // 13. Fail closed on unknown/unexpected execution status in response
+  console.log('13. Testing fail-closed behavior on unknown execution status...');
   const unknownStatusFetch = (async (url: string, init?: any) => {
     if (url.includes('/execute')) {
       return new Response(JSON.stringify({
         success: true,
-        data: { status: 'queued', result: { queuedAt: Date.now() } },
+        data: { status: 'queued', result: { queuedAt: Date.now() } }, // unexpected status
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     return mockFetch(url, init);
@@ -210,8 +190,8 @@ async function runFloorMcpFixTests() {
     console.log('✓ Unknown execution status rejected with FLOOR_EXECUTION_FAILED.');
   }
 
-  // 15. Fail closed on malformed data field in execution response
-  console.log('15. Testing fail-closed behavior on malformed data payload in execute response...');
+  // 14. Fail closed on malformed data field in execution response (null, string, list)
+  console.log('14. Testing fail-closed behavior on malformed data payload in execute response...');
   const malformedDataFetch = (async (url: string, init?: any) => {
     if (url.includes('/execute')) {
       return new Response(JSON.stringify({
@@ -236,78 +216,29 @@ async function runFloorMcpFixTests() {
     console.log('✓ Malformed data payload rejected with FLOOR_EXECUTION_FAILED.');
   }
 
-  // Helper to build authentic signed gateway instructions against mockStore's trusted issuer
-  const buildSignedInstruction = (overrides: Record<string, any> = {}, agentId = 'AMR-TEST-AGENT') => {
-    const xKp = getLocalAgentEncryptionKeyPair(agentId);
-    const approvedArguments = overrides.approvedArguments ?? {
-      ticker: 'AAPL',
-      nested: { k1: 'v1' },
-    };
-    const unsigned: any = {
-      version: GATEWAY_PROTOCOL_VERSION,
-      instructionId: overrides.instructionId || 'inst_floor_test_1',
-      issuer: 'aamarva-floor',
-      audience: mockStore.trustedGatewayKeys!.gatewayId,
-      gatewayId: mockStore.trustedGatewayKeys!.gatewayId,
-      agentId,
-      agentKeyId: xKp.keyId,
-      agentKeyVersion: xKp.keyVersion,
-      agentPublicKey: exportX25519PublicKeyJWK(xKp.publicKey),
-      invocationId: overrides.invocationId || 'inv_1',
-      mcpServerId: overrides.mcpServerId || 'mcp_srv_sec_edgar',
-      toolId: overrides.toolId || authorizedTool.id,
-      approvedArguments,
-      approvedArgsDigest: overrides.approvedArgsDigest ?? computeArgsDigest(approvedArguments),
-      scope: overrides.scope ?? 'tool:invoke',
-      decision: overrides.decision ?? 'approved',
-      iat: new Date().toISOString(),
-      exp: overrides.exp ?? new Date(Date.now() + 600_000).toISOString(),
-      issuerKeyId: overrides.issuerKeyId || mockStore.trustedGatewayKeys!.issuerKeyId,
-    };
-    return {
-      ...unsigned,
-      signature: overrides.signature ?? signGatewayInstruction(mockStore.trustedGatewayKeys!.issuerPrivateKey, unsigned),
-    };
-  };
+  // 15-38. Comprehensive zero-trust FLOOR platform-mediated execution tests (no gateway/external MCP calls)
+  console.log('15-38. Testing zero-trust contract reconciliation, gateway-field rejection & zero external MCP requests...');
+
+  assert.strictEqual((client as any).obtainFloorExecutionAuthorization, undefined, 'obtainFloorExecutionAuthorization must be removed from Agent ADK');
 
   const futureIso = () => new Date(Date.now() + 600_000).toISOString();
   const pastIso = () => new Date(Date.now() - 10_000).toISOString();
 
-  // 16. Gateway-only FLOOR execution contract + canonical key-order-insensitive argument binding
-  console.log('16-45. Testing gateway-only contract, credential isolation & zero direct MCP requests...');
+  // A1. Reconciled docs/endpoints.md response (platform-mediated result without serverUrl or gateway credentials)
   {
     const callOrder: string[] = [];
-    const submitted = {
-      nested: { a: [true, { x: 8, y: 9 }], b: 2 },
-      ticker: 'AAPL',
-    };
-    const canonicalApproved = {
-      ticker: 'AAPL',
-      nested: { b: 2, a: [true, { y: 9, x: 8 }] },
-    };
-
-    const gwContractFetch = (async (url: string, init?: any) => {
-      if (url.includes('/execute')) {
+    let externalCalls = 0;
+    const docsContractFetch = (async (url: string, init?: any) => {
+      if (url.includes('/floor/agent/tools')) {
+        callOrder.push('floor:discover');
+      } else if (url.includes('/execute')) {
         callOrder.push('floor:execute');
-        const inst = buildSignedInstruction({
-          invocationId: 'inv_docs_1',
-          instructionId: 'inst_docs_1',
-          approvedArguments: canonicalApproved,
-        }, 'AMR-TEST-AGENT');
         return new Response(JSON.stringify({
           success: true,
           data: {
-            status: 'approved',
             invocationId: 'inv_docs_1',
             toolId: authorizedTool.id,
             tool: { id: authorizedTool.id, name: authorizedTool.name },
-            agentId: 'AMR-TEST-AGENT',
-            mcpServerId: 'mcp_srv_sec_edgar',
-            gatewayId: mockStore.trustedGatewayKeys!.gatewayId,
-            gatewayUrl: mockStore.trustedGatewayKeys!.gatewayUrl,
-            instructionId: 'inst_docs_1',
-            approvedArgsDigest: computeArgsDigest(canonicalApproved),
-            approvedArguments: canonicalApproved,
             verificationInfo: {
               verified: true,
               toolId: authorizedTool.id,
@@ -315,82 +246,109 @@ async function runFloorMcpFixTests() {
             },
             scope: 'tool:invoke',
             expiresAt: futureIso(),
-            instruction: inst,
+            approvedArguments: {
+              ticker: 'AAPL',
+              nested: { b: 2, a: [true, { y: 9, x: 8 }] },
+            },
+            result: { ok: true, fromPlatform: true },
           },
         }), { status: 200, headers: { 'content-type': 'application/json' } });
-      }
-      if (url.includes('/gateway/tokens')) {
-        callOrder.push('gateway:tokens');
-      }
-      if (url.includes('/gateway/mcp')) {
-        callOrder.push('gateway:mcp');
+      } else if (!url.includes('/agents/') && !url.includes('/auth/') && !url.includes('/floor/')) {
+        externalCalls++;
       }
       return mockFetch(url, init);
     }) as typeof fetch;
 
-    const gwClient = new Aamarva({
+    const docsClient = new Aamarva({
       agentId: 'AMR-TEST-AGENT',
       apiKey: 'sk_test_123',
-      fetch: gwContractFetch,
+      fetch: docsContractFetch,
     });
 
-    const docsRes = await gwClient.executeFloorTool(authorizedTool.id, submitted, {
+    const submitted = {
+      nested: { a: [true, { x: 8, y: 9 }], b: 2 },
+      ticker: 'AAPL',
+    };
+    const docsRes = await docsClient.executeFloorTool(authorizedTool.id, submitted, {
       invocationId: 'inv_docs_1',
       requiredScope: 'tool:invoke',
       requireApprovedArguments: true,
     });
     assert.strictEqual(docsRes.status, 'approved');
-    assert.deepStrictEqual(callOrder, ['floor:execute', 'gateway:tokens', 'gateway:mcp']);
-    assert.strictEqual((docsRes as any).serverUrl, undefined);
-    assert.strictEqual((docsRes as any).auth, undefined);
-    assert.strictEqual(mockStore.directMcpCalls!.length, 0);
-    console.log('✓ Mandatory gateway call sequence, key-order-insensitive arg binding, and zero direct MCP calls verified.');
+    assert.deepStrictEqual(docsRes.result, { ok: true, fromPlatform: true });
+    assert.strictEqual((docsRes as any).serverUrl, undefined, 'FloorToolInvokeResult must never expose serverUrl');
+    assert.deepStrictEqual(callOrder, ['floor:discover', 'floor:execute']);
+    assert.strictEqual(externalCalls, 0);
+    console.log('✓ Reconciled platform-mediated FLOOR contract + nested key-order-insensitive arg binding + zero external calls verified.');
   }
 
-  // Target-agent (slave) scoping succeeds only when instruction & response match targetAgentId
+  // A2. Target-agent (slave) scoping succeeds only when response matches targetAgentId
   {
-    const slaveClient = new Aamarva({
+    let externalCalls = 0;
+    const slaveFetch = (async (url: string, init?: any) => {
+      if (url.includes('/execute')) {
+        return new Response(JSON.stringify({
+          success: true,
+          data: {
+            status: 'approved',
+            invocationId: 'inv_slave_ok',
+            toolId: authorizedTool.id,
+            agentId: 'AMR-SLAVE-01',
+            grant: {
+              status: 'active',
+              agentId: 'AMR-SLAVE-01',
+              toolId: authorizedTool.id,
+              scope: 'tool:invoke',
+              expiresAt: futureIso(),
+            },
+            verificationInfo: { verified: true, toolId: authorizedTool.id, agentId: 'AMR-SLAVE-01' },
+            approvedArguments: { ticker: 'MSFT' },
+            result: { slaveOk: true },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (!url.includes('/agents/') && !url.includes('/auth/') && !url.includes('/floor/')) {
+        externalCalls++;
+      }
+      return mockFetch(url, init);
+    }) as typeof fetch;
+
+    const slaveScopedClient = new Aamarva({
       agentId: 'AMR-MASTER-01',
       targetAgentId: 'AMR-SLAVE-01',
       apiKey: 'sk_master_123',
-      fetch: mockFetch,
+      fetch: slaveFetch,
     });
-    await slaveClient.ensureGatewayKeyRegistered();
-    const slaveRes = await slaveClient.executeFloorTool(
+    const slaveRes = await slaveScopedClient.executeFloorTool(
       authorizedTool.id,
-      { ticker: 'MSFT' }
+      { ticker: 'MSFT' },
+      { invocationId: 'inv_slave_ok' }
     );
     assert.strictEqual(slaveRes.status, 'approved');
-    assert.strictEqual(mockStore.directMcpCalls!.length, 0);
-    console.log('✓ Target-agent (x-target-agent-id) scoped gateway authorization verified.');
+    assert.deepStrictEqual(slaveRes.result, { slaveOk: true });
+    assert.strictEqual((slaveRes as any).serverUrl, undefined);
+    assert.strictEqual(externalCalls, 0);
+    console.log('✓ Target-agent (x-target-agent-id) scoped platform-mediated execution verified.');
   }
 
-  // Exhaustive negative failure scenarios (zero token mints, zero gateway MCP calls, zero credential leaks)
-  const validBase = () => {
-    const inst = buildSignedInstruction({}, 'AMR-TEST-AGENT');
-    return {
-      status: 'approved',
-      invocationId: 'inv_1',
-      toolId: authorizedTool.id,
+  // B-F: Exhaustive negative failure scenarios (zero external calls + gateway-field rejection + no credential leakage)
+  const validBase = () => ({
+    status: 'approved',
+    invocationId: 'inv_1',
+    toolId: authorizedTool.id,
+    agentId: 'AMR-TEST-AGENT',
+    verificationInfo: { verified: true, toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT' },
+    grant: {
+      grantId: 'g_1',
+      status: 'active',
       agentId: 'AMR-TEST-AGENT',
-      mcpServerId: 'mcp_srv_sec_edgar',
-      gatewayId: mockStore.trustedGatewayKeys!.gatewayId,
-      gatewayUrl: mockStore.trustedGatewayKeys!.gatewayUrl,
-      instructionId: inst.instructionId,
-      approvedArgsDigest: inst.approvedArgsDigest,
-      instruction: inst,
-      verificationInfo: { verified: true, toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT' },
-      grant: {
-        grantId: 'g_1',
-        status: 'active',
-        agentId: 'AMR-TEST-AGENT',
-        toolId: authorizedTool.id,
-        scope: 'tool:invoke',
-        expiresAt: futureIso(),
-      },
-      approvedArguments: { ticker: 'AAPL', nested: { k1: 'v1' } },
-    };
-  };
+      toolId: authorizedTool.id,
+      scope: 'tool:invoke',
+      expiresAt: futureIso(),
+    },
+    approvedArguments: { ticker: 'AAPL', nested: { k1: 'v1' } },
+    result: { ok: true },
+  });
 
   const authFailScenarios: Array<{
     name: string;
@@ -400,28 +358,31 @@ async function runFloorMcpFixTests() {
     execOptions?: Record<string, unknown>;
     httpStatus?: number;
   }> = [
-    { name: 'missing signed instruction', response: { success: true, data: { ...validBase(), instruction: undefined } } },
-    { name: 'forged instruction signature', response: { success: true, data: { ...validBase(), instruction: buildSignedInstruction({ signature: Buffer.alloc(64, 7).toString('base64') }) } } },
-    { name: 'exposed serverUrl', response: { success: true, data: { ...validBase(), serverUrl: 'https://mcp.example.internal/rpc' } } },
-    { name: 'exposed auth object', response: { success: true, data: { ...validBase(), auth: { type: 'bearer', token: 'super_secret_mcp_token_do_not_leak' } } } },
-    { name: 'exposed grantToken', response: { success: true, data: { ...validBase(), grantToken: 'secret_tok' } } },
+    { name: 'missing grant without docs proof', response: { success: true, data: { invocationId: 'inv_1', toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT', status: 'approved', result: { ok: true } } } },
     { name: 'empty grant object {}', response: { success: true, data: { ...validBase(), grant: {} } } },
-    { name: 'missing grant.status', response: { success: true, data: { ...validBase(), grant: { grantId: 'g1', agentId: 'AMR-TEST-AGENT', expiresAt: futureIso() } } } },
+    { name: 'missing grant.status (no fallback)', response: { success: true, data: { ...validBase(), grant: { grantId: 'g1', agentId: 'AMR-TEST-AGENT', expiresAt: futureIso() } } } },
     { name: 'pending execution status', response: { success: true, data: { ...validBase(), status: 'pending', grant: { ...validBase().grant, status: 'pending' } } } },
     { name: 'rejected execution status', response: { success: true, data: { ...validBase(), status: 'rejected', grant: { ...validBase().grant, status: 'rejected' } } } },
     { name: 'expired grant.expiresAt', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, expiresAt: pastIso() } } } },
-    { name: 'expired top-level expiresAt', response: { success: true, data: { ...validBase(), expiresAt: pastIso() } } },
-    { name: 'expired instruction.exp', response: { success: true, data: { ...validBase(), instruction: buildSignedInstruction({ exp: pastIso() }) } } },
+    { name: 'expired top-level expiresAt even with future grant.expiresAt', response: { success: true, data: { ...validBase(), expiresAt: pastIso() } } },
     { name: 'malformed non-ISO expiresAt ("9999")', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, expiresAt: '9999' } } } },
+    { name: 'null expiresAt', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, expiresAt: null } } } },
     { name: 'revoked grant status', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, status: 'revoked' } } } },
     { name: 'revoked scope token', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, scope: 'revoked' } } } },
     { name: 'missing requiredScope', response: { success: true, data: validBase() }, execOptions: { requiredScope: 'admin:write' } },
-    { name: 'malformed gatewayUrl scheme (ftp://)', response: { success: true, data: { ...validBase(), gatewayUrl: 'ftp://gateway.example.internal/rpc' } } },
-    { name: 'malformed gatewayUrl string', response: { success: true, data: { ...validBase(), gatewayUrl: 'not-a-valid-url' } } },
+    { name: 'missing result and output in platform execution response', response: { success: true, data: { ...validBase(), result: undefined } } },
+    { name: 'gateway serverUrl leaked in /execute response', response: { success: true, data: { ...validBase(), serverUrl: 'https://mcp.example.internal/rpc' } } },
+    { name: 'gateway mcpServerUrl leaked in /execute response', response: { success: true, data: { ...validBase(), mcpServerUrl: 'https://mcp.example.internal/rpc' } } },
+    { name: 'gateway auth object leaked in /execute response', response: { success: true, data: { ...validBase(), auth: { type: 'bearer', token: 'super_secret_mcp_token_do_not_leak' } } } },
+    { name: 'gateway authConfig leaked in /execute response', response: { success: true, data: { ...validBase(), authConfig: { authType: 'bearer', headerValue: 'Bearer secret_tok' } } } },
+    { name: 'gateway grantToken leaked in /execute response', response: { success: true, data: { ...validBase(), grantToken: 'secret_tok' } } },
+    { name: 'gateway accessToken leaked in /execute response', response: { success: true, data: { ...validBase(), accessToken: 'secret_tok' } } },
     { name: 'verificationInfo.verified false', response: { success: true, data: { ...validBase(), verificationInfo: { verified: false, toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT' } } } },
     { name: 'verificationInfo.verified string "true"', response: { success: true, data: { ...validBase(), verificationInfo: { verified: 'true', toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT' } } } },
+    { name: 'missing verificationInfo when grant omitted', response: { success: true, data: { invocationId: 'inv_1', toolId: authorizedTool.id, agentId: 'AMR-TEST-AGENT', expiresAt: futureIso(), result: { ok: true } } } },
+    { name: 'missing agentId when client has agentId', response: { success: true, data: { ...validBase(), agentId: undefined, verificationInfo: { verified: true, toolId: authorizedTool.id }, grant: { ...validBase().grant, agentId: undefined } } } },
     { name: 'mismatched grant.agentId', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, agentId: 'AMR-HIJACKED' } } } },
-    { name: 'master agentId returned instead of slave targetAgentId', response: { success: true, data: { ...validBase(), agentId: 'AMR-MASTER-01', grant: { ...validBase().grant, agentId: 'AMR-MASTER-01' }, verificationInfo: { verified: true, toolId: authorizedTool.id, agentId: 'AMR-MASTER-01' }, instruction: buildSignedInstruction({}, 'AMR-MASTER-01') } }, clientConfig: { agentId: 'AMR-MASTER-01', targetAgentId: 'AMR-SLAVE-01' } },
+    { name: 'master agentId returned instead of slave targetAgentId', response: { success: true, data: { ...validBase(), agentId: 'AMR-MASTER-01', grant: { ...validBase().grant, agentId: 'AMR-MASTER-01' }, verificationInfo: { verified: true, toolId: authorizedTool.id, agentId: 'AMR-MASTER-01' } } }, clientConfig: { agentId: 'AMR-MASTER-01', targetAgentId: 'AMR-SLAVE-01' } },
     { name: 'fleetId mismatch', response: { success: true, data: { ...validBase(), fleetId: 'fleet_other' } }, execOptions: { fleetId: 'fleet_prod' } },
     { name: 'mismatched invocationId', response: { success: true, data: { ...validBase(), invocationId: 'inv_WRONG' } } },
     { name: 'mismatched grant.toolId', response: { success: true, data: { ...validBase(), grant: { ...validBase().grant, toolId: 'wrong_tool' } } } },
@@ -434,7 +395,7 @@ async function runFloorMcpFixTests() {
   ];
 
   for (const scenario of authFailScenarios) {
-    let gatewayTokenOrMcpCalls = 0;
+    let externalCalls = 0;
     const scenarioFetch = (async (url: string, init?: any) => {
       if (url.includes('/floor/tools/') && url.endsWith('/invoke')) {
         return new Response(JSON.stringify({
@@ -448,8 +409,8 @@ async function runFloorMcpFixTests() {
           headers: { 'content-type': 'application/json' },
         });
       }
-      if (url.includes('/gateway/tokens') || url.includes('/gateway/mcp') || url.includes('/mcp')) {
-        gatewayTokenOrMcpCalls++;
+      if (!url.includes('/agents/') && !url.includes('/auth/') && !url.includes('/floor/')) {
+        externalCalls++;
       }
       return mockFetch(url, init);
     }) as typeof fetch;
@@ -469,16 +430,16 @@ async function runFloorMcpFixTests() {
       );
       assert.fail(`Should have failed for scenario: ${scenario.name}`);
     } catch (err: any) {
-      assert.strictEqual(gatewayTokenOrMcpCalls, 0, `Zero gateway token/MCP calls expected for ${scenario.name}`);
+      assert.strictEqual(externalCalls, 0, `Zero external requests expected for ${scenario.name}`);
       const serializedErr = `${err?.message || ''} ${JSON.stringify(err || {})}`;
       assert.strictEqual(serializedErr.includes('super_secret_mcp_token_do_not_leak'), false, `Secret leaked in error for ${scenario.name}`);
       assert.strictEqual(serializedErr.includes('secret_tok'), false, `Token leaked in error for ${scenario.name}`);
     }
   }
-  console.log(`✓ Verified zero gateway/MCP executions and zero credential leaks across ${authFailScenarios.length} failure scenarios.`);
+  console.log(`✓ Verified gateway-field rejection, zero external requests, and zero credential leaks across ${authFailScenarios.length} security failure scenarios.`);
 
   console.log('--------------------------------------------------');
-  console.log('ALL FLOOR MCP GATEWAY TESTS PASSED                ');
+  console.log('ALL FLOOR MCP FIX TESTS PASSED                    ');
   console.log('--------------------------------------------------');
 }
 
