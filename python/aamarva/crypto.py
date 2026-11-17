@@ -1,27 +1,44 @@
 import os
 import re
+import hmac
+import math
 import json
 import hashlib
 import base64
+import datetime
 from abc import ABC, abstractmethod
-from typing import Optional, Union, Dict, Any, Iterable, List
+from typing import Optional, Union, Dict, Any, Iterable, List, Tuple
 
 try:
-    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric import ec, x25519
     from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
     from cryptography.hazmat.primitives import serialization, hashes
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     HAS_CRYPTOGRAPHY = True
 except ImportError:
-    ec = None
-    decode_dss_signature = None
-    encode_dss_signature = None
-    serialization = None
-    hashes = None
-    HKDF = None
-    AESGCM = None
-    HAS_CRYPTOGRAPHY = False
+    try:
+        from ._openssl_backend import (
+            ec,
+            x25519,
+            decode_dss_signature,
+            encode_dss_signature,
+            serialization,
+            hashes,
+            HKDF,
+            AESGCM,
+        )
+        HAS_CRYPTOGRAPHY = True
+    except ImportError:
+        ec = None
+        x25519 = None
+        decode_dss_signature = None
+        encode_dss_signature = None
+        serialization = None
+        hashes = None
+        HKDF = None
+        AESGCM = None
+        HAS_CRYPTOGRAPHY = False
 
 from .errors import AamarvaError
 
@@ -974,4 +991,531 @@ def decrypt_cluster_message(
         if isinstance(err, AamarvaError):
             raise err
         raise AamarvaError(f"Failed to decrypt cluster message: {str(err)}", code="CLUSTER_MESSAGE_DECRYPTION_FAILED")
+
+
+# =============================================================================
+# Mandatory MCP Adapter Gateway Cryptography (P-256 + RFC 9180 HPKE + ECDSA)
+# =============================================================================
+
+GATEWAY_PROTOCOL_VERSION = "aamarva.gateway.v1"
+GATEWAY_HPKE_KEM = "DHKEM(P-256, HKDF-SHA256)"
+GATEWAY_HPKE_KDF = "HKDF-SHA256"
+GATEWAY_HPKE_AEAD = "AES-256-GCM"
+GATEWAY_HPKE_SUITE = {
+    "kem": GATEWAY_HPKE_KEM,
+    "kdf": GATEWAY_HPKE_KDF,
+    "aead": GATEWAY_HPKE_AEAD,
+}
+
+_HPKE_KEM_SUITE_ID = b"KEM\x00\x10"
+_HPKE_SUITE_ID = b"HPKE\x00\x10\x00\x01\x00\x02"
+
+
+def canonical_json_stringify(obj: Any) -> str:
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return json.dumps(obj, ensure_ascii=False)
+    if isinstance(obj, float):
+        if obj == 0.0 and math.copysign(1.0, obj) < 0:
+            return "0"
+        if obj.is_integer():
+            return str(int(obj))
+        return json.dumps(obj, ensure_ascii=False)
+    if isinstance(obj, (list, tuple)):
+        return "[" + ",".join(canonical_json_stringify(item) for item in obj) + "]"
+    if isinstance(obj, dict):
+        items = []
+        for k in sorted(obj.keys(), key=lambda key: str(key)):
+            items.append(f"{json.dumps(str(k), ensure_ascii=False)}:{canonical_json_stringify(obj[k])}")
+        return "{" + ",".join(items) + "}"
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def sha256_hex(data: Union[str, bytes, bytearray]) -> str:
+    raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+    return hashlib.sha256(raw).hexdigest().lower()
+
+
+def compute_args_digest(args: Optional[Dict[str, Any]] = None) -> str:
+    return f"sha256:{sha256_hex(canonical_json_stringify(args or {}))}"
+
+
+def _p256_sign_p1363(private_key: Any, payload: bytes, error_code: str = "IDENTITY_KEY_INVALID") -> str:
+    _require_cryptography()
+    try:
+        priv = _coerce_ec_private_key(private_key, error_code=error_code)
+        der_sig = priv.sign(payload, ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(der_sig)
+        raw_sig = r.to_bytes(32, byteorder="big") + s.to_bytes(32, byteorder="big")
+        return base64.b64encode(raw_sig).decode("ascii")
+    except Exception as err:
+        if isinstance(err, AamarvaError):
+            raise err
+        raise AamarvaError(f"ECDSA P-256 signing failed: {str(err)}", code=error_code)
+
+
+def _p256_verify_sig(public_key: Any, payload: bytes, signature_b64: str) -> bool:
+    if not signature_b64 or not isinstance(signature_b64, str):
+        return False
+    _require_cryptography()
+    try:
+        pub = import_public_key(public_key)
+        sig_bytes = base64.b64decode(signature_b64)
+        if len(sig_bytes) == 64:
+            r = int.from_bytes(sig_bytes[:32], byteorder="big")
+            s = int.from_bytes(sig_bytes[32:], byteorder="big")
+            der_sig = encode_dss_signature(r, s)
+            pub.verify(der_sig, payload, ec.ECDSA(hashes.SHA256()))
+        else:
+            pub.verify(sig_bytes, payload, ec.ECDSA(hashes.SHA256()))
+        return True
+    except Exception:
+        return False
+
+
+def _export_p256_uncompressed_point(key: Any) -> bytes:
+    pub = import_public_key(key)
+    pn = pub.public_numbers()
+    x = pn.x.to_bytes(32, byteorder="big")
+    y = pn.y.to_bytes(32, byteorder="big")
+    return b"\x04" + x + y
+
+
+def _coerce_p256_private_key(key: Any, error_code: str = "TOKEN_DECRYPTION_FAILED") -> Any:
+    _require_cryptography()
+    if isinstance(key, ec.EllipticCurvePrivateKey):
+        if not isinstance(key.curve, ec.SECP256R1):
+            raise AamarvaError("Private key must be P-256.", code=error_code)
+        return key
+    if isinstance(key, dict) and "private_key" in key and isinstance(key["private_key"], ec.EllipticCurvePrivateKey):
+        return key["private_key"]
+    if isinstance(key, str) and key.strip():
+        try:
+            priv = serialization.load_pem_private_key(key.strip().encode("utf-8"), password=None)
+            if isinstance(priv, ec.EllipticCurvePrivateKey):
+                return priv
+        except Exception:
+            pass
+    raise AamarvaError("Valid local P-256 private key is required.", code=error_code)
+
+
+def create_aamarva_identity_assertion_payload(assertion: Dict[str, Any]) -> str:
+    norm_agent_id = normalize_agent_id(assertion.get("agentId"))
+    agent_name = str(assertion.get("agentName", "")).strip()
+    pub_key = assertion.get("agentPublicKey")
+    if not norm_agent_id or not agent_name or not pub_key:
+        raise AamarvaError("AAMARVA identity assertion requires agentPublicKey, agentId, and agentName.", code="AAMARVA_ASSERTION_INVALID")
+    pub_jwk = export_public_key_jwk(pub_key)
+    if pub_jwk.get("kty") != "EC" or pub_jwk.get("crv") != "P-256":
+        raise AamarvaError("AAMARVA identity assertion requires a valid P-256 agentPublicKey.", code="AAMARVA_ASSERTION_INVALID")
+    return canonical_json_stringify({
+        "agentPublicKey": pub_jwk,
+        "agentId": norm_agent_id,
+        "agentName": agent_name,
+    })
+
+
+def sign_aamarva_identity_assertion(aamarva_private_key: Any, assertion: Dict[str, Any]) -> str:
+    payload = create_aamarva_identity_assertion_payload(assertion)
+    return _p256_sign_p1363(aamarva_private_key, payload.encode("utf-8"), error_code="AAMARVA_ASSERTION_INVALID")
+
+
+def verify_aamarva_identity_assertion(trusted_aamarva_public_key: Any, assertion: Dict[str, Any]) -> bool:
+    if not isinstance(assertion, dict) or not isinstance(assertion.get("signature"), str) or not assertion["signature"].strip():
+        return False
+    try:
+        payload = create_aamarva_identity_assertion_payload(assertion)
+        return _p256_verify_sig(trusted_aamarva_public_key, payload.encode("utf-8"), assertion["signature"])
+    except Exception:
+        return False
+
+
+def create_gateway_token_aad(params: Dict[str, Any]) -> str:
+    return "|".join([
+        "AAMARVA:GW_TOKEN:v1",
+        str(params.get("version", "")),
+        str(params.get("gatewayId", "")),
+        normalize_agent_id(params.get("agentId")),
+        str(params.get("agentName", "")).strip(),
+        str(params.get("agentPublicKeyFingerprint", "")),
+        str(params.get("mcpServerId", "")),
+        str(params.get("toolId", "")),
+        str(params.get("approvedArgsDigest", "")),
+        str(params.get("iat", "")),
+        str(params.get("exp", "")),
+    ])
+
+
+def create_gateway_token_info(gateway_id: str, agent_id: str) -> str:
+    return f"AAMARVA-GATEWAY-HPKE-v1:{gateway_id}:{normalize_agent_id(agent_id)}"
+
+
+def create_gateway_envelope_signing_payload(envelope: Dict[str, Any]) -> str:
+    payload: Dict[str, Any] = {
+        "version": envelope.get("version"),
+        "suite": envelope.get("suite"),
+        "gatewayId": envelope.get("gatewayId"),
+        "gatewayKeyId": envelope.get("gatewayKeyId"),
+        "gatewayUrl": envelope.get("gatewayUrl"),
+        "agentId": normalize_agent_id(envelope.get("agentId")),
+        "agentName": str(envelope.get("agentName", "")).strip(),
+        "agentPublicKeyFingerprint": envelope.get("agentPublicKeyFingerprint"),
+        "mcpServerId": envelope.get("mcpServerId"),
+        "toolId": envelope.get("toolId"),
+        "approvedArgsDigest": envelope.get("approvedArgsDigest"),
+        "iat": envelope.get("iat"),
+        "exp": envelope.get("exp"),
+        "enc": envelope.get("enc"),
+        "ciphertext": envelope.get("ciphertext"),
+        "aad": envelope.get("aad"),
+        "info": envelope.get("info"),
+    }
+    if envelope.get("scope") is not None:
+        payload["scope"] = envelope["scope"]
+    return canonical_json_stringify(payload)
+
+
+def verify_gateway_envelope_signature(trusted_gateway_public_key: Any, envelope: Dict[str, Any]) -> bool:
+    if not isinstance(envelope, dict) or not isinstance(envelope.get("gatewaySignature"), str) or not envelope["gatewaySignature"]:
+        return False
+    try:
+        payload = create_gateway_envelope_signing_payload(envelope)
+        return _p256_verify_sig(trusted_gateway_public_key, payload.encode("utf-8"), envelope["gatewaySignature"])
+    except Exception:
+        return False
+
+
+def _hpke_labeled_extract(salt: bytes, suite_id: bytes, label: bytes, ikm: bytes) -> bytes:
+    actual_salt = salt if salt else b"\x00" * 32
+    labeled_ikm = b"HPKE-v1" + suite_id + label + ikm
+    return hmac.new(actual_salt, labeled_ikm, hashlib.sha256).digest()
+
+
+def _hpke_labeled_expand(prk: bytes, suite_id: bytes, label: bytes, info: bytes, length: int) -> bytes:
+    labeled_info = length.to_bytes(2, "big") + b"HPKE-v1" + suite_id + label + info
+    okm = bytearray()
+    t = b""
+    n = (length + 31) // 32
+    for i in range(1, n + 1):
+        t = hmac.new(prk, t + labeled_info + bytes([i]), hashlib.sha256).digest()
+        okm.extend(t)
+    return bytes(okm[:length])
+
+
+def _dhkem_p256_extract_and_expand(dh: bytes, kem_context: bytes) -> bytes:
+    eae_prk = _hpke_labeled_extract(b"", _HPKE_KEM_SUITE_ID, b"eae_prk", dh)
+    return _hpke_labeled_expand(eae_prk, _HPKE_KEM_SUITE_ID, b"shared_secret", kem_context, 32)
+
+
+def _hpke_key_schedule_base(shared_secret: bytes, info: bytes) -> Tuple[bytes, bytes]:
+    psk_id_hash = _hpke_labeled_extract(b"", _HPKE_SUITE_ID, b"psk_id_hash", b"")
+    info_hash = _hpke_labeled_extract(b"", _HPKE_SUITE_ID, b"info_hash", info)
+    ks_context = b"\x00" + psk_id_hash + info_hash
+    secret = _hpke_labeled_extract(shared_secret, _HPKE_SUITE_ID, b"secret", b"")
+    key = _hpke_labeled_expand(secret, _HPKE_SUITE_ID, b"key", ks_context, 32)
+    base_nonce = _hpke_labeled_expand(secret, _HPKE_SUITE_ID, b"base_nonce", ks_context, 12)
+    return key, base_nonce
+
+
+def hpke_seal_base(
+    recipient_public_key: Any,
+    plaintext: bytes,
+    aad: bytes = b"",
+    info: bytes = b"",
+) -> Tuple[bytes, bytes]:
+    _require_cryptography()
+    pk_r = import_public_key(recipient_public_key)
+    pk_rm = _export_p256_uncompressed_point(pk_r)
+
+    sk_e = ec.generate_private_key(ec.SECP256R1())
+    enc = _export_p256_uncompressed_point(sk_e.public_key())
+    dh = sk_e.exchange(ec.ECDH(), pk_r)
+    if not dh or dh == b"\x00" * len(dh):
+        raise AamarvaError("HPKE P-256 derived invalid all-zero shared secret.", code="TOKEN_ENCRYPTION_FAILED")
+
+    shared_secret = _dhkem_p256_extract_and_expand(dh, enc + pk_rm)
+    key, nonce = _hpke_key_schedule_base(shared_secret, info)
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext, aad or None)
+    return enc, ciphertext
+
+
+def hpke_open_base(
+    recipient_private_key: Any,
+    enc: bytes,
+    ciphertext: bytes,
+    aad: bytes = b"",
+    info: bytes = b"",
+) -> bytes:
+    _require_cryptography()
+    if not isinstance(enc, (bytes, bytearray)) or len(enc) != 65 or enc[0] != 0x04 or bytes(enc) == b"\x00" * 65:
+        raise AamarvaError("Invalid HPKE encapsulated secret length or value.", code="TOKEN_DECRYPTION_FAILED")
+    sk_r = _coerce_p256_private_key(recipient_private_key, error_code="TOKEN_DECRYPTION_FAILED")
+    pk_rm = _export_p256_uncompressed_point(sk_r.public_key())
+    pk_e = import_public_key(bytes(enc))
+    dh = sk_r.exchange(ec.ECDH(), pk_e)
+    if not dh or dh == b"\x00" * len(dh):
+        raise AamarvaError("HPKE P-256 derived invalid all-zero shared secret.", code="TOKEN_DECRYPTION_FAILED")
+
+    shared_secret = _dhkem_p256_extract_and_expand(dh, bytes(enc) + pk_rm)
+    key, nonce = _hpke_key_schedule_base(shared_secret, info)
+    return AESGCM(key).decrypt(nonce, ciphertext, aad or None)
+
+
+def seal_gateway_token_envelope(
+    token_payload: Dict[str, Any],
+    agent_public_key: Any,
+    gateway_signing_private_key: Any,
+    gateway_key_id: str,
+    gateway_public_key: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    computed_fp = compute_key_fingerprint(agent_public_key)
+    if token_payload.get("agentPublicKeyFingerprint") and token_payload["agentPublicKeyFingerprint"] != computed_fp:
+        raise AamarvaError("Token payload agentPublicKeyFingerprint does not match target P-256 agentPublicKey.", code="GATEWAY_ENVELOPE_INVALID")
+    normalized_payload = dict(token_payload)
+    normalized_payload["agentPublicKeyFingerprint"] = computed_fp
+
+    aad_str = create_gateway_token_aad(normalized_payload)
+    info_str = create_gateway_token_info(normalized_payload["gatewayId"], normalized_payload["agentId"])
+    pt_bytes = canonical_json_stringify(normalized_payload).encode("utf-8")
+
+    enc, ciphertext = hpke_seal_base(
+        agent_public_key,
+        pt_bytes,
+        aad=aad_str.encode("utf-8"),
+        info=info_str.encode("utf-8"),
+    )
+
+    unsigned_envelope: Dict[str, Any] = {
+        "version": normalized_payload["version"],
+        "suite": dict(GATEWAY_HPKE_SUITE),
+        "gatewayId": normalized_payload["gatewayId"],
+        "gatewayKeyId": gateway_key_id,
+        "gatewayUrl": normalized_payload["gatewayUrl"],
+        "agentId": normalized_payload["agentId"],
+        "agentName": str(normalized_payload.get("agentName", "")).strip(),
+        "agentPublicKeyFingerprint": computed_fp,
+        "mcpServerId": normalized_payload["mcpServerId"],
+        "toolId": normalized_payload["toolId"],
+        "approvedArgsDigest": normalized_payload["approvedArgsDigest"],
+        "iat": normalized_payload["iat"],
+        "exp": normalized_payload["exp"],
+        "enc": base64.b64encode(enc).decode("ascii"),
+        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        "aad": aad_str,
+        "info": info_str,
+    }
+    if gateway_public_key is not None:
+        unsigned_envelope["gatewayPublicKey"] = gateway_public_key
+    if normalized_payload.get("scope") is not None:
+        unsigned_envelope["scope"] = normalized_payload["scope"]
+
+    signing_payload = create_gateway_envelope_signing_payload(unsigned_envelope)
+    sig = _p256_sign_p1363(
+        gateway_signing_private_key,
+        signing_payload.encode("utf-8"),
+        error_code="TOKEN_ENCRYPTION_FAILED",
+    )
+    unsigned_envelope["gatewaySignature"] = sig
+    return unsigned_envelope
+
+
+def _resolve_trusted_gateway_key(trusted_keys: Any, envelope: Dict[str, Any]) -> Any:
+    if not trusted_keys:
+        return None
+    if isinstance(trusted_keys, str) or (isinstance(trusted_keys, dict) and trusted_keys.get("kty") == "EC"):
+        return trusted_keys
+    if isinstance(trusted_keys, dict):
+        gk_id = envelope.get("gatewayKeyId")
+        if gk_id and gk_id in trusted_keys:
+            return trusted_keys[gk_id]
+        g_id = envelope.get("gatewayId")
+        if g_id and g_id in trusted_keys:
+            return trusted_keys[g_id]
+    return None
+
+
+def _parse_iso_dt(raw: Any) -> Optional[datetime.datetime]:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        s = raw.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def open_gateway_token_envelope(
+    envelope: Dict[str, Any],
+    agent_encryption_key: Any,
+    trusted_gateway_public_keys: Any,
+    expected_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not isinstance(envelope, dict):
+        raise AamarvaError("Malformed gateway token envelope.", code="GATEWAY_ENVELOPE_INVALID")
+    if envelope.get("version") != GATEWAY_PROTOCOL_VERSION:
+        raise AamarvaError(f"Unsupported gateway protocol version: {envelope.get('version')}.", code="GATEWAY_ENVELOPE_INVALID")
+
+    suite = envelope.get("suite")
+    if (
+        not isinstance(suite, dict)
+        or suite.get("kem") != GATEWAY_HPKE_KEM
+        or suite.get("kdf") != GATEWAY_HPKE_KDF
+        or suite.get("aead") != GATEWAY_HPKE_AEAD
+    ):
+        raise AamarvaError("Unsupported or missing HPKE suite in gateway token envelope.", code="GATEWAY_ENVELOPE_INVALID")
+
+    trusted_key = _resolve_trusted_gateway_key(trusted_gateway_public_keys, envelope)
+    if not trusted_key:
+        raise AamarvaError(
+            f'No trusted gateway public key found for gatewayKeyId="{envelope.get("gatewayKeyId", "")}" / gatewayId="{envelope.get("gatewayId", "")}".',
+            code="GATEWAY_UNTRUSTED_KEY",
+        )
+    if not verify_gateway_envelope_signature(trusted_key, envelope):
+        raise AamarvaError("Gateway token envelope signature verification failed.", code="GATEWAY_SIGNATURE_INVALID")
+
+    expected_aad = create_gateway_token_aad(envelope)
+    expected_info = create_gateway_token_info(str(envelope.get("gatewayId", "")), str(envelope.get("agentId", "")))
+    if envelope.get("aad") != expected_aad or envelope.get("info") != expected_info:
+        raise AamarvaError("Gateway token envelope AAD or HPKE info metadata mismatch.", code="GATEWAY_ENVELOPE_INVALID")
+
+    exp_dt = _parse_iso_dt(envelope.get("exp"))
+    if not exp_dt or exp_dt <= datetime.datetime.now(datetime.timezone.utc):
+        raise AamarvaError("Gateway token envelope has expired.", code="GATEWAY_TOKEN_EXPIRED")
+
+    ctx = expected_context or {}
+    if ctx.get("gatewayId") and envelope.get("gatewayId") != ctx["gatewayId"]:
+        raise AamarvaError("Gateway token envelope gatewayId mismatch.", code="GATEWAY_ENVELOPE_INVALID")
+    if ctx.get("gatewayUrl") and envelope.get("gatewayUrl") != ctx["gatewayUrl"]:
+        raise AamarvaError("Gateway token envelope gatewayUrl mismatch.", code="GATEWAY_ENVELOPE_INVALID")
+    if ctx.get("agentId") and normalize_agent_id(envelope.get("agentId")) != normalize_agent_id(ctx["agentId"]):
+        raise AamarvaError("Gateway token envelope agentId mismatch.", code="AGENT_IDENTITY_MISMATCH")
+    if ctx.get("agentName") and str(envelope.get("agentName", "")).strip() != str(ctx["agentName"]).strip():
+        raise AamarvaError("Gateway token envelope agentName mismatch.", code="AGENT_IDENTITY_MISMATCH")
+    if ctx.get("agentPublicKeyFingerprint") and envelope.get("agentPublicKeyFingerprint") != ctx["agentPublicKeyFingerprint"]:
+        raise AamarvaError("Gateway token envelope agentPublicKeyFingerprint mismatch.", code="AGENT_IDENTITY_MISMATCH")
+    if ctx.get("mcpServerId") and envelope.get("mcpServerId") != ctx["mcpServerId"]:
+        raise AamarvaError("Gateway token envelope mcpServerId mismatch.", code="GATEWAY_ENVELOPE_INVALID")
+    if ctx.get("toolId") and envelope.get("toolId") != ctx["toolId"]:
+        raise AamarvaError("Gateway token envelope toolId mismatch.", code="GATEWAY_ENVELOPE_INVALID")
+    if ctx.get("approvedArgsDigest") and envelope.get("approvedArgsDigest") != ctx["approvedArgsDigest"]:
+        raise AamarvaError("Gateway token envelope approvedArgsDigest mismatch.", code="GATEWAY_ENVELOPE_INVALID")
+
+    local_priv = _coerce_p256_private_key(agent_encryption_key, error_code="TOKEN_DECRYPTION_FAILED")
+    local_fp = compute_key_fingerprint(local_priv.public_key())
+    if envelope.get("agentPublicKeyFingerprint") and envelope["agentPublicKeyFingerprint"] != local_fp:
+        raise AamarvaError("Gateway token envelope is sealed to a different agent P-256 public key.", code="TOKEN_DECRYPTION_FAILED")
+
+    try:
+        enc_bytes = base64.b64decode(envelope["enc"])
+        ct_bytes = base64.b64decode(envelope["ciphertext"])
+        plaintext_bytes = hpke_open_base(
+            local_priv,
+            enc_bytes,
+            ct_bytes,
+            aad=expected_aad.encode("utf-8"),
+            info=expected_info.encode("utf-8"),
+        )
+    except Exception as err:
+        if isinstance(err, AamarvaError):
+            raise err
+        raise AamarvaError(f"RFC 9180 HPKE token decryption failed: {str(err)}", code="TOKEN_DECRYPTION_FAILED")
+
+    try:
+        payload = json.loads(plaintext_bytes.decode("utf-8"))
+    except Exception as err:
+        raise AamarvaError("Decrypted gateway token payload is not valid JSON.", code="TOKEN_DECRYPTION_FAILED") from err
+
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("token"), str)
+        or not payload["token"].strip()
+        or payload.get("version") != envelope.get("version")
+        or payload.get("gatewayId") != envelope.get("gatewayId")
+        or payload.get("gatewayUrl") != envelope.get("gatewayUrl")
+        or normalize_agent_id(payload.get("agentId")) != normalize_agent_id(envelope.get("agentId"))
+        or str(payload.get("agentName", "")).strip() != str(envelope.get("agentName", "")).strip()
+        or payload.get("agentPublicKeyFingerprint") != envelope.get("agentPublicKeyFingerprint")
+        or payload.get("mcpServerId") != envelope.get("mcpServerId")
+        or payload.get("toolId") != envelope.get("toolId")
+        or payload.get("approvedArgsDigest") != envelope.get("approvedArgsDigest")
+    ):
+        raise AamarvaError("Decrypted gateway token claims do not match envelope metadata.", code="TOKEN_CLAIM_MISMATCH")
+
+    payload_exp = _parse_iso_dt(payload.get("exp"))
+    if not payload_exp or payload_exp <= datetime.datetime.now(datetime.timezone.utc):
+        raise AamarvaError("Decrypted gateway token has expired.", code="GATEWAY_TOKEN_EXPIRED")
+
+    return payload
+
+
+def create_gateway_pop_signing_payload(params: Dict[str, Any]) -> str:
+    return "|".join([
+        "AAMARVA:GW_POP:v1",
+        str(params.get("version", "")),
+        str(params.get("tokenSha256", "")),
+        str(params.get("gatewayId", "")),
+        normalize_agent_id(params.get("agentId")),
+        str(params.get("mcpServerId", "")),
+        str(params.get("toolId", "")),
+        str(params.get("approvedArgsDigest", "")),
+        str(params.get("nonce", "")),
+        str(params.get("timestamp", "")),
+    ])
+
+
+def sign_gateway_pop(identity_private_key: Any, params: Dict[str, Any]) -> str:
+    payload = create_gateway_pop_signing_payload(params)
+    return _p256_sign_p1363(identity_private_key, payload.encode("utf-8"), error_code="GATEWAY_POP_SIGN_FAILED")
+
+
+def verify_gateway_pop(identity_public_key: Any, params: Dict[str, Any], signature_b64: str) -> bool:
+    if not signature_b64 or not isinstance(signature_b64, str):
+        return False
+    try:
+        payload = create_gateway_pop_signing_payload(params)
+        return _p256_verify_sig(identity_public_key, payload.encode("utf-8"), signature_b64)
+    except Exception:
+        return False
+
+
+def create_gateway_instruction_signing_payload(inst: Dict[str, Any]) -> str:
+    return canonical_json_stringify({
+        "version": inst.get("version"),
+        "instructionId": inst.get("instructionId"),
+        "issuer": inst.get("issuer"),
+        "audience": inst.get("audience"),
+        "gatewayId": inst.get("gatewayId"),
+        "agentId": normalize_agent_id(inst.get("agentId")),
+        "agentKeyId": inst.get("agentKeyId"),
+        "agentKeyVersion": inst.get("agentKeyVersion"),
+        "invocationId": inst.get("invocationId"),
+        "mcpServerId": inst.get("mcpServerId"),
+        "toolId": inst.get("toolId"),
+        "approvedArgsDigest": inst.get("approvedArgsDigest"),
+        "decision": inst.get("decision"),
+        "iat": inst.get("iat"),
+        "exp": inst.get("exp"),
+    })
+
+
+def sign_gateway_instruction(private_key: Any, inst: Dict[str, Any]) -> str:
+    payload = create_gateway_instruction_signing_payload(inst)
+    return _p256_sign_p1363(private_key, payload.encode("utf-8"), error_code="GATEWAY_INSTRUCTION_SIGN_FAILED")
+
+
+def verify_gateway_instruction_signature(public_key: Any, inst: Dict[str, Any]) -> bool:
+    sig = inst.get("signature")
+    if not sig or not isinstance(sig, str):
+        return False
+    try:
+        payload = create_gateway_instruction_signing_payload(inst)
+        return _p256_verify_sig(public_key, payload.encode("utf-8"), sig)
+    except Exception:
+        return False
+
+
 

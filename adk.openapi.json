@@ -46,6 +46,34 @@
         "responses": { "200": { "description": "Success" } }
       }
     },
+    "/agents/me/gateway-key": {
+      "get": {
+        "summary": "Retrieve active agent X25519 gateway encryption key",
+        "responses": { "200": { "description": "Success" } }
+      },
+      "put": {
+        "summary": "Register signed agent X25519 gateway encryption key",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
+    "/agents/me/gateway-key/rotate": {
+      "post": {
+        "summary": "Rotate agent X25519 gateway encryption key",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
+    "/agents/me/gateway-key/revoke": {
+      "post": {
+        "summary": "Revoke agent X25519 gateway encryption key",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
+    "/agents/{agentId}/gateway-key": {
+      "get": {
+        "summary": "Lookup target agent X25519 gateway encryption key",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
     "/connections": {
       "get": {
         "summary": "List active connections",
@@ -162,13 +190,31 @@
     },
     "/floor/invocations/{invocationId}/execute": {
       "post": {
-        "summary": "Authorize execution of FLOOR invocation",
+        "summary": "Obtain signed gateway execution instruction for FLOOR invocation (zero external MCP credentials)",
         "responses": { "200": { "description": "Success" } }
       }
     },
     "/floor/requests/{requestId}": {
       "get": {
         "summary": "Check status of access ticket",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
+    "/gateway/keys": {
+      "get": {
+        "summary": "Retrieve trusted gateway and instruction issuer public keys",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
+    "/gateway/tokens": {
+      "post": {
+        "summary": "Issue RFC 9180 HPKE sealed single-use gateway token envelope",
+        "responses": { "200": { "description": "Success" } }
+      }
+    },
+    "/gateway/mcp": {
+      "post": {
+        "summary": "Redeem PoP-signed single-use gateway token and execute MCP tool server-side",
         "responses": { "200": { "description": "Success" } }
       }
     },

@@ -110,6 +110,8 @@ export interface AamarvaConfig {
   fetch?: typeof fetch;
   /** Auto-authenticate on first protected request if agentId & apiKey are provided (default: true) */
   autoLogin?: boolean;
+  /** Optional map of trusted gateway signing public keys keyed by gatewayKeyId or gatewayId */
+  trustedGatewayPublicKeys?: Record<string, ECJWK | string>;
 }
 
 export interface SendMessageOptions {
@@ -300,55 +302,10 @@ export interface WatchtowerStreamTicket {
 
 export const GATEWAY_PROTOCOL_VERSION = 'aamarva.gateway.v1' as const;
 
-export interface AgentEncryptionKeyJWK {
-  kty: 'OKP' | string;
-  crv: 'X25519' | string;
-  x: string;
-  [key: string]: unknown;
-}
-
-export interface AgentEncryptionKeyRecord {
-  version: string;
+export interface AamarvaIdentityAssertion {
+  agentPublicKey: ECJWK;
   agentId: string;
-  keyId: string;
-  keyVersion: number;
-  algorithm: 'X25519' | string;
-  hpkeSuite: {
-    kem: string;
-    kdf: string;
-    aead: string;
-  };
-  publicKey: AgentEncryptionKeyJWK;
-  fingerprint: string;
-  identityPublicKey: ECJWK;
-  status: 'active' | 'rotated' | 'revoked' | string;
-  signature: string;
-  createdAt: string;
-  revokedAt?: string;
-}
-
-export interface SignedExecutionInstruction {
-  version: string;
-  instructionId: string;
-  issuer: string;
-  audience: string;
-  gatewayId: string;
-  agentId: string;
-  agentName?: string;
-  agentKeyId: string;
-  agentKeyVersion: number;
-  agentPublicKey: AgentEncryptionKeyJWK;
-  invocationId: string;
-  mcpServerId: string;
-  toolId: string;
-  approvedArguments: Record<string, unknown>;
-  approvedArgsDigest: string;
-  scope?: string | string[];
-  decision: 'approved' | string;
-  hitlApprovalRef?: string;
-  iat: string;
-  exp: string;
-  issuerKeyId: string;
+  agentName: string;
   signature: string;
 }
 
@@ -359,10 +316,8 @@ export interface DecryptedGatewayTokenPayload {
   gatewayId: string;
   gatewayUrl: string;
   agentId: string;
-  agentKeyId: string;
-  agentKeyVersion: number;
-  invocationId: string;
-  instructionId: string;
+  agentName: string;
+  agentPublicKeyFingerprint: string;
   mcpServerId: string;
   toolId: string;
   approvedArgsDigest: string;
@@ -383,10 +338,8 @@ export interface GatewayTokenEnvelope {
   gatewayUrl: string;
   gatewayPublicKey?: ECJWK;
   agentId: string;
-  agentKeyId: string;
-  agentKeyVersion: number;
-  invocationId: string;
-  instructionId: string;
+  agentName: string;
+  agentPublicKeyFingerprint: string;
   mcpServerId: string;
   toolId: string;
   approvedArgsDigest: string;
@@ -405,9 +358,6 @@ export interface GatewayRedemptionRequest {
   token: string;
   gatewayId: string;
   agentId: string;
-  agentKeyId: string;
-  invocationId: string;
-  instructionId: string;
   mcpServerId: string;
   toolId: string;
   arguments: Record<string, unknown>;
@@ -442,7 +392,6 @@ export interface FloorToolInvokeOptions {
 
 export interface ExecuteFloorToolOptions {
   reason?: string;
-  invocationId?: string;
   requestId?: string;
   waitForApproval?: boolean;
   pollIntervalMs?: number;
@@ -452,7 +401,6 @@ export interface ExecuteFloorToolOptions {
   requireApprovedArguments?: boolean;
   gatewayId?: string;
   gatewayUrl?: string;
-  agentKeyId?: string;
   trustedGatewayPublicKeys?: Record<string, ECJWK | string>;
   requirePersistentKeyStore?: boolean;
 }
@@ -462,49 +410,45 @@ export interface FloorToolInvokeResult {
   requestId?: string;
   invocationId?: string;
   toolId?: string;
+  agentId?: string;
+  agentName?: string;
   mcpServerId?: string;
   gatewayId?: string;
+  gatewayUrl?: string;
+  approvedArgsDigest?: string;
+  approvedArguments?: Record<string, unknown>;
+  scope?: string | string[];
+  expiresAt?: string;
+  verificationInfo?: Record<string, unknown>;
+  gatewayEnvelope?: GatewayTokenEnvelope;
   result?: unknown;
   message?: string;
 }
 
 export interface FloorInvocationResponse {
-  invocationId: string;
+  invocationId?: string;
   requestId?: string;
   toolId?: string;
+  agentId?: string;
+  agentName?: string;
   mcpServerId?: string;
+  gatewayId?: string;
+  gatewayUrl?: string;
+  approvedArgsDigest?: string;
+  approvedArguments?: Record<string, unknown>;
+  scope?: string | string[];
+  expiresAt?: string;
+  verificationInfo?: Record<string, unknown>;
+  gatewayEnvelope?: GatewayTokenEnvelope;
   status: 'pending' | 'approved' | 'rejected' | string;
   message?: string;
   [key: string]: unknown;
 }
 
-export interface FloorExecutionAuthorization {
-  invocationId: string;
-  toolId: string;
-  status: 'approved' | string;
-  gatewayId: string;
-  gatewayUrl: string;
-  mcpServerId: string;
-  agentId: string;
-  agentKeyId: string;
-  instructionId: string;
-  approvedArgsDigest: string;
-  scope?: string | string[];
-  expiresAt: string;
-  approvedArguments?: Record<string, unknown>;
-  gatewayEnvelope: GatewayTokenEnvelope;
-  gatewayPublicKey?: ECJWK | string;
-  grant?: {
-    id?: string;
-    grantId?: string;
-    agentId?: string;
-    toolId?: string;
-    status?: string;
-    scope?: string | string[];
-    expiresAt?: string;
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
+export interface TrustedGatewayKeysResponse {
+  gatewayKeys: Record<string, ECJWK | string>;
+  defaultGatewayId?: string;
+  defaultGatewayUrl?: string;
 }
 
 export interface FloorAccessRequestStatus {
@@ -513,6 +457,16 @@ export interface FloorAccessRequestStatus {
   toolId?: string;
   invocationId?: string;
   agentId?: string;
+  agentName?: string;
+  mcpServerId?: string;
+  gatewayId?: string;
+  gatewayUrl?: string;
+  approvedArgsDigest?: string;
+  approvedArguments?: Record<string, unknown>;
+  scope?: string | string[];
+  expiresAt?: string;
+  verificationInfo?: Record<string, unknown>;
+  gatewayEnvelope?: GatewayTokenEnvelope;
   reason?: string;
   createdAt?: string;
   updatedAt?: string;

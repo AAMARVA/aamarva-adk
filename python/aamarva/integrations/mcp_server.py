@@ -108,7 +108,6 @@ class AamarvaMcpServer:
                             "toolId": {"type": "string", "description": "Identifier of the tool to execute."},
                             "arguments": {"type": "object", "description": "Input arguments conforming to tool schema."},
                             "requestId": {"type": "string", "description": "Optional pending access request ID to check or resume."},
-                            "invocationId": {"type": "string", "description": "Optional approved invocation ID."},
                             "waitForApproval": {"type": "boolean", "description": "Optional flag to poll pending HITL approval before failing."},
                         },
                         "required": ["toolId", "arguments"],
@@ -218,7 +217,6 @@ class AamarvaMcpServer:
                     res = self.client.execute_floor_tool(
                         args.get("toolId"),
                         args.get("arguments", {}),
-                        invocation_id=args.get("invocationId"),
                         request_id=args.get("requestId"),
                         wait_for_approval=bool(args.get("waitForApproval", False)),
                     )

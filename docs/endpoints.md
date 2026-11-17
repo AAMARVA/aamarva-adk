@@ -157,6 +157,47 @@ https://aamarva.com/api
   }
   ```
 
+### Register Gateway Encryption Public Key (X25519)
+* **HTTP Method:** `PUT`
+* **Path:** `/api/agents/me/gateway-key`
+* **Authentication:** Authenticated Agent
+* **Notes:** Registers the agent's X25519 public key used by the Mandatory MCP Adapter Gateway for RFC 9180 HPKE token sealing, signed with the agent's P-256 identity key.
+* **Request Body:**
+  ```json
+  {
+    "version": "aamarva.gateway.v1",
+    "agentId": "AMR-1234",
+    "keyId": "amv_ak_...",
+    "keyVersion": 1,
+    "algorithm": "X25519",
+    "hpkeSuite": { "kem": "DHKEM(X25519, HKDF-SHA256)", "kdf": "HKDF-SHA256", "aead": "AES-256-GCM" },
+    "publicKey": { "kty": "OKP", "crv": "X25519", "x": "..." },
+    "fingerprint": "SHA256:...",
+    "identityPublicKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
+    "signature": "base64_p256_binding_sig..."
+  }
+  ```
+
+### Retrieve Own Gateway Encryption Key
+* **HTTP Method:** `GET`
+* **Path:** `/api/agents/me/gateway-key`
+* **Authentication:** Authenticated Agent
+
+### Rotate Gateway Encryption Key
+* **HTTP Method:** `POST`
+* **Path:** `/api/agents/me/gateway-key/rotate`
+* **Authentication:** Authenticated Agent
+
+### Revoke Gateway Encryption Key
+* **HTTP Method:** `POST`
+* **Path:** `/api/agents/me/gateway-key/revoke`
+* **Authentication:** Authenticated Agent
+
+### Lookup Agent Gateway Encryption Key
+* **HTTP Method:** `GET`
+* **Path:** `/api/agents/:agentId/gateway-key`
+* **Authentication:** Authenticated Agent
+
 ### List Fleet Accounts
 * **HTTP Method:** `GET`
 * **Path:** `/api/agents`
@@ -482,7 +523,7 @@ https://aamarva.com/api
 ## 6. Floor MCP & Tool Endpoints (Agent-Accessible)
 
 ### 1. Discover Tools: GET /api/floor/agent/tools
-List all available tools for both assigned and unassigned agents.
+List all available tools for both assigned and unassigned agents. Returns non-secret metadata only (never exposes external MCP URLs or credentials).
 * **HTTP Method:** `GET`
 * **Path:** `/api/floor/agent/tools`
 * **Authentication:** Agent Bearer Token or API key
@@ -500,10 +541,7 @@ List all available tools for both assigned and unassigned agents.
         "input_schema": { "type": "object", "properties": { "city": { "type": "string" } }, "required": ["city"] },
         "inputSchema": { "type": "object", "properties": { "city": { "type": "string" } }, "required": ["city"] },
         "access_status": "granted",
-        "accessStatus": "granted",
-        "authType": "bearer",
-        "authHeaderName": "Authorization",
-        "serverUrl": "https://mcp.weather.internal/sse"
+        "accessStatus": "granted"
       }
     ]
   }
@@ -518,15 +556,18 @@ Submit a request to use a specific tool with intended arguments and justificatio
   ```json
   {
     "arguments": { "city": "Tokyo" },
-    "reason": "Retrieve the current weather in Tokyo to answer the user's question.",
-    "requestType": "access"
+    "reason": "Retrieve the current weather in Tokyo to answer the user's question."
   }
   ```
-* **Success Response (Permitted Direct Execution - Status 200 OK):**
+* **Success Response (Approved Invocation Ready for Gateway Authorization - Status 200 OK):**
   ```json
   {
     "success": true,
-    "data": { "temperature": 22, "condition": "Sunny" }
+    "data": {
+      "invocationId": "inv_987",
+      "toolId": "tool_abc",
+      "status": "approved"
+    }
   }
   ```
 * **Accepted Response (Access or HITL Request Created - Status 202 Accepted):**
@@ -553,47 +594,65 @@ Check the current lifecycle status of a tool request or pending invocation belon
     "success": true,
     "data": {
       "requestId": "req_12345",
-      "status": "pending"
+      "invocationId": "inv_987",
+      "status": "approved"
     }
   }
   ```
   *(Status values: `pending`, `accepted`, `approved`, `rejected`, `denied`, `expired`)*
 
-### 4. Get Tool Access: POST /api/floor/invocations/:invocationId/execute (or /access)
-Retrieve execution credentials and configuration for an approved tool invocation.
+### 4. Obtain Signed Gateway Execution Instruction: POST /api/floor/invocations/:invocationId/execute
+Authorize an approved tool invocation. Returns a signed `SignedExecutionInstruction` and non-secret gateway routing metadata. Never returns external MCP URLs or credentials (`FLOOR_CREDENTIAL_EXPOSURE` is raised fail-closed if present).
 * **HTTP Method:** `POST`
 * **Path:** `/api/floor/invocations/:invocationId/execute`
 * **Authentication:** Agent Bearer Token or API key
 * **Request Body:**
   ```json
   {
-    "reason": "Retrieve authorization credentials for approved tool invocation."
+    "arguments": { "city": "Tokyo" }
   }
   ```
-* **Success Response (Granted Access - Status 200 OK):**
+* **Success Response (Signed Authorization - Status 200 OK):**
   ```json
   {
     "success": true,
     "data": {
+      "status": "approved",
       "invocationId": "inv_987",
       "toolId": "tool_abc",
-      "tool": { "id": "tool_abc", "name": "weather_lookup" },
-      "serverUrl": "https://mcp.weather.internal/sse",
-      "authConfig": {
-        "authType": "bearer",
-        "authHeaderName": "Authorization",
-        "headerValue": "Bearer grant_sec_991823..."
-      },
+      "agentId": "AMR-1234",
+      "gatewayId": "gw_primary",
+      "gatewayUrl": "https://aamarva.com/api/gateway",
+      "mcpServerId": "mcp_weather_srv",
       "verificationInfo": {
         "verified": true,
         "toolId": "tool_abc",
         "agentId": "AMR-1234"
       },
-      "grantToken": "grant_sec_991823...",
-      "accessToken": "grant_sec_991823...",
       "scope": "tool:invoke",
       "expiresAt": "2026-10-27T16:00:00.000Z",
-      "approvedArguments": { "city": "Tokyo" }
+      "approvedArguments": { "city": "Tokyo" },
+      "instruction": {
+        "version": "aamarva.gateway.v1",
+        "instructionId": "inst_123",
+        "issuer": "aamarva.platform",
+        "audience": "aamarva.gateway",
+        "gatewayId": "gw_primary",
+        "agentId": "AMR-1234",
+        "agentKeyId": "amv_ak_...",
+        "agentKeyVersion": 1,
+        "agentPublicKey": { "kty": "OKP", "crv": "X25519", "x": "..." },
+        "invocationId": "inv_987",
+        "mcpServerId": "mcp_weather_srv",
+        "toolId": "tool_abc",
+        "approvedArguments": { "city": "Tokyo" },
+        "approvedArgsDigest": "sha256:...",
+        "decision": "approved",
+        "iat": "2026-10-27T15:55:00.000Z",
+        "exp": "2026-10-27T16:00:00.000Z",
+        "issuerKeyId": "iss_k1",
+        "signature": "base64_p256_issuer_sig..."
+      }
     }
   }
   ```
@@ -603,6 +662,76 @@ Retrieve execution credentials and configuration for an approved tool invocation
     "success": false,
     "error": {
       "message": "Access denied. Agent AMR-9999 does not have access to this tool."
+    }
+  }
+  ```
+
+---
+
+## 7. Mandatory MCP Adapter Gateway Endpoints
+
+### 1. Retrieve Trusted Gateway & Issuer Keys: GET /api/gateway/keys
+* **HTTP Method:** `GET`
+* **Path:** `/api/gateway/keys`
+* **Authentication:** Authenticated Agent
+* **Success Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "gatewayKeys": { "gw_k1": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." } },
+      "issuerKeys": { "iss_k1": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." } }
+    }
+  }
+  ```
+
+### 2. Issue Encrypted Gateway Token: POST /api/gateway/tokens
+Exchanges a verified `SignedExecutionInstruction` for a P-256 signed `GatewayTokenEnvelope` sealed to the agent's X25519 public key using RFC 9180 HPKE Base mode (`DHKEM(X25519, HKDF-SHA256)`, `HKDF-SHA256`, `AES-256-GCM`).
+* **HTTP Method:** `POST`
+* **Path:** `/api/gateway/tokens`
+* **Authentication:** Authenticated Agent
+* **Request Body:**
+  ```json
+  {
+    "instruction": { "version": "aamarva.gateway.v1", "...": "..." }
+  }
+  ```
+
+### 3. Redeem Single-Use Token & Execute External MCP Tool: POST /api/gateway/mcp
+Verifies the agent's P-256 Proof-of-Possession signature, atomically consumes the single-use token and nonce (`409` on replay), resolves external MCP URL & credentials strictly inside the gateway enclave, executes the tool, and returns the result.
+* **HTTP Method:** `POST`
+* **Path:** `/api/gateway/mcp`
+* **Authentication:** Authenticated Agent
+* **Request Body:**
+  ```json
+  {
+    "version": "aamarva.gateway.v1",
+    "token": "decrypted_single_use_token",
+    "gatewayId": "gw_primary",
+    "agentId": "AMR-1234",
+    "agentKeyId": "amv_ak_...",
+    "invocationId": "inv_987",
+    "instructionId": "inst_123",
+    "mcpServerId": "mcp_weather_srv",
+    "toolId": "tool_abc",
+    "arguments": { "city": "Tokyo" },
+    "approvedArgsDigest": "sha256:...",
+    "nonce": "base64url_nonce...",
+    "timestamp": "2026-10-27T15:55:02.000Z",
+    "proofOfPossession": "base64_p256_pop_sig..."
+  }
+  ```
+* **Success Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "status": "approved",
+      "invocationId": "inv_987",
+      "toolId": "tool_abc",
+      "mcpServerId": "mcp_weather_srv",
+      "gatewayId": "gw_primary",
+      "result": { "temperature": 22, "condition": "Sunny" }
     }
   }
   ```

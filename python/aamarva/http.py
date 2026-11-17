@@ -40,16 +40,13 @@ APPROVED_ENDPOINT_PATTERNS = [
     ("GET", re.compile(r"^/floor/agent/tools$")),
     ("POST", re.compile(r"^/floor/tools/[^/]+/invoke$")),
     ("GET", re.compile(r"^/floor/requests/[^/]+$")),
-    ("POST", re.compile(r"^/floor/invocations/[^/]+/execute$")),
     ("GET", re.compile(r"^/adk$")),
     ("GET", re.compile(r"^/watchtower/activity$")),
     ("POST", re.compile(r"^/watchtower/stream-ticket$")),
     ("GET", re.compile(r"^/watchtower/stream$")),
     ("GET", re.compile(r"^/agent/footprints$")),
     ("GET", re.compile(r"^/webhooks/events$")),
-    ("PUT", re.compile(r"^/agents/me/gateway-key$")),
-    ("GET", re.compile(r"^/agents/[^/]+/gateway-key$")),
-    ("POST", re.compile(r"^/gateway/tokens$")),
+    ("GET", re.compile(r"^/gateway/keys$")),
     ("POST", re.compile(r"^/gateway/mcp$")),
 ]
 

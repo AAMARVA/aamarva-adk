@@ -9,16 +9,14 @@ import os from 'os';
 import {
   CipherSuite,
   KDF_HKDF_SHA256,
-  KEM_DHKEM_X25519_HKDF_SHA256,
+  KEM_DHKEM_P256_HKDF_SHA256,
   AEAD_AES_256_GCM,
 } from 'hpke';
 import { AamarvaError } from './errors.js';
 import {
   GATEWAY_PROTOCOL_VERSION,
   type ECJWK,
-  type AgentEncryptionKeyJWK,
-  type AgentEncryptionKeyRecord,
-  type SignedExecutionInstruction,
+  type AamarvaIdentityAssertion,
   type DecryptedGatewayTokenPayload,
   type GatewayTokenEnvelope,
 } from './types.js';
@@ -1243,10 +1241,10 @@ export function decryptClusterMessagePayload(
 }
 
 // ============================================================================
-// Mandatory MCP Adapter Gateway Cryptography (X25519 + RFC 9180 HPKE + ECDSA)
+// Mandatory MCP Adapter Gateway Cryptography (P-256 + RFC 9180 HPKE + ECDSA)
 // ============================================================================
 
-export const GATEWAY_HPKE_KEM = 'DHKEM(X25519, HKDF-SHA256)' as const;
+export const GATEWAY_HPKE_KEM = 'DHKEM(P-256, HKDF-SHA256)' as const;
 export const GATEWAY_HPKE_KDF = 'HKDF-SHA256' as const;
 export const GATEWAY_HPKE_AEAD = 'AES-256-GCM' as const;
 export const GATEWAY_HPKE_SUITE = {
@@ -1260,18 +1258,12 @@ let cachedGatewayHpkeSuite: CipherSuite | null = null;
 function getGatewayHpkeSuite(): CipherSuite {
   if (!cachedGatewayHpkeSuite) {
     cachedGatewayHpkeSuite = new CipherSuite(
-      KEM_DHKEM_X25519_HKDF_SHA256,
+      KEM_DHKEM_P256_HKDF_SHA256,
       KDF_HKDF_SHA256,
       AEAD_AES_256_GCM
     );
   }
   return cachedGatewayHpkeSuite;
-}
-
-function toExactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy.buffer;
 }
 
 export function canonicalJsonStringify(obj: unknown): string {
@@ -1304,572 +1296,127 @@ export function computeArgsDigest(args: Record<string, unknown> = {}): string {
   return `sha256:${sha256Hex(Buffer.from(canonicalJsonStringify(args || {}), 'utf8'))}`;
 }
 
-export function generateX25519KeyPair(): { privateKey: crypto.KeyObject; publicKey: crypto.KeyObject } {
-  return crypto.generateKeyPairSync('x25519');
-}
-
-function validateX25519PublicKeyObject(pubKey: crypto.KeyObject): AgentEncryptionKeyJWK {
-  if (pubKey.asymmetricKeyType !== 'x25519') {
-    throw new AamarvaError(`Expected X25519 public key, got ${String(pubKey.asymmetricKeyType)}.`, {
-      code: 'AGENT_ENCRYPTION_KEY_INVALID',
+function padP256Coordinate(buf: Buffer, label: string): Buffer {
+  if (buf.length > 32) {
+    throw new AamarvaError(`Invalid P-256 ${label} length: ${buf.length} bytes.`, {
+      code: 'IDENTITY_KEY_INVALID',
     });
   }
-  const jwk = pubKey.export({ format: 'jwk' });
-  if (jwk.kty !== 'OKP' || jwk.crv !== 'X25519' || typeof jwk.x !== 'string') {
-    throw new AamarvaError('Invalid X25519 public key JWK export.', {
-      code: 'AGENT_ENCRYPTION_KEY_INVALID',
+  if (buf.length === 32) {
+    return buf;
+  }
+  return Buffer.concat([Buffer.alloc(32 - buf.length, 0), buf]);
+}
+
+function exportP256UncompressedPublicKey(key: ECJWK | string | crypto.KeyObject | any): Uint8Array {
+  const jwk = exportPublicKeyJWK(key);
+  if (jwk.kty !== 'EC' || jwk.crv !== 'P-256' || typeof jwk.x !== 'string' || typeof jwk.y !== 'string') {
+    throw new AamarvaError('Agent public key must be a valid NIST P-256 EC public key.', {
+      code: 'IDENTITY_KEY_INVALID',
     });
   }
-  const raw = Buffer.from(jwk.x, 'base64url');
-  if (raw.length !== 32 || raw.every((b) => b === 0)) {
-    throw new AamarvaError('Invalid X25519 public key coordinates.', {
-      code: 'AGENT_ENCRYPTION_KEY_INVALID',
-    });
-  }
-  return {
-    kty: 'OKP',
-    crv: 'X25519',
-    x: jwk.x,
-  };
+  const x = padP256Coordinate(Buffer.from(jwk.x, 'base64url'), 'x');
+  const y = padP256Coordinate(Buffer.from(jwk.y, 'base64url'), 'y');
+  return new Uint8Array(Buffer.concat([Buffer.from([0x04]), x, y]));
 }
 
-export function importX25519PublicKey(key: AgentEncryptionKeyJWK | string | crypto.KeyObject | any): crypto.KeyObject {
-  if (!key) {
-    throw new AamarvaError('Missing X25519 agent encryption public key.', {
-      code: 'AGENT_ENCRYPTION_KEY_UNAVAILABLE',
-    });
-  }
-  if (typeof key === 'object' && typeof key.export === 'function') {
-    if (key.type === 'private') {
-      const derived = crypto.createPublicKey(key);
-      validateX25519PublicKeyObject(derived);
-      return derived;
-    }
-    validateX25519PublicKeyObject(key);
-    return key;
-  }
-  if (typeof key === 'object' && key.publicKey && typeof key.publicKey.export === 'function') {
-    validateX25519PublicKeyObject(key.publicKey);
-    return key.publicKey;
-  }
-  if (typeof key === 'string') {
-    const trimmed = key.trim();
-    if (!trimmed) {
-      throw new AamarvaError('Empty X25519 public key provided.', {
-        code: 'AGENT_ENCRYPTION_KEY_INVALID',
-      });
-    }
-    if (trimmed.startsWith('{')) {
-      try {
-        return importX25519PublicKey(JSON.parse(trimmed));
-      } catch (err: any) {
-        if (err instanceof AamarvaError) throw err;
-        throw new AamarvaError(`Malformed X25519 JWK string: ${err.message}`, {
-          code: 'AGENT_ENCRYPTION_KEY_INVALID',
-          cause: err,
-        });
-      }
-    }
-    try {
-      const pub = crypto.createPublicKey({ key: trimmed, format: 'pem', type: 'spki' });
-      validateX25519PublicKeyObject(pub);
-      return pub;
-    } catch (err: any) {
-      if (err instanceof AamarvaError) throw err;
-      throw new AamarvaError(`Invalid X25519 PEM public key: ${err.message}`, {
-        code: 'AGENT_ENCRYPTION_KEY_INVALID',
-        cause: err,
-      });
-    }
-  }
-  if (typeof key === 'object') {
-    if (key.kty !== 'OKP' || key.crv !== 'X25519' || typeof key.x !== 'string') {
-      throw new AamarvaError('Invalid X25519 JWK: expected kty=OKP, crv=X25519, and string x.', {
-        code: 'AGENT_ENCRYPTION_KEY_INVALID',
-      });
-    }
-    const raw = Buffer.from(key.x, 'base64url');
-    if (raw.length !== 32 || raw.every((b) => b === 0)) {
-      throw new AamarvaError('Invalid X25519 JWK raw coordinate length or value.', {
-        code: 'AGENT_ENCRYPTION_KEY_INVALID',
-      });
-    }
-    try {
-      const pub = crypto.createPublicKey({
-        key: { kty: 'OKP', crv: 'X25519', x: key.x },
-        format: 'jwk',
-      });
-      validateX25519PublicKeyObject(pub);
-      return pub;
-    } catch (err: any) {
-      if (err instanceof AamarvaError) throw err;
-      throw new AamarvaError(`Failed to import X25519 JWK: ${err.message}`, {
-        code: 'AGENT_ENCRYPTION_KEY_INVALID',
-        cause: err,
-      });
-    }
-  }
-  throw new AamarvaError('Unsupported X25519 public key format.', {
-    code: 'AGENT_ENCRYPTION_KEY_INVALID',
-  });
-}
-
-export function exportX25519PublicKeyJWK(keyOrKp: AgentEncryptionKeyJWK | string | crypto.KeyObject | any): AgentEncryptionKeyJWK {
-  const pub = importX25519PublicKey(keyOrKp);
-  return validateX25519PublicKeyObject(pub);
-}
-
-export function computeX25519KeyFingerprint(key: AgentEncryptionKeyJWK | string | crypto.KeyObject | any): string {
-  const jwk = exportX25519PublicKeyJWK(key);
-  const canonicalJwk = JSON.stringify({
-    crv: 'X25519',
-    kty: 'OKP',
-    x: jwk.x,
-  });
-  const hash = crypto.createHash('sha256').update(canonicalJwk, 'utf8').digest('hex').toUpperCase();
-  return 'SHA256:' + hash.match(/.{1,2}/g)!.join(':');
-}
-
-export function computeAgentEncryptionKeyId(
-  agentId: string,
-  publicKey: AgentEncryptionKeyJWK | string | crypto.KeyObject | any,
-  keyVersion: number
-): string {
-  const normId = normalizeAgentId(agentId) || 'DEFAULT';
-  const fp = computeX25519KeyFingerprint(publicKey);
-  const digest = sha256Hex(`${normId}|${keyVersion}|${fp}`);
-  return `amv_ak_${digest.slice(0, 16)}`;
-}
-
-function sanitizeKeyStoreToken(raw: string): string {
-  return String(raw || '').replace(/[^A-Za-z0-9._:@-]/g, '_');
-}
-
-function getEncSlotName(agentId: string, version: number): string {
-  const norm = sanitizeKeyStoreToken(normalizeAgentId(agentId) || 'DEFAULT');
-  return `enc_x25519_${norm}_v${version}`;
-}
-
-function getEncRevokedByIdSlot(agentId: string, keyId: string): string {
-  const norm = sanitizeKeyStoreToken(normalizeAgentId(agentId) || 'DEFAULT');
-  return `enc_x25519_rev_${norm}_${sanitizeKeyStoreToken(keyId)}`;
-}
-
-function getEncRevokedByVerSlot(agentId: string, version: number): string {
-  const norm = sanitizeKeyStoreToken(normalizeAgentId(agentId) || 'DEFAULT');
-  return `enc_x25519_rev_${norm}_v${version}`;
-}
-
-export function isAgentEncryptionKeyRevoked(agentId: string, keyId?: string, keyVersion?: number): boolean {
-  const store = getKeyStore();
-  if (keyId && store.loadPrivateKey(getEncRevokedByIdSlot(agentId, keyId))) {
-    return true;
-  }
-  if (keyVersion !== undefined && store.loadPrivateKey(getEncRevokedByVerSlot(agentId, keyVersion))) {
-    return true;
-  }
-  return false;
-}
-
-export interface LocalAgentEncryptionKeyInfo {
-  privateKey: crypto.KeyObject;
-  publicKey: crypto.KeyObject;
-  publicKeyJwk: AgentEncryptionKeyJWK;
-  fingerprint: string;
-  keyId: string;
-  keyVersion: number;
-}
-
-function loadVersionedX25519Entry(
-  store: KeyStore,
-  agentId: string,
-  version: number
-): LocalAgentEncryptionKeyInfo | null {
-  const pem = store.loadPrivateKey(getEncSlotName(agentId, version));
-  if (!pem || !pem.trim()) {
-    return null;
-  }
+function extractP256PrivateKeyScalar(
+  agentIdentityKey: { privateKey?: any; publicKey?: any } | crypto.KeyObject | string
+): { privKeyObj: crypto.KeyObject; d32: Uint8Array; pubJwk: ECJWK } {
+  let privKeyObj: crypto.KeyObject;
   try {
-    const privateKey = crypto.createPrivateKey({ key: pem, format: 'pem', type: 'pkcs8' });
-    if (privateKey.asymmetricKeyType !== 'x25519') {
-      throw new AamarvaError('Stored encryption key is not X25519.', {
-        code: 'AGENT_ENCRYPTION_KEY_INVALID',
-      });
+    if (typeof agentIdentityKey === 'string') {
+      privKeyObj = crypto.createPrivateKey({ key: agentIdentityKey, format: 'pem', type: 'pkcs8' });
+    } else if (agentIdentityKey && typeof (agentIdentityKey as any).privateKey?.export === 'function') {
+      privKeyObj = (agentIdentityKey as any).privateKey;
+    } else if (agentIdentityKey && typeof (agentIdentityKey as any).export === 'function') {
+      privKeyObj = agentIdentityKey as crypto.KeyObject;
+    } else {
+      throw new Error('Missing private key');
     }
-    const publicKey = crypto.createPublicKey(privateKey);
-    const publicKeyJwk = exportX25519PublicKeyJWK(publicKey);
-    const fingerprint = computeX25519KeyFingerprint(publicKeyJwk);
-    const keyId = computeAgentEncryptionKeyId(agentId, publicKeyJwk, version);
-    return {
-      privateKey,
-      publicKey,
-      publicKeyJwk,
-      fingerprint,
-      keyId,
-      keyVersion: version,
-    };
+    if (privKeyObj.type !== 'private' || privKeyObj.asymmetricKeyType !== 'ec') {
+      throw new Error('Private key must be a NIST P-256 EC private key');
+    }
   } catch (err: any) {
-    if (err instanceof AamarvaError) throw err;
-    throw new AamarvaError(`Failed to load stored X25519 encryption key: ${err.message}`, {
-      code: 'AGENT_ENCRYPTION_KEY_INVALID',
+    throw new AamarvaError(`Cannot decrypt gateway token without agent P-256 identity private key: ${err.message}`, {
+      code: 'TOKEN_DECRYPTION_FAILED',
       cause: err,
     });
   }
-}
 
-function discoverStoredX25519Versions(store: KeyStore, agentId: string): LocalAgentEncryptionKeyInfo[] {
-  const found: LocalAgentEncryptionKeyInfo[] = [];
-  for (let ver = 1; ver <= 1024; ver++) {
-    const entry = loadVersionedX25519Entry(store, agentId, ver);
-    if (!entry) {
-      break;
-    }
-    found.push(entry);
-  }
-  return found;
-}
-
-export function resetLocalAgentEncryptionKeys(): void {
-  // No-op when InMemoryKeyStore is swapped via resetLocalIdentityKeyPair();
-  // exists as explicit public helper alongside identity reset.
-  if (activeKeyStore instanceof InMemoryKeyStore) {
-    activeKeyStore = new InMemoryKeyStore();
-  }
-}
-
-export function getLocalAgentEncryptionKeyPair(
-  agentId = 'default',
-  options: {
-    keyId?: string;
-    keyVersion?: number;
-    requirePersistent?: boolean;
-    createIfMissing?: boolean;
-  } = {}
-): LocalAgentEncryptionKeyInfo {
-  const store = ensurePersistentKeyStore(options.requirePersistent);
-  const normId = normalizeAgentId(agentId) || 'DEFAULT';
-  const versions = discoverStoredX25519Versions(store, normId);
-
-  if (options.keyId !== undefined || options.keyVersion !== undefined) {
-    if (options.keyVersion !== undefined && (!Number.isInteger(options.keyVersion) || options.keyVersion < 1)) {
-      throw new AamarvaError('Invalid agent encryption keyVersion: must be integer >= 1.', {
-        code: 'AGENT_ENCRYPTION_KEY_INVALID',
-      });
-    }
-    if (isAgentEncryptionKeyRevoked(normId, options.keyId, options.keyVersion)) {
-      throw new AamarvaError(
-        `Agent encryption key (${options.keyId || `v${options.keyVersion}`}) has been revoked.`,
-        { code: 'AGENT_ENCRYPTION_KEY_REVOKED' }
-      );
-    }
-
-    const match = versions.find((v) => {
-      if (options.keyId && v.keyId !== options.keyId) return false;
-      if (options.keyVersion !== undefined && v.keyVersion !== options.keyVersion) return false;
-      return true;
-    });
-
-    if (!match) {
-      throw new AamarvaError(
-        `Agent encryption key (${options.keyId || `v${options.keyVersion}`}) is unavailable locally; refusing to silently generate a mismatched replacement.`,
-        { code: 'AGENT_ENCRYPTION_KEY_UNAVAILABLE' }
-      );
-    }
-
-    if (isAgentEncryptionKeyRevoked(normId, match.keyId, match.keyVersion)) {
-      throw new AamarvaError(`Agent encryption key "${match.keyId}" has been revoked.`, {
-        code: 'AGENT_ENCRYPTION_KEY_REVOKED',
-      });
-    }
-    return match;
-  }
-
-  for (let i = versions.length - 1; i >= 0; i--) {
-    const candidate = versions[i];
-    if (!isAgentEncryptionKeyRevoked(normId, candidate.keyId, candidate.keyVersion)) {
-      return candidate;
-    }
-  }
-
-  if (options.createIfMissing === false) {
-    throw new AamarvaError(`No active X25519 encryption key available locally for agent "${normId}".`, {
-      code: 'AGENT_ENCRYPTION_KEY_UNAVAILABLE',
+  const privJwk = privKeyObj.export({ format: 'jwk' });
+  if (privJwk.kty !== 'EC' || privJwk.crv !== 'P-256' || !privJwk.d || !privJwk.x || !privJwk.y) {
+    throw new AamarvaError('Invalid P-256 private key JWK material.', {
+      code: 'TOKEN_DECRYPTION_FAILED',
     });
   }
 
-  const nextVersion = versions.length + 1;
-  const kp = generateX25519KeyPair();
-  const privPem = kp.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
-  store.savePrivateKey(privPem, getEncSlotName(normId, nextVersion));
-  const publicKeyJwk = exportX25519PublicKeyJWK(kp.publicKey);
-  const fingerprint = computeX25519KeyFingerprint(publicKeyJwk);
-  const keyId = computeAgentEncryptionKeyId(normId, publicKeyJwk, nextVersion);
-
-  return {
-    privateKey: kp.privateKey,
-    publicKey: kp.publicKey,
-    publicKeyJwk,
-    fingerprint,
-    keyId,
-    keyVersion: nextVersion,
+  const d32 = new Uint8Array(padP256Coordinate(Buffer.from(privJwk.d, 'base64url'), 'd'));
+  const pubJwk: ECJWK = {
+    kty: 'EC',
+    crv: 'P-256',
+    x: privJwk.x,
+    y: privJwk.y,
   };
+  return { privKeyObj, d32, pubJwk };
 }
 
-export function getLocalAgentEncryptionPublicKeyJWK(
-  agentId = 'default',
-  options: { keyId?: string; keyVersion?: number; requirePersistent?: boolean; createIfMissing?: boolean } = {}
-): AgentEncryptionKeyJWK {
-  return getLocalAgentEncryptionKeyPair(agentId, options).publicKeyJwk;
-}
-
-export function revokeLocalAgentEncryptionKeyPair(
-  agentId = 'default',
-  keyIdOrVersion?: string | number
-): { revokedKeyIds: string[]; revokedVersions: number[] } {
-  const store = getKeyStore();
-  const normId = normalizeAgentId(agentId) || 'DEFAULT';
-  const versions = discoverStoredX25519Versions(store, normId);
-  const revokedKeyIds: string[] = [];
-  const revokedVersions: number[] = [];
-
-  for (const entry of versions) {
-    const matches =
-      keyIdOrVersion === undefined ||
-      entry.keyId === keyIdOrVersion ||
-      entry.keyVersion === keyIdOrVersion;
-    if (matches) {
-      const marker = `revoked:${new Date().toISOString()}`;
-      store.savePrivateKey(marker, getEncRevokedByIdSlot(normId, entry.keyId));
-      store.savePrivateKey(marker, getEncRevokedByVerSlot(normId, entry.keyVersion));
-      revokedKeyIds.push(entry.keyId);
-      revokedVersions.push(entry.keyVersion);
-    }
-  }
-
-  if (typeof keyIdOrVersion === 'string' && !revokedKeyIds.includes(keyIdOrVersion)) {
-    store.savePrivateKey(`revoked:${new Date().toISOString()}`, getEncRevokedByIdSlot(normId, keyIdOrVersion));
-    revokedKeyIds.push(keyIdOrVersion);
-  } else if (typeof keyIdOrVersion === 'number' && !revokedVersions.includes(keyIdOrVersion)) {
-    store.savePrivateKey(`revoked:${new Date().toISOString()}`, getEncRevokedByVerSlot(normId, keyIdOrVersion));
-    revokedVersions.push(keyIdOrVersion);
-  }
-
-  return { revokedKeyIds, revokedVersions };
-}
-
-export function rotateLocalAgentEncryptionKeyPair(
-  agentId = 'default',
-  options: { requirePersistent?: boolean; revokePrevious?: boolean } = {}
-): LocalAgentEncryptionKeyInfo & { previousKeyId?: string; previousKeyVersion?: number } {
-  const store = ensurePersistentKeyStore(options.requirePersistent);
-  const normId = normalizeAgentId(agentId) || 'DEFAULT';
-  const existing = discoverStoredX25519Versions(store, normId);
-  const prev = existing.length > 0 ? existing[existing.length - 1] : undefined;
-
-  if (options.revokePrevious && prev) {
-    revokeLocalAgentEncryptionKeyPair(normId, prev.keyId);
-  }
-
-  const nextVersion = existing.length + 1;
-  const kp = generateX25519KeyPair();
-  const privPem = kp.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
-  store.savePrivateKey(privPem, getEncSlotName(normId, nextVersion));
-
-  const publicKeyJwk = exportX25519PublicKeyJWK(kp.publicKey);
-  const fingerprint = computeX25519KeyFingerprint(publicKeyJwk);
-  const keyId = computeAgentEncryptionKeyId(normId, publicKeyJwk, nextVersion);
-
-  return {
-    privateKey: kp.privateKey,
-    publicKey: kp.publicKey,
-    publicKeyJwk,
-    fingerprint,
-    keyId,
-    keyVersion: nextVersion,
-    ...(prev ? { previousKeyId: prev.keyId, previousKeyVersion: prev.keyVersion } : {}),
-  };
-}
-
-export function createAgentEncryptionKeyBindingString(params: {
-  agentId: string;
-  keyId: string;
-  keyVersion: number;
-  fingerprint: string;
-  publicKey: AgentEncryptionKeyJWK | string | crypto.KeyObject | any;
-}): string {
-  const jwk = exportX25519PublicKeyJWK(params.publicKey);
-  const normAgent = normalizeAgentId(params.agentId);
-  if (!normAgent || !params.keyId?.trim() || !Number.isInteger(params.keyVersion) || params.keyVersion < 1) {
-    throw new AamarvaError('Invalid parameters for agent encryption key binding.', {
-      code: 'AGENT_ENCRYPTION_KEY_INVALID',
-    });
-  }
-  const jwkHash = sha256Hex(canonicalJsonStringify(jwk));
-  return `AAMARVA-AGENT-ENC-KEY:v1:${normAgent}:${params.keyId.trim()}:${params.keyVersion}:${params.fingerprint.trim()}:${jwkHash}`;
-}
-
-export function signAgentEncryptionKeyBinding(
-  identityPrivateKey: any,
-  params: {
-    agentId: string;
-    keyId: string;
-    keyVersion: number;
-    fingerprint: string;
-    publicKey: AgentEncryptionKeyJWK | string | crypto.KeyObject | any;
-  }
+export function createAamarvaIdentityAssertionPayload(
+  assertion: Omit<AamarvaIdentityAssertion, 'signature'> | AamarvaIdentityAssertion
 ): string {
-  const binding = createAgentEncryptionKeyBindingString(params);
-  try {
-    const privKey = typeof identityPrivateKey === 'string'
-      ? crypto.createPrivateKey({ key: identityPrivateKey, format: 'pem', type: 'pkcs8' })
-      : (identityPrivateKey?.privateKey || identityPrivateKey);
-    const sig = crypto.sign('SHA256', Buffer.from(binding, 'utf8'), {
-      key: privKey,
-      dsaEncoding: 'ieee-p1363',
-    });
-    return sig.toString('base64');
-  } catch (err: any) {
-    throw new AamarvaError(`Failed to sign agent encryption key binding: ${err.message}`, {
-      code: 'AGENT_ENCRYPTION_KEY_INVALID',
-      cause: err,
+  const normAgentId = normalizeAgentId(assertion?.agentId);
+  const agentName = typeof assertion?.agentName === 'string' ? assertion.agentName.trim() : '';
+  if (!normAgentId || !agentName || !assertion?.agentPublicKey) {
+    throw new AamarvaError('AAMARVA identity assertion requires agentPublicKey, agentId, and agentName.', {
+      code: 'AAMARVA_ASSERTION_INVALID',
     });
   }
-}
-
-export function verifyAgentEncryptionKeyBinding(
-  identityPublicKey: ECJWK | string | crypto.KeyObject | any,
-  params: {
-    agentId: string;
-    keyId: string;
-    keyVersion: number;
-    fingerprint: string;
-    publicKey: AgentEncryptionKeyJWK | string | crypto.KeyObject | any;
-  },
-  signatureBase64: string
-): boolean {
-  if (!signatureBase64 || typeof signatureBase64 !== 'string') {
-    return false;
+  const pubJwk = exportPublicKeyJWK(assertion.agentPublicKey);
+  if (pubJwk.kty !== 'EC' || pubJwk.crv !== 'P-256') {
+    throw new AamarvaError('AAMARVA identity assertion requires a valid P-256 agentPublicKey.', {
+      code: 'AAMARVA_ASSERTION_INVALID',
+    });
   }
-  try {
-    const computedFp = computeX25519KeyFingerprint(params.publicKey);
-    if (computedFp !== params.fingerprint) {
-      return false;
-    }
-    const expectedKeyId = computeAgentEncryptionKeyId(params.agentId, params.publicKey, params.keyVersion);
-    if (expectedKeyId !== params.keyId) {
-      return false;
-    }
-    const binding = createAgentEncryptionKeyBindingString(params);
-    const pubKey = importPublicKey(identityPublicKey);
-    const sigBuf = Buffer.from(signatureBase64, 'base64');
-    if (sigBuf.length === 64) {
-      return crypto.verify(
-        'SHA256',
-        Buffer.from(binding, 'utf8'),
-        { key: pubKey, dsaEncoding: 'ieee-p1363' },
-        sigBuf
-      );
-    }
-    return crypto.verify('SHA256', Buffer.from(binding, 'utf8'), pubKey, sigBuf);
-  } catch {
-    return false;
-  }
-}
-
-export function buildAgentEncryptionKeyRegistrationPayload(
-  agentId: string,
-  options: { requirePersistent?: boolean; keyInfo?: LocalAgentEncryptionKeyInfo } = {}
-): AgentEncryptionKeyRecord {
-  const keyInfo =
-    options.keyInfo ||
-    getLocalAgentEncryptionKeyPair(agentId, { requirePersistent: options.requirePersistent, createIfMissing: true });
-  const identityKp = getLocalIdentityKeyPair(agentId);
-  const identityPubJwk = exportPublicKeyJWK(identityKp.publicKey);
-  const signature = signAgentEncryptionKeyBinding(identityKp.privateKey, {
-    agentId,
-    keyId: keyInfo.keyId,
-    keyVersion: keyInfo.keyVersion,
-    fingerprint: keyInfo.fingerprint,
-    publicKey: keyInfo.publicKeyJwk,
-  });
-
-  return {
-    version: GATEWAY_PROTOCOL_VERSION,
-    agentId,
-    keyId: keyInfo.keyId,
-    keyVersion: keyInfo.keyVersion,
-    algorithm: 'X25519',
-    hpkeSuite: { ...GATEWAY_HPKE_SUITE },
-    publicKey: keyInfo.publicKeyJwk,
-    fingerprint: keyInfo.fingerprint,
-    identityPublicKey: identityPubJwk,
-    status: 'active',
-    signature,
-    createdAt: new Date().toISOString(),
-  };
-}
-
-export function createGatewayInstructionSigningPayload(
-  instruction: Omit<SignedExecutionInstruction, 'signature'> | SignedExecutionInstruction
-): string {
   return canonicalJsonStringify({
-    version: instruction.version,
-    instructionId: instruction.instructionId,
-    issuer: instruction.issuer,
-    audience: instruction.audience,
-    gatewayId: instruction.gatewayId,
-    agentId: normalizeAgentId(instruction.agentId),
-    ...(instruction.agentName !== undefined ? { agentName: instruction.agentName } : {}),
-    agentKeyId: instruction.agentKeyId,
-    agentKeyVersion: instruction.agentKeyVersion,
-    agentPublicKey: exportX25519PublicKeyJWK(instruction.agentPublicKey),
-    invocationId: instruction.invocationId,
-    mcpServerId: instruction.mcpServerId,
-    toolId: instruction.toolId,
-    approvedArguments: instruction.approvedArguments || {},
-    approvedArgsDigest: instruction.approvedArgsDigest,
-    ...(instruction.scope !== undefined ? { scope: instruction.scope } : {}),
-    decision: instruction.decision,
-    ...(instruction.hitlApprovalRef !== undefined ? { hitlApprovalRef: instruction.hitlApprovalRef } : {}),
-    iat: instruction.iat,
-    exp: instruction.exp,
-    issuerKeyId: instruction.issuerKeyId,
+    agentPublicKey: pubJwk,
+    agentId: normAgentId,
+    agentName,
   });
 }
 
-export function signGatewayInstruction(
-  issuerPrivateKey: any,
-  instruction: Omit<SignedExecutionInstruction, 'signature'>
+export function signAamarvaIdentityAssertion(
+  aamarvaPrivateKey: any,
+  assertion: Omit<AamarvaIdentityAssertion, 'signature'>
 ): string {
-  const payload = createGatewayInstructionSigningPayload(instruction);
+  const payload = createAamarvaIdentityAssertionPayload(assertion);
   try {
-    const privKey = typeof issuerPrivateKey === 'string'
-      ? crypto.createPrivateKey({ key: issuerPrivateKey, format: 'pem', type: 'pkcs8' })
-      : (issuerPrivateKey?.privateKey || issuerPrivateKey);
+    const privKey = typeof aamarvaPrivateKey === 'string'
+      ? crypto.createPrivateKey({ key: aamarvaPrivateKey, format: 'pem', type: 'pkcs8' })
+      : (aamarvaPrivateKey?.privateKey || aamarvaPrivateKey);
     const sig = crypto.sign('SHA256', Buffer.from(payload, 'utf8'), {
       key: privKey,
       dsaEncoding: 'ieee-p1363',
     });
     return sig.toString('base64');
   } catch (err: any) {
-    throw new AamarvaError(`Failed to sign gateway execution instruction: ${err.message}`, {
-      code: 'GATEWAY_INSTRUCTION_SIGN_FAILED',
+    throw new AamarvaError(`Failed to sign AAMARVA identity assertion: ${err.message}`, {
+      code: 'AAMARVA_ASSERTION_INVALID',
       cause: err,
     });
   }
 }
 
-export function verifyGatewayInstructionSignature(
-  issuerPublicKey: ECJWK | string | crypto.KeyObject | any,
-  instruction: SignedExecutionInstruction
+export function verifyAamarvaIdentityAssertion(
+  trustedAamarvaPublicKey: ECJWK | string | crypto.KeyObject | any,
+  assertion: AamarvaIdentityAssertion
 ): boolean {
-  if (!instruction || typeof instruction !== 'object' || typeof instruction.signature !== 'string' || !instruction.signature) {
+  if (!assertion || typeof assertion !== 'object' || typeof assertion.signature !== 'string' || !assertion.signature.trim()) {
     return false;
   }
   try {
-    const payload = createGatewayInstructionSigningPayload(instruction);
-    const pubKey = importPublicKey(issuerPublicKey);
-    const sigBuf = Buffer.from(instruction.signature, 'base64');
+    const payload = createAamarvaIdentityAssertionPayload(assertion);
+    const pubKey = importPublicKey(trustedAamarvaPublicKey);
+    const sigBuf = Buffer.from(assertion.signature, 'base64');
     if (sigBuf.length === 64) {
       return crypto.verify(
         'SHA256',
@@ -1888,10 +1435,8 @@ export function createGatewayTokenAad(params: {
   version: string;
   gatewayId: string;
   agentId: string;
-  agentKeyId: string;
-  agentKeyVersion: number;
-  invocationId: string;
-  instructionId: string;
+  agentName: string;
+  agentPublicKeyFingerprint: string;
   mcpServerId: string;
   toolId: string;
   approvedArgsDigest: string;
@@ -1903,10 +1448,8 @@ export function createGatewayTokenAad(params: {
     params.version,
     params.gatewayId,
     normalizeAgentId(params.agentId),
-    params.agentKeyId,
-    String(params.agentKeyVersion),
-    params.invocationId,
-    params.instructionId,
+    String(params.agentName || '').trim(),
+    params.agentPublicKeyFingerprint,
     params.mcpServerId,
     params.toolId,
     params.approvedArgsDigest,
@@ -1929,10 +1472,8 @@ export function createGatewayEnvelopeSigningPayload(
     gatewayKeyId: envelope.gatewayKeyId,
     gatewayUrl: envelope.gatewayUrl,
     agentId: normalizeAgentId(envelope.agentId),
-    agentKeyId: envelope.agentKeyId,
-    agentKeyVersion: envelope.agentKeyVersion,
-    invocationId: envelope.invocationId,
-    instructionId: envelope.instructionId,
+    agentName: String(envelope.agentName || '').trim(),
+    agentPublicKeyFingerprint: envelope.agentPublicKeyFingerprint,
     mcpServerId: envelope.mcpServerId,
     toolId: envelope.toolId,
     approvedArgsDigest: envelope.approvedArgsDigest,
@@ -1973,51 +1514,58 @@ export function verifyGatewayEnvelopeSignature(
 
 export async function sealGatewayTokenEnvelope(params: {
   tokenPayload: DecryptedGatewayTokenPayload;
-  agentPublicKey: AgentEncryptionKeyJWK | string | crypto.KeyObject | any;
+  agentPublicKey: ECJWK | string | crypto.KeyObject | any;
   gatewaySigningPrivateKey: any;
   gatewayKeyId: string;
   gatewayPublicKey?: ECJWK;
 }): Promise<GatewayTokenEnvelope> {
   const { tokenPayload, agentPublicKey, gatewaySigningPrivateKey, gatewayKeyId, gatewayPublicKey } = params;
-  const agentPubJwk = exportX25519PublicKeyJWK(agentPublicKey);
-  const rawRecipientPub = Buffer.from(agentPubJwk.x, 'base64url');
+  const computedFp = computeKeyFingerprint(agentPublicKey);
+  if (tokenPayload.agentPublicKeyFingerprint && tokenPayload.agentPublicKeyFingerprint !== computedFp) {
+    throw new AamarvaError('Token payload agentPublicKeyFingerprint does not match target P-256 agentPublicKey.', {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  const normalizedPayload: DecryptedGatewayTokenPayload = {
+    ...tokenPayload,
+    agentPublicKeyFingerprint: computedFp,
+  };
+
+  const rawRecipientPub65 = exportP256UncompressedPublicKey(agentPublicKey);
   const suite = getGatewayHpkeSuite();
-  const recipientHpkeKey = await suite.KEM.DeserializePublicKey(toExactArrayBuffer(rawRecipientPub));
+  const recipientHpkeKey = await suite.DeserializePublicKey(rawRecipientPub65);
 
-  const aadStr = createGatewayTokenAad(tokenPayload);
-  const infoStr = createGatewayTokenInfo(tokenPayload.gatewayId, tokenPayload.agentId);
+  const aadStr = createGatewayTokenAad(normalizedPayload);
+  const infoStr = createGatewayTokenInfo(normalizedPayload.gatewayId, normalizedPayload.agentId);
 
-  const senderCtx = await suite.CreateSenderContext({
-    recipientPublicKey: recipientHpkeKey,
-    info: toExactArrayBuffer(Buffer.from(infoStr, 'utf8')),
-  });
-
-  const ptBytes = Buffer.from(canonicalJsonStringify(tokenPayload), 'utf8');
-  const ctBuf = await senderCtx.Seal(
-    toExactArrayBuffer(ptBytes),
-    toExactArrayBuffer(Buffer.from(aadStr, 'utf8'))
+  const ptBytes = Buffer.from(canonicalJsonStringify(normalizedPayload), 'utf8');
+  const { encapsulatedSecret, ciphertext } = await suite.Seal(
+    recipientHpkeKey,
+    new Uint8Array(ptBytes),
+    {
+      aad: new Uint8Array(Buffer.from(aadStr, 'utf8')),
+      info: new Uint8Array(Buffer.from(infoStr, 'utf8')),
+    }
   );
 
   const unsignedEnvelope: Omit<GatewayTokenEnvelope, 'gatewaySignature'> = {
-    version: tokenPayload.version,
+    version: normalizedPayload.version,
     suite: { ...GATEWAY_HPKE_SUITE },
-    gatewayId: tokenPayload.gatewayId,
+    gatewayId: normalizedPayload.gatewayId,
     gatewayKeyId,
-    gatewayUrl: tokenPayload.gatewayUrl,
+    gatewayUrl: normalizedPayload.gatewayUrl,
     ...(gatewayPublicKey ? { gatewayPublicKey } : {}),
-    agentId: tokenPayload.agentId,
-    agentKeyId: tokenPayload.agentKeyId,
-    agentKeyVersion: tokenPayload.agentKeyVersion,
-    invocationId: tokenPayload.invocationId,
-    instructionId: tokenPayload.instructionId,
-    mcpServerId: tokenPayload.mcpServerId,
-    toolId: tokenPayload.toolId,
-    approvedArgsDigest: tokenPayload.approvedArgsDigest,
-    ...(tokenPayload.scope !== undefined ? { scope: tokenPayload.scope } : {}),
-    iat: tokenPayload.iat,
-    exp: tokenPayload.exp,
-    enc: Buffer.from(senderCtx.Enc).toString('base64'),
-    ciphertext: Buffer.from(ctBuf).toString('base64'),
+    agentId: normalizedPayload.agentId,
+    agentName: normalizedPayload.agentName,
+    agentPublicKeyFingerprint: computedFp,
+    mcpServerId: normalizedPayload.mcpServerId,
+    toolId: normalizedPayload.toolId,
+    approvedArgsDigest: normalizedPayload.approvedArgsDigest,
+    ...(normalizedPayload.scope !== undefined ? { scope: normalizedPayload.scope } : {}),
+    iat: normalizedPayload.iat,
+    exp: normalizedPayload.exp,
+    enc: Buffer.from(encapsulatedSecret).toString('base64'),
+    ciphertext: Buffer.from(ciphertext).toString('base64'),
     aad: aadStr,
     info: infoStr,
   };
@@ -2061,14 +1609,14 @@ function resolveTrustedGatewayKey(
 
 export async function openGatewayTokenEnvelope(
   envelope: GatewayTokenEnvelope,
-  agentEncryptionKey: { privateKey?: any; publicKey?: any } | crypto.KeyObject | string,
+  agentIdentityKey: { privateKey?: any; publicKey?: any } | crypto.KeyObject | string,
   trustedGatewayPublicKeys: Record<string, ECJWK | string> | ECJWK | string,
   expectedContext: {
     gatewayId?: string;
     gatewayUrl?: string;
     agentId?: string;
-    invocationId?: string;
-    instructionId?: string;
+    agentName?: string;
+    agentPublicKeyFingerprint?: string;
     mcpServerId?: string;
     toolId?: string;
     approvedArgsDigest?: string;
@@ -2136,11 +1684,14 @@ export async function openGatewayTokenEnvelope(
   if (expectedContext.agentId && normalizeAgentId(envelope.agentId) !== normalizeAgentId(expectedContext.agentId)) {
     throw new AamarvaError('Gateway token envelope agentId mismatch.', { code: 'AGENT_IDENTITY_MISMATCH' });
   }
-  if (expectedContext.invocationId && envelope.invocationId !== expectedContext.invocationId) {
-    throw new AamarvaError('Gateway token envelope invocationId mismatch.', { code: 'GATEWAY_ENVELOPE_INVALID' });
+  if (expectedContext.agentName && String(envelope.agentName || '').trim() !== expectedContext.agentName.trim()) {
+    throw new AamarvaError('Gateway token envelope agentName mismatch.', { code: 'AGENT_IDENTITY_MISMATCH' });
   }
-  if (expectedContext.instructionId && envelope.instructionId !== expectedContext.instructionId) {
-    throw new AamarvaError('Gateway token envelope instructionId mismatch.', { code: 'GATEWAY_ENVELOPE_INVALID' });
+  if (
+    expectedContext.agentPublicKeyFingerprint &&
+    envelope.agentPublicKeyFingerprint !== expectedContext.agentPublicKeyFingerprint
+  ) {
+    throw new AamarvaError('Gateway token envelope agentPublicKeyFingerprint mismatch.', { code: 'AGENT_IDENTITY_MISMATCH' });
   }
   if (expectedContext.mcpServerId && envelope.mcpServerId !== expectedContext.mcpServerId) {
     throw new AamarvaError('Gateway token envelope mcpServerId mismatch.', { code: 'GATEWAY_ENVELOPE_INVALID' });
@@ -2152,53 +1703,30 @@ export async function openGatewayTokenEnvelope(
     throw new AamarvaError('Gateway token envelope approvedArgsDigest mismatch.', { code: 'GATEWAY_ENVELOPE_INVALID' });
   }
 
-  // Extract private key (reject public keys or missing private keys)
-  let privKeyObj: crypto.KeyObject;
-  try {
-    if (typeof agentEncryptionKey === 'string') {
-      privKeyObj = crypto.createPrivateKey({ key: agentEncryptionKey, format: 'pem', type: 'pkcs8' });
-    } else if (agentEncryptionKey && typeof (agentEncryptionKey as any).privateKey?.export === 'function') {
-      privKeyObj = (agentEncryptionKey as any).privateKey;
-    } else if (agentEncryptionKey && typeof (agentEncryptionKey as any).export === 'function') {
-      privKeyObj = agentEncryptionKey as crypto.KeyObject;
-    } else {
-      throw new Error('Missing private key');
-    }
-    if (privKeyObj.type !== 'private' || privKeyObj.asymmetricKeyType !== 'x25519') {
-      throw new Error('Private key must be an X25519 private key');
-    }
-  } catch (err: any) {
-    throw new AamarvaError(`Cannot decrypt gateway token without agent X25519 private key: ${err.message}`, {
-      code: 'TOKEN_DECRYPTION_FAILED',
-      cause: err,
-    });
-  }
-
-  const privJwk = privKeyObj.export({ format: 'jwk' });
-  if (!privJwk.d || !privJwk.x) {
-    throw new AamarvaError('Invalid X25519 private key JWK material.', {
+  // Extract agent's P-256 identity private key (reject public keys or missing private keys)
+  const { d32, pubJwk } = extractP256PrivateKeyScalar(agentIdentityKey);
+  const localFp = computeKeyFingerprint(pubJwk);
+  if (envelope.agentPublicKeyFingerprint && envelope.agentPublicKeyFingerprint !== localFp) {
+    throw new AamarvaError('Gateway token envelope is sealed to a different agent P-256 public key.', {
       code: 'TOKEN_DECRYPTION_FAILED',
     });
   }
 
-  let plaintextBytes: ArrayBuffer;
+  let plaintextBytes: Uint8Array;
   try {
     const suite = getGatewayHpkeSuite();
-    const rawPriv = Buffer.from(privJwk.d, 'base64url');
-    const rawPub = Buffer.from(privJwk.x, 'base64url');
-    const hpkePriv = await suite.KEM.DeserializePrivateKey(toExactArrayBuffer(rawPriv), false);
-    const hpkePub = await suite.KEM.DeserializePublicKey(toExactArrayBuffer(rawPub));
+    const hpkePriv = await suite.DeserializePrivateKey(d32, true);
     const encBuf = Buffer.from(envelope.enc, 'base64');
     const ctBuf = Buffer.from(envelope.ciphertext, 'base64');
 
-    const recipientCtx = await suite.CreateRecipientContext({
-      recipientKey: { privateKey: hpkePriv, publicKey: hpkePub },
-      enc: toExactArrayBuffer(encBuf),
-      info: toExactArrayBuffer(Buffer.from(expectedInfo, 'utf8')),
-    });
-    plaintextBytes = await recipientCtx.Open(
-      toExactArrayBuffer(ctBuf),
-      toExactArrayBuffer(Buffer.from(expectedAad, 'utf8'))
+    plaintextBytes = await suite.Open(
+      hpkePriv,
+      new Uint8Array(encBuf),
+      new Uint8Array(ctBuf),
+      {
+        aad: new Uint8Array(Buffer.from(expectedAad, 'utf8')),
+        info: new Uint8Array(Buffer.from(expectedInfo, 'utf8')),
+      }
     );
   } catch (err: any) {
     throw new AamarvaError(`RFC 9180 HPKE token decryption failed: ${err?.message || 'decryption error'}`, {
@@ -2227,10 +1755,8 @@ export async function openGatewayTokenEnvelope(
     payload.gatewayId !== envelope.gatewayId ||
     payload.gatewayUrl !== envelope.gatewayUrl ||
     normalizeAgentId(payload.agentId) !== normalizeAgentId(envelope.agentId) ||
-    payload.agentKeyId !== envelope.agentKeyId ||
-    payload.agentKeyVersion !== envelope.agentKeyVersion ||
-    payload.invocationId !== envelope.invocationId ||
-    payload.instructionId !== envelope.instructionId ||
+    String(payload.agentName || '').trim() !== String(envelope.agentName || '').trim() ||
+    payload.agentPublicKeyFingerprint !== envelope.agentPublicKeyFingerprint ||
     payload.mcpServerId !== envelope.mcpServerId ||
     payload.toolId !== envelope.toolId ||
     payload.approvedArgsDigest !== envelope.approvedArgsDigest
@@ -2255,9 +1781,6 @@ export interface GatewayPopPayloadParams {
   tokenSha256: string;
   gatewayId: string;
   agentId: string;
-  agentKeyId: string;
-  invocationId: string;
-  instructionId: string;
   mcpServerId: string;
   toolId: string;
   approvedArgsDigest: string;
@@ -2272,9 +1795,6 @@ export function createGatewayPopSigningPayload(params: GatewayPopPayloadParams):
     params.tokenSha256,
     params.gatewayId,
     normalizeAgentId(params.agentId),
-    params.agentKeyId,
-    params.invocationId,
-    params.instructionId,
     params.mcpServerId,
     params.toolId,
     params.approvedArgsDigest,
@@ -2321,6 +1841,52 @@ export function verifyGatewayPop(
         { key: pubKey, dsaEncoding: 'ieee-p1363' },
         sigBuf
       );
+    }
+    return crypto.verify('SHA256', Buffer.from(payload, 'utf8'), pubKey, sigBuf);
+  } catch {
+    return false;
+  }
+}
+
+export function createGatewayInstructionSigningPayload(inst: Record<string, any>): string {
+  return canonicalJsonStringify({
+    version: inst.version,
+    instructionId: inst.instructionId,
+    issuer: inst.issuer,
+    audience: inst.audience,
+    gatewayId: inst.gatewayId,
+    agentId: normalizeAgentId(inst.agentId),
+    agentKeyId: inst.agentKeyId,
+    agentKeyVersion: inst.agentKeyVersion,
+    invocationId: inst.invocationId,
+    mcpServerId: inst.mcpServerId,
+    toolId: inst.toolId,
+    approvedArgsDigest: inst.approvedArgsDigest,
+    decision: inst.decision,
+    iat: inst.iat,
+    exp: inst.exp,
+  });
+}
+
+export function signGatewayInstruction(privateKey: any, inst: Record<string, any>): string {
+  const payload = createGatewayInstructionSigningPayload(inst);
+  const privKey = typeof privateKey === 'string'
+    ? crypto.createPrivateKey({ key: privateKey, format: 'pem', type: 'pkcs8' })
+    : (privateKey?.privateKey || privateKey);
+  const sig = crypto.sign('SHA256', Buffer.from(payload, 'utf8'), { key: privKey, dsaEncoding: 'ieee-p1363' });
+  return sig.toString('base64');
+}
+
+export function verifyGatewayInstructionSignature(publicKey: any, inst: Record<string, any>): boolean {
+  if (!inst.signature || typeof inst.signature !== 'string') {
+    return false;
+  }
+  try {
+    const payload = createGatewayInstructionSigningPayload(inst);
+    const pubKey = importPublicKey(publicKey);
+    const sigBuf = Buffer.from(inst.signature, 'base64');
+    if (sigBuf.length === 64) {
+      return crypto.verify('SHA256', Buffer.from(payload, 'utf8'), { key: pubKey, dsaEncoding: 'ieee-p1363' }, sigBuf);
     }
     return crypto.verify('SHA256', Buffer.from(payload, 'utf8'), pubKey, sigBuf);
   } catch {

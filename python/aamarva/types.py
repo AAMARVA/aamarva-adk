@@ -106,6 +106,8 @@ class WatchtowerStreamTicket:
     streamUrl: str
     expiresAt: str
 
+GATEWAY_PROTOCOL_VERSION = "aamarva.gateway.v1"
+
 @dataclass
 class FloorTool:
     id: str
@@ -114,6 +116,9 @@ class FloorTool:
     inputSchema: Dict[str, Any]
     accessStatus: str
     requestId: Optional[str] = None
+    mcpServerId: Optional[str] = None
+    gatewayId: Optional[str] = None
+    gatewayUrl: Optional[str] = None
 
 @dataclass
 class FloorToolInvokeResult:
@@ -121,9 +126,19 @@ class FloorToolInvokeResult:
     requestId: Optional[str] = None
     invocationId: Optional[str] = None
     toolId: Optional[str] = None
+    agentId: Optional[str] = None
+    agentName: Optional[str] = None
+    mcpServerId: Optional[str] = None
+    gatewayId: Optional[str] = None
+    gatewayUrl: Optional[str] = None
+    approvedArgsDigest: Optional[str] = None
+    approvedArguments: Optional[Dict[str, Any]] = None
+    scope: Optional[Union[str, List[str]]] = None
+    expiresAt: Optional[str] = None
+    verificationInfo: Optional[Dict[str, Any]] = None
+    gatewayEnvelope: Optional[Dict[str, Any]] = None
     result: Optional[Any] = None
     message: Optional[str] = None
-    serverUrl: Optional[str] = None
 
 @dataclass
 class FloorAccessRequestStatus:
@@ -132,6 +147,16 @@ class FloorAccessRequestStatus:
     toolId: Optional[str] = None
     invocationId: Optional[str] = None
     agentId: Optional[str] = None
+    agentName: Optional[str] = None
+    mcpServerId: Optional[str] = None
+    gatewayId: Optional[str] = None
+    gatewayUrl: Optional[str] = None
+    approvedArgsDigest: Optional[str] = None
+    approvedArguments: Optional[Dict[str, Any]] = None
+    scope: Optional[Union[str, List[str]]] = None
+    expiresAt: Optional[str] = None
+    verificationInfo: Optional[Dict[str, Any]] = None
+    gatewayEnvelope: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
     createdAt: Optional[str] = None
     updatedAt: Optional[str] = None

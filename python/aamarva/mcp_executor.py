@@ -1,14 +1,11 @@
 """
-External MCP Execution Engine for AAMARVA FLOOR Tool Governance (Python)
+MCP Tool Argument Validator & Gateway Fail-Closed Guard (Python)
 
-Establishes genuine connection to authorized MCP servers, validates schema,
-injects credentials securely without leaks, and returns verified execution results.
+Direct external MCP server invocation from the ADK is strictly prohibited.
+All tool executions must pass through the Three-Party Mandatory MCP Adapter Gateway
+(AAMARVA relay -> RFC 9180 P-256 HPKE local decryption -> /gateway/mcp PoP redemption).
 """
 
-import json
-import urllib.request
-import urllib.error
-import urllib.parse
 from typing import Dict, Any, Optional
 from .errors import AamarvaError, AamarvaValidationError
 
@@ -36,126 +33,18 @@ def validate_tool_arguments(
 
 
 def invoke_external_mcp_tool(
-    server_url: str,
-    tool_id: str,
+    server_url: str = "",
+    tool_id: str = "",
     args: Optional[Dict[str, Any]] = None,
     auth: Optional[Dict[str, Any]] = None,
     input_schema: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """
-    Executes an external MCP tool over HTTP JSON-RPC after authorization approval.
+    Direct external MCP execution is disabled in the AAMARVA ADK.
+    Raises GATEWAY_EXECUTION_REQUIRED unconditionally.
     """
-    if not server_url or not isinstance(server_url, str) or not server_url.strip():
-        raise AamarvaError(
-            "Cannot invoke MCP tool: valid MCP serverUrl is required.",
-            code="FLOOR_EXECUTION_FAILED",
-        )
-
-    parsed_url = urllib.parse.urlparse(server_url.strip())
-    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
-        raise AamarvaError(
-            "Cannot invoke MCP tool: malformed or unsupported MCP serverUrl.",
-            code="FLOOR_EXECUTION_FAILED",
-        )
-
-    if not tool_id or not isinstance(tool_id, str) or not tool_id.strip():
-        raise AamarvaError(
-            "Cannot invoke MCP tool: tool_id is required.",
-            code="FLOOR_EXECUTION_FAILED",
-        )
-
-    clean_tool_id = tool_id.strip()
-    args = args or {}
-    validate_tool_arguments(clean_tool_id, args, input_schema)
-
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream, */*",
-    }
-
-    if auth and isinstance(auth, dict):
-        auth_type = str(auth.get("type") or auth.get("authType") or "").strip()
-        header_name = str(auth.get("headerName") or auth.get("authHeaderName") or "").strip()
-        token = auth.get("token") or (auth.get("headerValue") if auth_type.lower() == "bearer" else None)
-        if token or auth_type.lower() == "bearer":
-            tok = str(token or auth.get("headerValue") or "").strip()
-            if tok:
-                bearer_val = tok if tok.lower().startswith("bearer ") else f"Bearer {tok}"
-                headers[header_name or "Authorization"] = bearer_val
-        elif auth.get("apiKey") or auth_type.lower() == "apikey":
-            key_val = auth.get("apiKey") or auth.get("headerValue")
-            if key_val:
-                headers[header_name or "X-API-Key"] = str(key_val)
-        elif header_name and auth.get("headerValue"):
-            headers[header_name] = str(auth["headerValue"])
-
-        custom_headers = auth.get("headers")
-        if isinstance(custom_headers, dict):
-            for k, v in custom_headers.items():
-                if isinstance(v, str):
-                    headers[k] = v
-
-    json_rpc_payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": clean_tool_id,
-            "arguments": args,
-        },
-    }
-
-    req_data = json.dumps(json_rpc_payload).encode("utf-8")
-    req = urllib.request.Request(
-        server_url.strip(),
-        data=req_data,
-        headers=headers,
-        method="POST",
+    raise AamarvaError(
+        "Direct external MCP tool invocation is disabled in the AAMARVA ADK. "
+        "All FLOOR tool executions must route through the Mandatory MCP Adapter Gateway (POST /gateway/mcp).",
+        code="GATEWAY_EXECUTION_REQUIRED",
     )
-
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            status_code = resp.getcode()
-            body = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as http_err:
-        raise AamarvaError(
-            f"MCP server rejected invocation with HTTP status {http_err.code}.",
-            code="MCP_INVOCATION_FAILED",
-        )
-    except Exception as net_err:
-        raise AamarvaError(
-            f"Failed to reach MCP server at endpoint: {str(net_err)}",
-            code="MCP_SERVER_UNREACHABLE",
-        )
-
-    try:
-        result_json = json.loads(body)
-    except Exception as parse_err:
-        raise AamarvaError(
-            "MCP server returned malformed non-JSON response.",
-            code="MCP_INVOCATION_FAILED",
-        )
-
-    if not isinstance(result_json, dict):
-        raise AamarvaError(
-            "MCP server returned non-dictionary response.",
-            code="MCP_INVOCATION_FAILED",
-        )
-
-    if "error" in result_json and result_json["error"]:
-        err_obj = result_json["error"]
-        err_msg = (
-            err_obj.get("message")
-            if isinstance(err_obj, dict)
-            else str(err_obj)
-        ) or "Unknown MCP tool error"
-        raise AamarvaError(
-            f"External MCP tool execution error: {err_msg}",
-            code="MCP_TOOL_ERROR",
-        )
-
-    if "result" in result_json:
-        return result_json["result"]
-    if "data" in result_json:
-        return result_json["data"]
-    return result_json

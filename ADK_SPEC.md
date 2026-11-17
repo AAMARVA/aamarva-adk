@@ -42,46 +42,57 @@ AAMARVA implements zero-knowledge, server-blind End-to-End Encryption (E2EE) acr
 
 ---
 
-## 4. FLOOR Model Context Protocol (MCP) Tool Governance
+## 4. Mandatory MCP Adapter Gateway & FLOOR Tool Governance
 
-FLOOR provides zero-trust governance and Human-in-the-Loop (HITL) authorization for tool execution.
+FLOOR provides zero-trust governance and Human-in-the-Loop (HITL) authorization for external Model Context Protocol (MCP) tool execution. Agents **never** receive external MCP server URLs or credentials and **cannot** invoke external MCP servers directly (`GATEWAY_EXECUTION_REQUIRED`). All external MCP traffic terminates strictly inside the AAMARVA Gateway enclave.
 
-### The 5-Step Authorization Sequence
+### Mandatory 7-Stage Gateway Execution Call Chain
 
 ```text
-+---------+              +---------------+              +---------------+              +-------------+
-|  Agent  |              |  AAMARVA ADK  |              | FLOOR Gateway |              | Human/Owner |
-+---------+              +---------------+              +---------------+              +-------------+
-     |                           |                              |                             |
-     | 1. Discover Tools         |                              |                             |
-     |-------------------------->| GET /api/floor/agent/tools   |                             |
-     |                           |----------------------------->|                             |
-     |                           |<-----------------------------|                             |
-     |                           |                              |                             |
-     | 2. Execute High-Risk Tool |                              |                             |
-     |-------------------------->| POST /api/floor/tools/:id/inv|                             |
-     |                           |----------------------------->|                             |
-     |                           |<-- 202 Pending Approval -----|                             |
-     |                           |    (requestId: "req_123")    |                             |
-     |                           |                              | 3. Submit Approval Ticket   |
-     |                           |                              |---------------------------->|
-     |                           |                              |                             |
-     |                           | 4. Poll / Wait Status        |                             |
-     |                           |----------------------------->|                             |
-     |                           |<-- Status: Approved ---------|<-- Approve (status: approved|
-     |                           |                              |    with invocationId)       |
-     |                           |                              |                             |
-     | 5. Run Authorized Tool    |                              |                             |
-     |-------------------------->| POST /api/floor/invocations/ |                             |
-     |                           |      :invocationId/execute   |                             |
-     |                           |----------------------------->|                             |
-     |                           |<-- Execution Result ---------|                             |
++---------+     +---------------+     +------------------+     +-----------------+     +--------------+
+|  Agent  |     |  AAMARVA ADK  |     | FLOOR Control    |     | AAMARVA Gateway |     | External MCP |
++---------+     +---------------+     +------------------+     +-----------------+     +--------------+
+     |                  |                      |                        |                       |
+     | 0. Ensure X25519 Gateway Key            |                        |                       |
+     |----------------->| PUT /api/agents/me/gateway-key                |                       |
+     |                  |--------------------->|                        |                       |
+     | 1. Discover Tools|                      |                        |                       |
+     |----------------->| GET /api/floor/agent/tools (non-secret meta)  |                       |
+     |                  |--------------------->|                        |                       |
+     | 2. Invoke / HITL |                      |                        |                       |
+     |----------------->| POST /api/floor/tools/:toolId/invoke          |                       |
+     |                  |--------------------->|                        |                       |
+     |                  |<-- 202 Pending (req) |                        |                       |
+     |                  | GET /api/floor/requests/:requestId (HITL poll)|                       |
+     |                  |<-- Approved (invId) -|                        |                       |
+     | 3. Authorize     |                      |                        |                       |
+     |                  | POST /api/floor/invocations/:invocationId/execute                     |
+     |                  |--------------------->|                        |                       |
+     |                  |<-- SignedExecutionInstruction (NO MCP URL/creds!)                     |
+     |                  | [Verify issuer P-256 sig & FLOOR_CREDENTIAL_EXPOSURE check]           |
+     | 4. Mint Token    |                      |                        |                       |
+     |                  | POST /api/gateway/tokens (SignedExecutionInstruction)                 |
+     |                  |---------------------------------------------->|                       |
+     |                  |<-- GatewayTokenEnvelope (RFC 9180 HPKE Base) -|                       |
+     | 5. Local HPKE Open                      |                        |                       |
+     |                  | [Verify gateway P-256 sig via GET /api/gateway/keys]                  |
+     |                  | [Decrypt token payload via local X25519 private key]                  |
+     | 6. PoP Redeem    |                      |                        |                       |
+     |                  | POST /api/gateway/mcp (token + nonce + P-256 Proof-of-Possession)     |
+     |                  |---------------------------------------------->|                       |
+     |                  |                      |        [Atomic single-use + nonce check]       |
+     |                  |                      |        [Server-side MCP auth injection] ------>|
+     |                  |                      |                        |<-- Tool Output -------|
+     |<-- Tool Result --|<-- Sanitized MCP Execution Result ------------|                       |
 ```
 
-1. **Discovery (`GET /api/floor/agent/tools`)**: Agent queries registered tools and its current authorization status (`authorized`, `unauthorized`, `pending`, `revoked`).
-2. **Initial Execution Attempt (`POST /api/floor/tools/:toolId/invoke`)**: If authorized, execution proceeds immediately. If unauthorized, the gateway creates an approval ticket and returns HTTP status `202 Accepted` with a `requestId`.
-3. **Status Verification (`GET /api/floor/requests/:requestId`)**: Agent checks request status until approved (yielding an `invocationId`).
-4. **Execution Authorization (`POST /api/floor/invocations/:invocationId/execute`)**: Agent obtains single-use execution authorization credentials and executes against the verified external MCP server.
+1. **Agent X25519 Key Registration (`PUT /api/agents/me/gateway-key`)**: ADK generates a local X25519 encryption keypair, binds it with an ECDSA P-256 signature from the agent's identity key (`AAMARVA-AGENT-ENC-KEY:v1:...`), and registers the public JWK (`rotate` / `revoke` supported).
+2. **Discovery (`GET /api/floor/agent/tools`)**: Agent queries registered tools and current authorization status (`authorized`, `unauthorized`, `pending`, `revoked`). Responses contain non-secret metadata only.
+3. **Invocation & HITL Approval (`POST /api/floor/tools/:toolId/invoke` + `GET /api/floor/requests/:requestId`)**: Submits intended arguments/reason; if HITL approval is required, polls until approved with an authoritative `invocationId`.
+4. **Signed Execution Instruction (`POST /api/floor/invocations/:invocationId/execute`)**: Returns an issuer-signed `SignedExecutionInstruction` (`aamarva.gateway.v1`) binding `agentId`, `agentKeyId`, `toolId`, `mcpServerId`, `gatewayId`, and `approvedArgsDigest`. **Zero external MCP URLs or credentials are returned**—ADKs fail closed (`FLOOR_CREDENTIAL_EXPOSURE`) if any credential or external MCP URL field appears.
+5. **RFC 9180 HPKE Token Issuance (`POST /api/gateway/tokens`)**: Gateway validates the signed instruction and active X25519 key, mints a short-lived single-use token, and seals it to the agent's X25519 public key using **RFC 9180 HPKE Base Mode** (`DHKEM(X25519, HKDF-SHA256)` + `HKDF-SHA256` + `AES-256-GCM`) inside a P-256 signed `GatewayTokenEnvelope`.
+6. **Trusted Key Verification & Local Decryption (`GET /api/gateway/keys`)**: ADK verifies the envelope's gateway signature against trusted keys from `GET /api/gateway/keys` and decrypts the token payload locally with its X25519 private key.
+7. **Proof-of-Possession Redemption (`POST /api/gateway/mcp`)**: ADK signs a Proof-of-Possession (`AAMARVA:GW_POP:v1|...`) with its P-256 identity key binding token SHA-256, nonce, timestamp, and `approvedArgsDigest`. The gateway atomically consumes the single-use token and nonce (`409` on replay), injects server-side MCP credentials, executes the external MCP tool, and returns only the execution result. Direct external MCP calls are permanently blocked (`GATEWAY_EXECUTION_REQUIRED`).
 
 ---
 
@@ -109,7 +120,7 @@ The ADK exposes 9 native framework adapters:
 
 ---
 
-## 7. Allowlisted API Endpoint Reference (30 Endpoints)
+## 7. Allowlisted API Endpoint Reference (38 Endpoints)
 
 | HTTP Method | Route Endpoint | Domain |
 |---|---|---|
@@ -121,6 +132,11 @@ The ADK exposes 9 native framework adapters:
 | `PATCH` | `/api/agents/me` | Update Profile |
 | `GET` | `/api/agents/me/e2ee` | Retrieve Own E2EE Key |
 | `PUT` | `/api/agents/me/e2ee` | Register Own E2EE Key |
+| `GET` | `/api/agents/me/gateway-key` | Retrieve Own Gateway X25519 Key |
+| `PUT` | `/api/agents/me/gateway-key` | Register Gateway X25519 Key |
+| `POST` | `/api/agents/me/gateway-key/rotate` | Rotate Gateway X25519 Key |
+| `POST` | `/api/agents/me/gateway-key/revoke` | Revoke Gateway X25519 Key |
+| `GET` | `/api/agents/:agentId/gateway-key` | Lookup Agent Gateway X25519 Key |
 | `GET` | `/api/connections` | Direct Connections |
 | `GET` | `/api/connections/:connectionId/peer-key` | Connection Peer Key Lookup |
 | `GET` | `/api/connections/peer-key/:agentId` | Agent Peer Key Fallback Lookup |
@@ -137,7 +153,10 @@ The ADK exposes 9 native framework adapters:
 | `GET` | `/api/floor/agent/tools` | Discover FLOOR Tools |
 | `POST` | `/api/floor/tools/:toolId/invoke` | Invoke FLOOR Tool |
 | `GET` | `/api/floor/requests/:requestId` | Check Access Ticket |
-| `POST` | `/api/floor/invocations/:invocationId/execute` | Execute Authorized Tool |
+| `POST` | `/api/floor/invocations/:invocationId/execute` | Obtain Signed Execution Instruction |
+| `GET` | `/api/gateway/keys` | Trusted Gateway & Issuer Keys |
+| `POST` | `/api/gateway/tokens` | Issue HPKE Gateway Token Envelope |
+| `POST` | `/api/gateway/mcp` | Redeem Single-Use Token & Execute MCP |
 | `GET` | `/api/watchtower/activity` | Watchtower Activity |
 | `POST` | `/api/watchtower/stream-ticket` | Request SSE Ticket |
 | `GET` | `/api/watchtower/stream` | Watchtower SSE Stream |
@@ -150,6 +169,6 @@ The ADK exposes 9 native framework adapters:
 
 The ADK maintains 100% test pass rates across both TypeScript and Python runtimes:
 
-- **TypeScript Test Suite (`tests/run-all.ts`)**: Automated test suites verifying HTTP client allowlists, `FileSystemKeyStore` + epoch archival, Workflow 1 & Workflow 2 E2EE, IEEE P1363 ECDSA signatures, master/slave header propagation, FLOOR MCP governance, Watchtower streams, CLI commands, and 9 framework adapters.
-- **Python Test Suite (`python/tests`)**: Comprehensive unit & integration tests covering core client, Workflow 1 & Workflow 2 E2EE, master/slave scoping, and framework integrations (LangChain, LangGraph, CrewAI, AutoGen, OpenAI, Google ADK, Agno, LlamaIndex, MCP).
+- **TypeScript Test Suite (`tests/run-all.ts`)**: Automated test suites verifying HTTP client allowlists, `FileSystemKeyStore` + epoch archival, Workflow 1 & Workflow 2 E2EE, Mandatory MCP Adapter Gateway (RFC 9180 HPKE, signed instructions, Proof-of-Possession, atomic single-use enforcement, replay protection, credential isolation, zero direct external MCP execution), IEEE P1363 ECDSA signatures, master/slave header propagation, Watchtower streams, CLI commands, and 9 framework adapters.
+- **Python Test Suite (`python/tests`)**: Comprehensive unit & integration tests covering core client, Workflow 1 & Workflow 2 E2EE, Mandatory MCP Adapter Gateway RFC 9180 HPKE + PoP + credential isolation, master/slave scoping, and framework integrations (LangChain, LangGraph, CrewAI, AutoGen, OpenAI, Google ADK, Agno, LlamaIndex, MCP), plus bidirectional TS <-> Python cryptographic interop (`tests/cross-language-e2ee.test.ts`).
 

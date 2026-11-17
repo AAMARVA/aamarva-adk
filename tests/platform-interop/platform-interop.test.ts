@@ -29,9 +29,8 @@ import {
   generateClusterKey,
   encryptClusterMessagePayload,
   decryptClusterMessagePayload,
-  assertSafeMcpServerUrl,
-  invokeExternalMcpTool,
 } from '../../src/index.js';
+import { invokeExternalMcpTool } from '../../src/mcp-executor.js';
 
 async function runPlatformInteropTests() {
   const tempKeyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aamarva-platform-interop-'));
@@ -500,92 +499,29 @@ async function runPlatformInteropTests() {
     });
     assert.strictEqual(approvedPoll.status, 'approved');
 
-    // Step 4 & 5: Redeem via /access and execute against mock MCP
+    // Step 4 & 5: Redeem via Mandatory MCP Adapter Gateway (zero direct external MCP calls)
     const redeemedResult = await floorClient.executeFloorTool(
       'tool_market_depth',
       { pair: 'ETH-USD' },
-      { invocationId: approvedPoll.invocationId, useAccessEndpoint: true }
+      { invocationId: approvedPoll.invocationId }
     );
     assert.strictEqual(redeemedResult.status, 'approved');
+    assert.strictEqual(redeemedResult.mcpServerId, 'mcp_srv_market_depth');
     assert.ok(redeemedResult.result);
+    assert.strictEqual(floorStore.directMcpCalls!.length, 0);
+    assert.strictEqual(floorStore.gatewayExecutedMcpCalls!.length, 1);
 
-    // SSRF Guard assertions
-    const blockedUrls = [
-      'http://external-mcp.example.com/mcp',
-      'https://127.0.0.1/mcp',
-      'https://169.254.169.254/latest/meta-data',
-      'https://10.0.0.5/mcp',
-      'https://192.168.1.10/mcp',
-      'https://[::1]/mcp',
-      'https://user:pass@external-mcp.example.com/mcp',
-      'https://metadata.google.internal/computeMetadata/v1',
-    ];
-    for (const bad of blockedUrls) {
-      await assert.rejects(
-        () => assertSafeMcpServerUrl(bad, { allowInsecureHttpForLocalhost: false, resolveDns: false }),
-        (err: any) => err instanceof AamarvaError && err.code === 'FLOOR_EXECUTION_FAILED',
-        `SSRF guard must block URL: ${bad}`
-      );
-    }
-
-    // Redirect blocking & custom_header + api_key auth test
-    const redirectFetch = (async () =>
-      new Response(null, { status: 302, headers: { Location: 'https://127.0.0.1/internal' } })) as typeof fetch;
+    // Direct external MCP executor must fail closed
     await assert.rejects(
       () =>
         invokeExternalMcpTool({
           serverUrl: 'https://mcp.example.com/rpc',
           toolId: 'tool_sec_edgar',
           args: { ticker: 'AAPL' },
-          fetchFn: redirectFetch,
         }),
-      (err: any) => err?.code === 'FLOOR_EXECUTION_FAILED'
+      (err: any) => err instanceof AamarvaError && err.code === 'GATEWAY_EXECUTION_REQUIRED'
     );
-
-    const capturedHeaders: Record<string, string> = {};
-    const headerCheckFetch = (async (_url: any, init: any) => {
-      Object.assign(capturedHeaders, init?.headers || {});
-      if ((init?.method || 'GET').toUpperCase() === 'GET') {
-        return new Response(null, { status: 405 });
-      }
-      const rpc = init?.body ? JSON.parse(String(init.body)) : {};
-      if (rpc?.method === 'initialize') {
-        return new Response(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            id: rpc.id ?? 0,
-            result: {
-              protocolVersion: '2024-11-05',
-              capabilities: { tools: {} },
-              serverInfo: { name: 'mock-mcp', version: '2.0.0' },
-            },
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
-      if (rpc?.method === 'notifications/initialized') {
-        return new Response(null, { status: 202 });
-      }
-      return new Response(
-        JSON.stringify({ jsonrpc: '2.0', id: rpc.id ?? 1, result: { content: [{ type: 'text', text: '{"ok":true}' }] } }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
-    }) as typeof fetch;
-
-    const customRes = await invokeExternalMcpTool({
-      serverUrl: 'https://mcp.example.com/rpc',
-      toolId: 'tool_sec_edgar',
-      args: { ticker: 'AAPL' },
-      auth: {
-        authType: 'custom_header',
-        authHeaderName: 'X-Floor-Grant',
-        headerValue: 'secret_custom_val',
-      },
-      fetchFn: headerCheckFetch,
-    });
-    assert.strictEqual(customRes?.content?.[0]?.text, '{"ok":true}');
-    assert.strictEqual(capturedHeaders['X-Floor-Grant'], 'secret_custom_val');
-    console.log('✓ FLOOR policy, HITL polling, /access redemption, auth headers, and SSRF guards verified.');
+    console.log('✓ FLOOR policy, HITL polling, Mandatory Gateway execution, and direct MCP block verified.');
 
     // -------------------------------------------------------------------------
     // 7. Watchtower SSE Streaming, Event Deduplication & Reconnect

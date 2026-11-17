@@ -125,7 +125,6 @@ export class AamarvaMcpServer {
             toolId: { type: 'string', description: 'Identifier of the tool to execute.' },
             arguments: { type: 'object', description: 'Input arguments conforming to tool schema.' },
             requestId: { type: 'string', description: 'Optional pending access request ID to check or resume.' },
-            invocationId: { type: 'string', description: 'Optional approved invocation ID.' },
             waitForApproval: { type: 'boolean', description: 'Optional flag to poll pending HITL approval before failing.' },
           },
           required: ['toolId', 'arguments'],
@@ -134,12 +133,10 @@ export class AamarvaMcpServer {
           toolId: string;
           arguments: Record<string, any>;
           requestId?: string;
-          invocationId?: string;
           waitForApproval?: boolean;
         }) =>
           client.executeFloorTool(args.toolId, args.arguments, {
             requestId: args.requestId,
-            invocationId: args.invocationId,
             waitForApproval: args.waitForApproval,
           }),
       },
