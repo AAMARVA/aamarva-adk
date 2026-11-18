@@ -227,10 +227,6 @@ export function normalizeFloorTool(raw: unknown): FloorTool {
   const schema = (obj.inputSchema || obj.input_schema || obj.parameters || { type: 'object' }) as Record<string, unknown>;
   const reqId = obj.requestId || obj.request_id || obj.pendingRequestId || obj.pending_request_id;
 
-  const mcpServerId = obj.mcpServerId || obj.mcp_server_id;
-  const gatewayId = obj.gatewayId || obj.gateway_id;
-  const gatewayUrl = obj.gatewayUrl || obj.gateway_url;
-
   return {
     id: String(obj.id || obj.toolId || obj.tool_id || ''),
     name: String(obj.name || ''),
@@ -238,9 +234,6 @@ export function normalizeFloorTool(raw: unknown): FloorTool {
     inputSchema: typeof schema === 'object' && schema !== null ? schema : { type: 'object' },
     accessStatus: String(obj.accessStatus || obj.access_status || obj.status || 'required').trim().toLowerCase(),
     ...(typeof reqId === 'string' && reqId.trim() ? { requestId: reqId.trim() } : {}),
-    ...(typeof mcpServerId === 'string' && mcpServerId.trim() ? { mcpServerId: mcpServerId.trim() } : {}),
-    ...(typeof gatewayId === 'string' && gatewayId.trim() ? { gatewayId: gatewayId.trim() } : {}),
-    ...(typeof gatewayUrl === 'string' && gatewayUrl.trim() ? { gatewayUrl: gatewayUrl.trim() } : {}),
   };
 }
 

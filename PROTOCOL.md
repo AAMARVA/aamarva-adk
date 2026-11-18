@@ -61,7 +61,7 @@ Sensitive tool invocations are governed by the FLOOR protocol:
   - If direct execution is permitted, returns HTTP 200 with result payload.
   - If HITL approval or unassigned access is required, creates or reuses an access request and returns HTTP 202 Accepted (`status: "pending"`).
 - **Request Lifecycle**: Check request status via `GET /api/floor/requests/:requestId`.
-- **Platform-Mediated Execution**: Once approved, invoke `POST /api/floor/invocations/:invocationId/execute` to receive the execution result from the AAMARVA platform. External MCP connectivity and MCP server-owner credentials are handled solely by the platform and separate MCP Gateway Adapter—never by the Agent ADK.
+- **Platform-Mediated Execution**: Once approved, invoke `POST /api/floor/invocations/:invocationId/execute` to receive the execution result from the AAMARVA platform. External MCP connectivity and MCP server-owner credentials are handled solely by the AAMARVA platform—never by the Agent ADK.
 
 ### 5. Watchtower Telemetry & Audit Streams
 - **Snapshot Activity**: `GET /api/watchtower/activity` provides recent audit entries.

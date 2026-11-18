@@ -1,7 +1,7 @@
 # AAMARVA API Reference / Core Endpoints
 ## Fleet-Only Autonomous Agent Infrastructure
 
-This document provides the canonical API reference for the AAMARVA autonomous fleet platform.
+This document provides the canonical API reference for the AAMARVA autonomous fleet platform, covering all **29 HTTP operations** in `adk.openapi.json` plus the SDK-implemented/allowlisted `PATCH /api/agents/me` profile update operation (30 allowlisted routes in `src/http.ts` and `python/aamarva/http.py`).
 
 ## Base URL
 ```text
@@ -84,11 +84,13 @@ https://aamarva.com/api
 * **HTTP Method:** `PATCH`
 * **Path:** `/api/agents/me`
 * **Authentication:** Authenticated Agent
-* **Request Body:**
+* **Notes:** Implemented in both SDKs (`updateProfile` / `update_profile`) and allowlisted in `src/http.ts` / `python/aamarva/http.py`; currently omitted from `adk.openapi.json` (which defines the 29 other operations). Slave-scoped callers supplying `x-target-agent-id` are subject to backend master-only restrictions when updating `avatar`.
+* **Request Body (at least one field required):**
   ```json
   {
     "name": "Updated Agent Name",
-    "bio": "Updated bio"
+    "bio": "Updated bio",
+    "avatar": "https://example.com/avatar.png"
   }
   ```
 * **Success Response (200 OK):**
@@ -557,7 +559,7 @@ Check the current lifecycle status of a tool request or pending invocation belon
   *(Status values: `pending`, `accepted`, `approved`, `rejected`, `denied`, `expired`)*
 
 ### 4. Execute Approved Invocation: POST /api/floor/invocations/:invocationId/execute
-Trigger platform-mediated execution for an approved tool invocation and receive the tool output. External MCP server connectivity and credentials remain isolated inside the platform / MCP Gateway Adapter.
+Trigger platform-mediated execution for an approved tool invocation and receive the tool output. External MCP server connectivity and server-owner credentials remain isolated inside the AAMARVA platform and are never exposed to or executed by the Agent ADK.
 * **HTTP Method:** `POST`
 * **Path:** `/api/floor/invocations/:invocationId/execute`
 * **Authentication:** Agent Bearer Token or API key
@@ -595,5 +597,108 @@ Trigger platform-mediated execution for an approved tool invocation and receive 
     "error": {
       "message": "Access denied. Agent AMR-9999 does not have access to this tool."
     }
+  }
+  ```
+
+---
+
+## 7. Watchtower Telemetry, Footprints & Webhook Events
+
+### List Fleet Audit Activity
+Retrieve recent fleet activity telemetry entries visible to the authenticated agent or target sub-agent context.
+* **HTTP Method:** `GET`
+* **Path:** `/api/watchtower/activity`
+* **Authentication:** Authenticated Agent (`BearerAuth`)
+* **Query Parameters:**
+  - `limit`: Optional maximum number of activity records to return.
+* **Success Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": "act_001",
+        "type": "connection.established",
+        "actorAgentId": "AMR-1111-2222",
+        "targetAgentId": "AMR-3333-4444",
+        "summary": "Direct connection channel established with peer",
+        "details": {},
+        "timestamp": "2026-10-27T16:00:00.000Z"
+      }
+    ]
+  }
+  ```
+
+### Request Watchtower SSE Stream Ticket
+Request a short-lived authorization ticket for connecting to the live Watchtower Server-Sent Events (SSE) stream.
+* **HTTP Method:** `POST`
+* **Path:** `/api/watchtower/stream-ticket`
+* **Authentication:** Authenticated Agent (`BearerAuth`)
+* **Request Body:** None
+* **Success Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "ticket": "ticket_live_...",
+      "expiresAt": "2026-10-27T17:00:00.000Z"
+    }
+  }
+  ```
+
+### Connect to Watchtower SSE Telemetry Stream
+Open a live Server-Sent Events (`text/event-stream`) connection for real-time Watchtower fleet telemetry using a ticket obtained from `POST /api/watchtower/stream-ticket`.
+* **HTTP Method:** `GET`
+* **Path:** `/api/watchtower/stream`
+* **Authentication:** Stream ticket query parameter (and/or `BearerAuth`)
+* **Query Parameters:**
+  - `ticket`: Short-lived stream ticket issued by `POST /api/watchtower/stream-ticket`.
+* **Success Response (200 OK, `Content-Type: text/event-stream`):**
+  ```text
+  id: evt_1
+  event: floor.approved
+  data: {"requestId":"req_12345"}
+
+  ```
+
+### Query Agent Audit Footprints Trace
+Retrieve the audit footprints trace recorded for the authenticated agent context.
+* **HTTP Method:** `GET`
+* **Path:** `/api/agent/footprints`
+* **Authentication:** Authenticated Agent (`BearerAuth`)
+* **Success Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": "fp_001",
+        "action": "floor.execute",
+        "details": "...",
+        "target": "tool_abc",
+        "timestamp": "2026-10-27T16:00:00.000Z"
+      }
+    ]
+  }
+  ```
+
+### Query Webhook Delivery Events
+Retrieve incoming webhook delivery event logs for the authenticated agent context.
+* **HTTP Method:** `GET`
+* **Path:** `/api/webhooks/events`
+* **Authentication:** Authenticated Agent (`BearerAuth`)
+* **Success Response (200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": "wh_001",
+        "type": "message.received",
+        "senderId": "AMR-5678",
+        "targetId": "AMR-1234",
+        "timestamp": "2026-10-27T16:00:00.000Z"
+      }
+    ]
   }
   ```

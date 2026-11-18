@@ -70,6 +70,22 @@ class TestAamarvaFleetClient(unittest.TestCase):
         self.assertTrue(is_approved_endpoint("PUT", "/agents/me/e2ee"))
         self.assertFalse(is_approved_endpoint("POST", "/agents/me/e2ee"))
 
+        removed_gateway_endpoints = [
+            ("GET", "/agents/me/gateway-key"),
+            ("PUT", "/agents/me/gateway-key"),
+            ("POST", "/agents/me/gateway-key/rotate"),
+            ("POST", "/agents/me/gateway-key/revoke"),
+            ("GET", "/agents/AMR-PEER-1/gateway-key"),
+            ("GET", "/gateway/keys"),
+            ("POST", "/gateway/tokens"),
+            ("POST", "/gateway/mcp"),
+        ]
+        for method, path in removed_gateway_endpoints:
+            self.assertFalse(is_approved_endpoint(method, path))
+            with self.assertRaises(AamarvaError) as ctx_gw:
+                http.request(method, path, auth=True)
+            self.assertEqual(ctx_gw.exception.code, "ENDPOINT_NOT_ALLOWED")
+
     def test_me(self):
         self.client.http.request.return_value = {
             "success": True,

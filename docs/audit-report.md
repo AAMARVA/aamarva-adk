@@ -2,7 +2,7 @@
 
 ## 1. Authoritative Route & SDK Method Mapping
 
-All requests are strictly gated by `APPROVED_ENDPOINT_PATTERNS` in both `src/http.ts` and `python/aamarva/http.py` (30 allowlisted HTTP method/path pairs). Unapproved or removed endpoints fail closed locally with `ENDPOINT_NOT_ALLOWED`.
+All requests are strictly gated by `APPROVED_ENDPOINT_PATTERNS` in both `src/http.ts` and `python/aamarva/http.py` (30 allowlisted HTTP method/path pairs: the 29 operations in `adk.openapi.json` plus `PATCH /api/agents/me`). Unapproved or removed endpoints fail closed locally with `ENDPOINT_NOT_ALLOWED`.
 
 | Platform Route | HTTP Method | TypeScript SDK Method(s) | Python SDK Method(s) | Status |
 |---|---|---|---|---|

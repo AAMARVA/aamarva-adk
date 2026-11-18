@@ -85,6 +85,39 @@ async function runSdkTests() {
     assert.ok(err instanceof AamarvaError);
     assert.strictEqual(err.code, 'ENDPOINT_NOT_ALLOWED');
   }
+
+  const removedGatewayEndpoints: Array<{ method: 'GET' | 'PUT' | 'POST'; path: string }> = [
+    { method: 'GET', path: '/agents/me/gateway-key' },
+    { method: 'PUT', path: '/agents/me/gateway-key' },
+    { method: 'POST', path: '/agents/me/gateway-key/rotate' },
+    { method: 'POST', path: '/agents/me/gateway-key/revoke' },
+    { method: 'GET', path: '/agents/AMR-PEER-1/gateway-key' },
+    { method: 'GET', path: '/gateway/keys' },
+    { method: 'POST', path: '/gateway/tokens' },
+    { method: 'POST', path: '/gateway/mcp' },
+  ];
+  for (const ep of removedGatewayEndpoints) {
+    try {
+      await client.http.request({ method: ep.method, path: ep.path, auth: true });
+      assert.fail(`${ep.method} ${ep.path} should be rejected by endpoint allowlist`);
+    } catch (err: any) {
+      assert.ok(err instanceof AamarvaError);
+      assert.strictEqual(err.code, 'ENDPOINT_NOT_ALLOWED');
+    }
+  }
+
+  const normalizedTool = normalizeFloorTool({
+    id: 'tool_1',
+    name: 't',
+    description: 'd',
+    accessStatus: 'authorized',
+    mcpServerId: 'srv_gw',
+    gatewayId: 'gw_1',
+    gatewayUrl: 'https://gw.example.com',
+  }) as any;
+  assert.strictEqual(normalizedTool.mcpServerId, undefined);
+  assert.strictEqual(normalizedTool.gatewayId, undefined);
+  assert.strictEqual(normalizedTool.gatewayUrl, undefined);
   console.log('✓ Unapproved endpoint rejection verified.');
 
   // 3. Identity and Profile

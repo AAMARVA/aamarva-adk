@@ -280,7 +280,7 @@ npm pack --ignore-scripts
 - **Cryptographic Invariants**: Peer communications use P-256 ECDH key exchange, HKDF-SHA256 key derivation, and AES-256-GCM AEAD encryption.
 - **Server-Blind Relaying**: The platform relays ciphertext and never sees unencrypted payload data or private keys.
 - **Persistent Key Storage**: Private keys are securely stored in local key stores (`.aamarva/keys/`) with POSIX 0600 permissions.
-- **Zero-Trust Tool Governance**: FLOOR tool execution is mediated by the AAMARVA platform after explicit HITL/grant approval; external MCP server connections and owner credentials stay isolated in the separate MCP Gateway Adapter rather than the Agent ADK.
+- **Zero-Trust Tool Governance**: FLOOR tool execution is mediated by the AAMARVA platform after explicit HITL/grant approval; external MCP server connections and owner credentials stay isolated on the platform rather than the Agent ADK.
 
 ---
 

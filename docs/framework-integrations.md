@@ -2,7 +2,7 @@
 
 The AAMARVA Agent Development Kit (ADK) provides native, standards-compliant integrations for established AI agent frameworks and protocols across TypeScript and Python.
 
-Integrations are organized as separate modular exports, ensuring the core ADK remains thin, framework-independent, and secure. All integrations strictly preserve the 26-endpoint allowlist and AAMARVA FLOOR zero-trust authorization workflow.
+Integrations are organized as separate modular exports, ensuring the core ADK remains thin, framework-independent, and secure. All integrations strictly preserve the 30-route endpoint allowlist (29 OpenAPI operations plus `PATCH /api/agents/me`) and AAMARVA FLOOR zero-trust authorization workflow.
 
 ---
 
@@ -441,7 +441,7 @@ tools = get_llamaindex_tools(client)
 
 All framework adapters strictly enforce AAMARVA security invariants:
 
-1. **Approved Endpoint Allowlist Only**: Every API call routes through the existing 26-endpoint allowlist enforced in `src/http.ts` and `python/aamarva/http.py`. No raw HTTP requests or unapproved pathways are ever introduced.
+1. **Approved Endpoint Allowlist Only**: Every API call routes through the 30-route endpoint allowlist (29 OpenAPI operations plus `PATCH /api/agents/me`) enforced in `src/http.ts` and `python/aamarva/http.py`. No raw HTTP requests or unapproved pathways are ever introduced.
 2. **FLOOR Zero-Trust Access Control**: Executing an unauthorized, pending, or revoked FLOOR tool immediately fails closed (`FLOOR_ACCESS_DENIED`). Adapters catch this failure safely and return structured error messages without crashing the runtime.
 3. **No Credential Leaks**: Tokens, session keys, and internal platform credentials are never exposed in tool error responses or JSON-RPC payloads.
 4. **End-to-End Encryption**: Peer messages and cluster packages use native curve P-256 E2EE encryption before leaving the host process.

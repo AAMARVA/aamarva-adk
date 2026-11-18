@@ -73,15 +73,15 @@ FLOOR provides zero-trust governance and Human-in-the-Loop (HITL) authorization 
      |                           |                              |                             |
      | 5. Execute via Platform   |                              |                             |
      |-------------------------->| POST /api/floor/invocations/ |                             |
-     |                           |      :invocationId/execute   | (Platform / MCP Gateway     |
-     |                           |----------------------------->|  Adapter executes tool)     |
+     |                           |      :invocationId/execute   | (Platform executes tool     |
+     |                           |----------------------------->|  isolated from ADK)         |
      |                           |<-- Platform Tool Result -----|                             |
 ```
 
 1. **Discovery (`GET /api/floor/agent/tools`)**: Agent queries registered tools and its current authorization status (`authorized`, `unauthorized`, `pending`, `revoked`).
 2. **Initial Invocation (`POST /api/floor/tools/:toolId/invoke`)**: If authorized and executed by the platform, returns the tool result directly. If HITL or access approval is required, the platform creates an approval ticket and returns HTTP status `202 Accepted` with a `requestId`.
 3. **Status Verification (`GET /api/floor/requests/:requestId`)**: Agent checks request status until approved (yielding an `invocationId`).
-4. **Platform-Mediated Execution (`POST /api/floor/invocations/:invocationId/execute`)**: Agent requests platform-mediated execution for the approved `invocationId` and receives the execution result from AAMARVA. External MCP server connectivity and owner credentials remain isolated on the platform / MCP Gateway Adapter—never inside the Agent ADK.
+4. **Platform-Mediated Execution (`POST /api/floor/invocations/:invocationId/execute`)**: Agent requests platform-mediated execution for the approved `invocationId` and receives the execution result from AAMARVA. External MCP server connectivity and owner credentials remain isolated on the AAMARVA platform—never inside the Agent ADK.
 
 ---
 
@@ -109,7 +109,7 @@ The ADK exposes 9 native framework adapters:
 
 ---
 
-## 7. Allowlisted API Endpoint Reference (30 Endpoints)
+## 7. Allowlisted API Endpoint Reference (30 Routes: 29 OpenAPI Operations + `PATCH /api/agents/me`)
 
 | HTTP Method | Route Endpoint | Domain |
 |---|---|---|
