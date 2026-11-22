@@ -42,7 +42,10 @@ from .crypto import (
     decrypt_cluster_message,
     sign_cluster_message_v2,
     verify_cluster_message_signature_v2,
+    decrypt_gateway_token_envelope as decrypt_gateway_envelope_crypto,
+    load_local_private_key_pem,
 )
+from .mcp_executor import execute_gateway_mcp_tool as execute_gateway_mcp_tool_impl
 
 class Aamarva:
     def __init__(
@@ -51,6 +54,7 @@ class Aamarva:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         target_agent_id: Optional[str] = None,
+        account_id: Optional[str] = None,
     ):
         self.http = HttpClient(
             base_url=base_url,
@@ -58,12 +62,19 @@ class Aamarva:
             api_key=api_key,
             target_agent_id=target_agent_id,
         )
+        self.account_id: Optional[str] = account_id.strip() if isinstance(account_id, str) and account_id.strip() else None
         self.registered_agent_id: Optional[str] = None
         self.registered_key_fingerprint: Optional[str] = None
         self.is_registering_key: bool = False
         self.cluster_key_cache: Dict[str, bytes] = {}
         self._pending_floor_requests: Dict[str, str] = {}
         self.http.on_auth_success = lambda: self.register_public_key()
+
+    def set_account_id(self, account_id: Optional[str]) -> None:
+        self.account_id = account_id.strip() if isinstance(account_id, str) and account_id.strip() else None
+
+    def get_account_id(self) -> Optional[str]:
+        return self.account_id
 
     @property
     def target_agent_id(self) -> Optional[str]:
@@ -1836,6 +1847,7 @@ class Aamarva:
         poll_timeout_ms: Optional[int] = None,
         required_scope: Optional[str] = None,
         fleet_id: Optional[str] = None,
+        account_id: Optional[str] = None,
         require_approved_arguments: bool = False,
     ) -> FloorToolInvokeResult:
         """
@@ -2228,9 +2240,41 @@ class Aamarva:
             if not _deep_equal_values(approved_args, submitted_args):
                 raise AamarvaError("FLOOR execution failed: execution arguments do not match approved arguments.", code="FLOOR_EXECUTION_FAILED")
 
-        # Require platform-mediated execution result
+        # Support Core-relayed encrypted MCP Gateway token envelope or platform-mediated result
         has_result = ("result" in data and data["result"] is not None) or ("output" in data and data["output"] is not None)
         if not has_result:
+            token_env = data.get("tokenEnvelope")
+            gw_url = data.get("gatewayUrl")
+            if isinstance(token_env, dict) and isinstance(gw_url, str) and gw_url.strip():
+                resolved_account = (
+                    (account_id.strip() if isinstance(account_id, str) and account_id.strip() else "")
+                    or (self.account_id or "")
+                    or (data.get("accountId").strip() if isinstance(data.get("accountId"), str) else "")
+                )
+                resolved_agent = expected_agent or (data.get("agentId").strip() if isinstance(data.get("agentId"), str) else "")
+                resolved_tool_name = (
+                    (tool_obj.get("name").strip() if tool_obj and isinstance(tool_obj.get("name"), str) and tool_obj.get("name").strip() else "")
+                    or (tool.name.strip() if tool.name and tool.name.strip() else "")
+                    or clean_tool_id
+                )
+                gw_res = self.execute_gateway_mcp_tool(
+                    gateway_url=gw_url,
+                    token_envelope=token_env,
+                    tool_name=resolved_tool_name,
+                    arguments=submitted_args,
+                    expected_agent_id=resolved_agent,
+                    expected_account_id=resolved_account,
+                    expected_gateway_id=data.get("gatewayId").strip() if isinstance(data.get("gatewayId"), str) else None,
+                    expected_mcp_server_id=data.get("mcpServerId").strip() if isinstance(data.get("mcpServerId"), str) else None,
+                )
+                return FloorToolInvokeResult(
+                    status=raw_status if raw_status in ("executed", "completed") else "executed",
+                    invocationId=expected_iid,
+                    toolId=clean_tool_id,
+                    result=gw_res.get("result"),
+                    message=data.get("message") if isinstance(data.get("message"), str) else None,
+                )
+
             raise AamarvaError("FLOOR execution failed: platform response omitted execution result.", code="FLOOR_EXECUTION_FAILED")
         execution_result = data["result"] if ("result" in data and data["result"] is not None) else data["output"]
 
@@ -2240,6 +2284,97 @@ class Aamarva:
             toolId=clean_tool_id,
             result=execution_result,
             message=data.get("message") if isinstance(data.get("message"), str) else None,
+        )
+
+    def decrypt_gateway_token_envelope(
+        self,
+        envelope: Dict[str, Any],
+        expected_account_id: Optional[str] = None,
+        expected_agent_id: Optional[str] = None,
+        expected_token_id: Optional[str] = None,
+        expected_gateway_id: Optional[str] = None,
+        expected_mcp_server_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        private_key: Any = None,
+        key_epoch: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Decrypt a Core-relayed MCP Gateway encrypted token envelope locally using
+        the Agent's P-256 private key and verify Agent/Account/Gateway context.
+        """
+        client_agent_id = (self.http.target_agent_id or self.http.agent_id or "").strip()
+        resolved_agent_id = (expected_agent_id.strip() if isinstance(expected_agent_id, str) else "") or client_agent_id
+        if not resolved_agent_id:
+            raise AamarvaValidationError("expected_agent_id is required to decrypt Gateway token envelope.")
+        if client_agent_id and normalize_agent_id(resolved_agent_id) != normalize_agent_id(client_agent_id):
+            raise AamarvaError(
+                f'Requested expected_agent_id "{resolved_agent_id}" does not match active client agent "{client_agent_id}".',
+                code="GATEWAY_AGENT_MISMATCH",
+            )
+
+        resolved_account_id = (expected_account_id.strip() if isinstance(expected_account_id, str) else "") or (self.account_id or "")
+        if not resolved_account_id:
+            raise AamarvaValidationError("expected_account_id is required to decrypt Gateway token envelope.")
+
+        resolved_priv = private_key if private_key is not None else load_local_private_key_pem(resolved_agent_id, epoch=key_epoch)
+
+        return decrypt_gateway_envelope_crypto(
+            envelope=envelope,
+            recipient_private_key=resolved_priv,
+            expected_agent_id=resolved_agent_id,
+            expected_account_id=resolved_account_id,
+            expected_token_id=expected_token_id,
+            expected_gateway_id=expected_gateway_id,
+            expected_mcp_server_id=expected_mcp_server_id,
+            tool_name=tool_name,
+        )
+
+    def execute_gateway_mcp_tool(
+        self,
+        gateway_url: str,
+        token_envelope: Dict[str, Any],
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        expected_account_id: Optional[str] = None,
+        expected_agent_id: Optional[str] = None,
+        expected_token_id: Optional[str] = None,
+        expected_gateway_id: Optional[str] = None,
+        expected_mcp_server_id: Optional[str] = None,
+        private_key: Any = None,
+        key_epoch: Optional[int] = None,
+        timeout_ms: int = 15000,
+        headers: Optional[Dict[str, str]] = None,
+        transport_fn: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Decrypt a Core-relayed MCP Gateway token envelope and invoke the Gateway /mcp
+        JSON-RPC endpoint using the decrypted bearer token.
+        """
+        client_agent_id = (self.http.target_agent_id or self.http.agent_id or "").strip()
+        resolved_agent_id = (expected_agent_id.strip() if isinstance(expected_agent_id, str) else "") or client_agent_id
+        if client_agent_id and resolved_agent_id and normalize_agent_id(resolved_agent_id) != normalize_agent_id(client_agent_id):
+            raise AamarvaError(
+                f'Requested expected_agent_id "{resolved_agent_id}" does not match active client agent "{client_agent_id}".',
+                code="GATEWAY_AGENT_MISMATCH",
+            )
+
+        resolved_account_id = (expected_account_id.strip() if isinstance(expected_account_id, str) else "") or (self.account_id or "")
+
+        return execute_gateway_mcp_tool_impl(
+            gateway_url=gateway_url,
+            token_envelope=token_envelope,
+            tool_name=tool_name,
+            arguments=arguments,
+            expected_agent_id=resolved_agent_id,
+            expected_account_id=resolved_account_id,
+            expected_token_id=expected_token_id,
+            expected_gateway_id=expected_gateway_id,
+            expected_mcp_server_id=expected_mcp_server_id,
+            private_key=private_key,
+            key_epoch=key_epoch,
+            timeout_ms=timeout_ms,
+            headers=headers,
+            transport_fn=transport_fn,
         )
 
     def request_floor_access(

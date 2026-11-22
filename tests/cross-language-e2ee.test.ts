@@ -1,5 +1,7 @@
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -18,6 +20,12 @@ import {
   decryptClusterMessagePayload,
   signClusterMessageV2,
   verifyClusterMessageSignatureV2,
+  GATEWAY_ENVELOPE_VERSION,
+  GATEWAY_ENVELOPE_ALGORITHM,
+  buildGatewayTokenEnvelopeHkdfInfo,
+  createGatewayTokenEnvelopeAad,
+  deriveGatewayEnvelopeKey,
+  decryptGatewayTokenEnvelope,
 } from '../src/crypto.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -50,13 +58,241 @@ function callPython(cmd: string, inputData?: any) {
   return JSON.parse(res.stdout);
 }
 
+function runGatewayCrossLanguageInterop() {
+  console.log('--- Running TS <-> Python MCP Gateway Token Envelope Interop ---');
+  const fixturePath = path.join(__dirname, 'fixtures', 'gateway-token-envelope.v1.json');
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf-8'));
+
+  const activeEnv = fixture.active.envelope;
+  const tsDerivedHex = deriveGatewayEnvelopeKey(
+    fixture.recipientPrivateKeyPem,
+    activeEnv.ephemeralPublicKeyPem,
+    activeEnv.saltBase64,
+    activeEnv.agentId,
+    activeEnv.tokenId
+  ).toString('hex');
+  const pyDerivedRes = callPython('gateway-derive-key', {
+    privateKeyPem: fixture.recipientPrivateKeyPem,
+    ephemeralPublicKeyPem: activeEnv.ephemeralPublicKeyPem,
+    saltBase64: activeEnv.saltBase64,
+    agentId: activeEnv.agentId,
+    tokenId: activeEnv.tokenId,
+  });
+
+  assert.strictEqual(pyDerivedRes.success, true, `Python gateway-derive-key failed: ${pyDerivedRes.error}`);
+  assert.strictEqual(tsDerivedHex, fixture.active.expectedDerivedKeyHex);
+  assert.strictEqual(pyDerivedRes.keyHex, tsDerivedHex, 'TS and Python MUST derive identical HKDF key');
+  assert.strictEqual(
+    buildGatewayTokenEnvelopeHkdfInfo(activeEnv.agentId, activeEnv.tokenId),
+    fixture.active.hkdfInfo
+  );
+  assert.strictEqual(pyDerivedRes.hkdfInfo, fixture.active.hkdfInfo);
+  assert.strictEqual(createGatewayTokenEnvelopeAad(activeEnv), fixture.active.aadString);
+
+  // Decrypt fixture in TS and Python
+  const tsAadStr = createGatewayTokenEnvelopeAad(activeEnv);
+  assert.strictEqual(tsAadStr, fixture.active.aadString);
+  assert.ok(!tsAadStr.startsWith('aamarva-mcp-gateway:'), 'AAD must NOT contain legacy prefix');
+
+  const tsPlaintext = decryptGatewayTokenEnvelope(activeEnv, fixture.recipientPrivateKeyPem, {
+    expectedAgentId: activeEnv.agentId,
+    expectedAccountId: activeEnv.accountId,
+    expectedTokenId: activeEnv.tokenId,
+    expectedGatewayId: activeEnv.gatewayId,
+    expectedMcpServerId: activeEnv.mcpServerId,
+    toolName: 'sec_edgar_search',
+  });
+  assert.deepStrictEqual(tsPlaintext, fixture.active.expectedPlaintext);
+
+  const pyDecryptRes = callPython('gateway-decrypt', {
+    envelope: activeEnv,
+    privateKeyPem: fixture.recipientPrivateKeyPem,
+    expectedAgentId: activeEnv.agentId,
+    expectedAccountId: activeEnv.accountId,
+    expectedTokenId: activeEnv.tokenId,
+    expectedGatewayId: activeEnv.gatewayId,
+    expectedMcpServerId: activeEnv.mcpServerId,
+    toolName: 'sec_edgar_search',
+  });
+  assert.strictEqual(pyDecryptRes.success, true, `Python gateway-decrypt failed: ${pyDecryptRes.error}`);
+  assert.strictEqual(pyDecryptRes.aadString, tsAadStr, 'TS and Python MUST produce identical AAD string');
+  assert.strictEqual(
+    pyDecryptRes.aadHex,
+    Buffer.from(tsAadStr, 'utf8').toString('hex'),
+    'TS and Python MUST produce identical AAD bytes'
+  );
+  assert.deepStrictEqual(pyDecryptRes.plaintext, tsPlaintext);
+
+  // Also test fresh dynamic Gateway envelope generated with raw node:crypto
+  const recipientKp = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const recipientPrivPem = recipientKp.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const recipientPubPem = recipientKp.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const ephKp = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const ephPubPem = ephKp.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+
+  const dynMeta = {
+    version: GATEWAY_ENVELOPE_VERSION,
+    algorithm: GATEWAY_ENVELOPE_ALGORITHM,
+    tokenId: 'gw_tok_dyn_999',
+    gatewayId: 'gw_eu_west_02',
+    mcpServerId: 'srv_weather_07',
+    agentId: 'AMR-DYN-007',
+    accountId: 'acc_dyn_4242',
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+  };
+  const dynSalt = crypto.randomBytes(32);
+  const dynIv = crypto.randomBytes(12);
+  const dynShared = crypto.diffieHellman({
+    privateKey: ephKp.privateKey,
+    publicKey: crypto.createPublicKey(recipientPubPem),
+  });
+  const dynHkdfInfo = `aamarva-mcp-gateway:token-envelope:v1:${dynMeta.agentId}:${dynMeta.tokenId}`;
+  const dynKey = Buffer.from(crypto.hkdfSync('sha256', dynShared, dynSalt, Buffer.from(dynHkdfInfo, 'utf8'), 32));
+  const dynAad = JSON.stringify({
+    accountId: dynMeta.accountId,
+    agentId: dynMeta.agentId,
+    algorithm: dynMeta.algorithm,
+    expiresAt: dynMeta.expiresAt,
+    gatewayId: dynMeta.gatewayId,
+    mcpServerId: dynMeta.mcpServerId,
+    tokenId: dynMeta.tokenId,
+    version: dynMeta.version,
+  });
+  const dynPlain = {
+    v: 1,
+    tokenId: dynMeta.tokenId,
+    token: 'test_fake_dyn_bearer_777',
+    gatewayId: dynMeta.gatewayId,
+    mcpServerId: dynMeta.mcpServerId,
+    agentId: dynMeta.agentId,
+    accountId: dynMeta.accountId,
+    allowedTools: ['weather_forecast'],
+    expiresAt: dynMeta.expiresAt,
+  };
+  const dynCipher = crypto.createCipheriv('aes-256-gcm', dynKey, dynIv);
+  dynCipher.setAAD(Buffer.from(dynAad, 'utf8'));
+  const dynCt = Buffer.concat([dynCipher.update(JSON.stringify(dynPlain), 'utf8'), dynCipher.final()]);
+  const dynEnvelope = {
+    ...dynMeta,
+    ephemeralPublicKeyPem: ephPubPem,
+    saltBase64: dynSalt.toString('base64'),
+    ivBase64: dynIv.toString('base64'),
+    authTagBase64: dynCipher.getAuthTag().toString('base64'),
+    ciphertextBase64: dynCt.toString('base64'),
+  };
+
+  const tsDynDerived = deriveGatewayEnvelopeKey(
+    recipientPrivPem,
+    dynEnvelope.ephemeralPublicKeyPem,
+    dynEnvelope.saltBase64,
+    dynEnvelope.agentId,
+    dynEnvelope.tokenId
+  ).toString('hex');
+  const pyDynDerived = callPython('gateway-derive-key', {
+    privateKeyPem: recipientPrivPem,
+    ephemeralPublicKeyPem: dynEnvelope.ephemeralPublicKeyPem,
+    saltBase64: dynEnvelope.saltBase64,
+    agentId: dynEnvelope.agentId,
+    tokenId: dynEnvelope.tokenId,
+  });
+  assert.strictEqual(pyDynDerived.success, true);
+  assert.strictEqual(tsDynDerived, dynKey.toString('hex'));
+  assert.strictEqual(pyDynDerived.keyHex, tsDynDerived);
+
+  const tsDynPlain = decryptGatewayTokenEnvelope(dynEnvelope, recipientPrivPem, {
+    expectedAgentId: dynMeta.agentId,
+    expectedAccountId: dynMeta.accountId,
+    toolName: 'weather_forecast',
+  });
+  const pyDynPlain = callPython('gateway-decrypt', {
+    envelope: dynEnvelope,
+    privateKeyPem: recipientPrivPem,
+    expectedAgentId: dynMeta.agentId,
+    expectedAccountId: dynMeta.accountId,
+    toolName: 'weather_forecast',
+  });
+  assert.strictEqual(pyDynPlain.success, true);
+  assert.strictEqual(pyDynPlain.aadHex, Buffer.from(dynAad, 'utf8').toString('hex'));
+  assert.deepStrictEqual(pyDynPlain.plaintext, tsDynPlain);
+  assert.deepStrictEqual(tsDynPlain, dynPlain);
+
+  // Cross-language negative rejections must agree in both TS and Python
+  const wrongVersionPy = callPython('gateway-decrypt', {
+    envelope: { ...activeEnv, version: 1 },
+    privateKeyPem: fixture.recipientPrivateKeyPem,
+    expectedAgentId: activeEnv.agentId,
+    expectedAccountId: activeEnv.accountId,
+  });
+  assert.strictEqual(wrongVersionPy.success, false);
+  assert.strictEqual(wrongVersionPy.code, 'GATEWAY_ENVELOPE_INVALID');
+
+  const wrongAlgPy = callPython('gateway-decrypt', {
+    envelope: { ...activeEnv, algorithm: 'ECDH-P256-HKDF-SHA256-AES-256-GCM' },
+    privateKeyPem: fixture.recipientPrivateKeyPem,
+    expectedAgentId: activeEnv.agentId,
+    expectedAccountId: activeEnv.accountId,
+  });
+  assert.strictEqual(wrongAlgPy.success, false);
+  assert.strictEqual(wrongAlgPy.code, 'GATEWAY_ENVELOPE_INVALID');
+
+  const wrongAgentPy = callPython('gateway-decrypt', {
+    envelope: activeEnv,
+    privateKeyPem: fixture.recipientPrivateKeyPem,
+    expectedAgentId: 'AMR-WRONG-AGENT',
+    expectedAccountId: activeEnv.accountId,
+  });
+  assert.strictEqual(wrongAgentPy.success, false);
+  assert.strictEqual(wrongAgentPy.code, 'GATEWAY_AGENT_MISMATCH');
+
+  const wrongTokenIdPy = callPython('gateway-decrypt', {
+    envelope: activeEnv,
+    privateKeyPem: fixture.recipientPrivateKeyPem,
+    expectedAgentId: activeEnv.agentId,
+    expectedAccountId: activeEnv.accountId,
+    expectedTokenId: 'gw_tok_wrong_999',
+  });
+  assert.strictEqual(wrongTokenIdPy.success, false);
+  assert.strictEqual(wrongTokenIdPy.code, 'GATEWAY_TOKEN_ID_MISMATCH');
+
+  const wrongKeyPy = callPython('gateway-decrypt', {
+    envelope: activeEnv,
+    privateKeyPem: fixture.wrongPrivateKeyPem,
+    expectedAgentId: activeEnv.agentId,
+    expectedAccountId: activeEnv.accountId,
+  });
+  assert.strictEqual(wrongKeyPy.success, false);
+  assert.strictEqual(wrongKeyPy.code, 'GATEWAY_ENVELOPE_DECRYPTION_FAILED');
+
+  const expiredPy = callPython('gateway-decrypt', {
+    envelope: fixture.expired.envelope,
+    privateKeyPem: fixture.recipientPrivateKeyPem,
+    expectedAgentId: fixture.expired.envelope.agentId,
+    expectedAccountId: fixture.expired.envelope.accountId,
+  });
+  assert.strictEqual(expiredPy.success, false);
+  assert.strictEqual(expiredPy.code, 'GATEWAY_TOKEN_EXPIRED');
+
+  const unauthToolPy = callPython('gateway-decrypt', {
+    envelope: activeEnv,
+    privateKeyPem: fixture.recipientPrivateKeyPem,
+    expectedAgentId: activeEnv.agentId,
+    expectedAccountId: activeEnv.accountId,
+    toolName: 'unauthorized_shell_exec',
+  });
+  assert.strictEqual(unauthToolPy.success, false);
+  assert.strictEqual(unauthToolPy.code, 'GATEWAY_TOOL_UNAUTHORIZED');
+
+  console.log('✓ TS <-> Python MCP Gateway HKDF key derivation, AAD byte equality & envelope decryption verified.');
+}
+
 async function runCrossLanguageE2EETest() {
   console.log('--- Starting Cross-Language E2EE Interoperability Test ---');
 
+  runGatewayCrossLanguageInterop();
+
   if (!isPythonCryptographyAvailable()) {
     console.log('ℹ [Notice] Python "cryptography" package is not installed in the current environment.');
-    console.log('Skipping cross-language E2EE subprocess test (TypeScript standalone E2EE suite verified all crypto algorithms).');
-    console.log('--- CROSS-LANGUAGE TEST SKIPPED GRACEFULLY ---');
+    console.log('Skipping Workflow 1/2 Python subprocess section (MCP Gateway cross-language interop already passed).');
     return;
   }
 

@@ -1,0 +1,74 @@
+{
+  "fixtureVersion": 2,
+  "description": "Independent Gateway-canonical P-256 token envelope interop fixture (AAMARVA-GW-ENV-V1 / P256-HKDF-SHA256-AES-256-GCM / raw canonical JSON AAD)",
+  "recipientPrivateKeyPem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgM1P83aIIYzr9mbgQ\n9MLaCtFocJgQoVsNjquVwb0Xwn2hRANCAAT9t4n2bciA0mHG20CaIrSYUOWasuAU\nN7rpIN5DFHU8jPxMv/hQui0JBZYE1tZUxcE+tnmTAaQk/gCU7+3lDGTo\n-----END PRIVATE KEY-----\n",
+  "recipientPublicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/beJ9m3IgNJhxttAmiK0mFDlmrLg\nFDe66SDeQxR1PIz8TL/4ULotCQWWBNbWVMXBPrZ5kwGkJP4AlO/t5Qxk6A==\n-----END PUBLIC KEY-----\n",
+  "wrongPrivateKeyPem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg5bOEsBPPvKiLMAUR\n/egVf0uYqfIYxmrCPJ9eOwyxydKhRANCAAQZrmd+d22BMGXWEYypkDL+H2cD3UzX\nFCcXw3qTXiguXDyp8d4xupQKrniwNsqNxgOAVct8Ot2BtXLeFvzpWiCz\n-----END PRIVATE KEY-----\n",
+  "active": {
+    "envelope": {
+      "version": "AAMARVA-GW-ENV-V1",
+      "algorithm": "P256-HKDF-SHA256-AES-256-GCM",
+      "tokenId": "gw_tok_2026_alpha_001",
+      "gatewayId": "gw_prod_us_east_01",
+      "mcpServerId": "srv_sec_edgar_01",
+      "agentId": "AMR-GW-ALPHA-01",
+      "accountId": "acc_fleet_owner_9001",
+      "expiresAt": "2035-01-01T00:00:00.000Z",
+      "ephemeralPublicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAERrxfI/nZSb9VwXcu/i7+tqQvRa7u\n1ADIdIUWNO6Eqie82yTUJp3QOrzM+XD+8FX0a7pACmlD18KBd9r8ERma4Q==\n-----END PUBLIC KEY-----\n",
+      "saltBase64": "CsaY+0LiSGdowVh5gv2Xpr0KnxGxwmafrsnBMaiUDHU=",
+      "ivBase64": "144Ruzgmub1uBXX9",
+      "authTagBase64": "oKWmb09Z2KvoKmiRmBQzYg==",
+      "ciphertextBase64": "wGqM3an8pOMO3xkeKl2t2J/0DXsyxt5q4hBuNscRqL/H04uozm2LjJKfLq7lru71ZlWh8hm46DLaqkh3sHyr7V3/+4CpJQIrfMXwQwY6XBA0GQPu3Y7WTIuNsoOxqDeFMdBKlM2LIAr5is5Qpj4Kay2SFjhX3+YdsFpQm4Iz6ex0BEo/PwLBLluP+Aj7bZL4Bun71Cb8KDTyzY6d4ma/+zIB4RcdeKeSibkHDJ5NUbNUsDX9OaHA3OXnDZCuLVBt3uWTTLJvAWBc5rV/pUGxw/NZyBjgoXdvSPoklS9l4BKraHxbRNbOeEB9on9BQP/7JejqwAIEJcQ57BGOtsKdKv5L4h6OkEdvYsgHZIQIfUfy3RBJev08TDvmyPEHsjIEwkirFEDngr6Wex1G/aELlJroUZElfA4cFCJln48mvanE8oY="
+    },
+    "hkdfInfo": "aamarva-mcp-gateway:token-envelope:v1:AMR-GW-ALPHA-01:gw_tok_2026_alpha_001",
+    "aadString": "{\"accountId\":\"acc_fleet_owner_9001\",\"agentId\":\"AMR-GW-ALPHA-01\",\"algorithm\":\"P256-HKDF-SHA256-AES-256-GCM\",\"expiresAt\":\"2035-01-01T00:00:00.000Z\",\"gatewayId\":\"gw_prod_us_east_01\",\"mcpServerId\":\"srv_sec_edgar_01\",\"tokenId\":\"gw_tok_2026_alpha_001\",\"version\":\"AAMARVA-GW-ENV-V1\"}",
+    "expectedDerivedKeyHex": "b8335d68190ef54f6a18b3f4b1b33f0358fde762459c45bbda7bcc45188261b9",
+    "expectedPlaintext": {
+      "v": 1,
+      "tokenId": "gw_tok_2026_alpha_001",
+      "token": "test_fake_gw_bearer_token_do_not_use_in_prod_001",
+      "gatewayId": "gw_prod_us_east_01",
+      "mcpServerId": "srv_sec_edgar_01",
+      "agentId": "AMR-GW-ALPHA-01",
+      "accountId": "acc_fleet_owner_9001",
+      "allowedTools": [
+        "sec_edgar_search",
+        "sec_edgar_filing"
+      ],
+      "expiresAt": "2035-01-01T00:00:00.000Z"
+    }
+  },
+  "expired": {
+    "envelope": {
+      "version": "AAMARVA-GW-ENV-V1",
+      "algorithm": "P256-HKDF-SHA256-AES-256-GCM",
+      "tokenId": "gw_tok_2020_expired_002",
+      "gatewayId": "gw_prod_us_east_01",
+      "mcpServerId": "srv_sec_edgar_01",
+      "agentId": "AMR-GW-ALPHA-01",
+      "accountId": "acc_fleet_owner_9001",
+      "expiresAt": "2020-01-01T00:00:00.000Z",
+      "ephemeralPublicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEsoqrkRxlYm11CxtG6S2i8z0eyAKa\ng5noS6q1+9GW/rvwMhkGbnVtsxyLG3QMIZXuu5ampR4UWVmAIc1ZIfd8WQ==\n-----END PUBLIC KEY-----\n",
+      "saltBase64": "clQ/rFWDVh4QJIRxAbJmbpeir4MxGtGOh2l4fP9drpc=",
+      "ivBase64": "rND0QGjjYNSjV/Vx",
+      "authTagBase64": "M+xneVZfy2g5vDjk1TwxOw==",
+      "ciphertextBase64": "fOP4bedmSSZRfWaagFIimmj5XbZNWMoBCWGH98EdsBJ0KQurOHPFAmewazKrtZ0jz8pxky+2xjGHwJl375KBslU6LLHvPVydIUZNdHYV0vHtysKyZoh4xBuX4chhFs7R/mx1/Sjs9ItYcPUC32Xp9lR1KsEV2L9r5r0U6t+c5imHnxzyHnToh61qSQlrr4IBH60vK34UfGDXnsWd7J1X8QrYfST42ARwc/26wDRwmaFtEiIKF58VtTtRVMFsEQVQ0IfZblnQ8e++zRuOBA131jOE1OSGdsG5wL1DpoTLgkKlv8U3hVRymdIsKc+nAfcMfCBd5xhAwTE7fwpZ7tEqGyWsQ8XDisnl+LzHX26U0blRvtsejXdSMijvzVx0pF82"
+    },
+    "hkdfInfo": "aamarva-mcp-gateway:token-envelope:v1:AMR-GW-ALPHA-01:gw_tok_2020_expired_002",
+    "aadString": "{\"accountId\":\"acc_fleet_owner_9001\",\"agentId\":\"AMR-GW-ALPHA-01\",\"algorithm\":\"P256-HKDF-SHA256-AES-256-GCM\",\"expiresAt\":\"2020-01-01T00:00:00.000Z\",\"gatewayId\":\"gw_prod_us_east_01\",\"mcpServerId\":\"srv_sec_edgar_01\",\"tokenId\":\"gw_tok_2020_expired_002\",\"version\":\"AAMARVA-GW-ENV-V1\"}",
+    "expectedDerivedKeyHex": "08373895f743b925eb8a25f8f2d72850222f2b420f0ae70bde398cd54034483b",
+    "expectedPlaintext": {
+      "v": 1,
+      "tokenId": "gw_tok_2020_expired_002",
+      "token": "test_fake_expired_gw_token_000",
+      "gatewayId": "gw_prod_us_east_01",
+      "mcpServerId": "srv_sec_edgar_01",
+      "agentId": "AMR-GW-ALPHA-01",
+      "accountId": "acc_fleet_owner_9001",
+      "allowedTools": [
+        "sec_edgar_search"
+      ],
+      "expiresAt": "2020-01-01T00:00:00.000Z"
+    }
+  }
+}

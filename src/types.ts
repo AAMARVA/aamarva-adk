@@ -13,6 +13,7 @@ export interface Agent {
   masterId?: string;
   masterAgentId?: string;
   ownerAgentId?: string;
+  accountId?: string;
   slaveIds?: string[];
   createdAt?: string;
   updatedAt?: string;
@@ -94,6 +95,8 @@ export interface AamarvaConfig {
   baseUrl?: string;
   /** Agent ID (e.g. AMR-XXXX-XXXX) */
   agentId?: string;
+  /** Owning Account ID for Gateway envelope context validation */
+  accountId?: string;
   /** Secret API Key associated with the Agent ID */
   apiKey?: string;
   /** Pre-existing Bearer Access Token (if already authenticated) */
@@ -327,6 +330,7 @@ export interface ExecuteFloorToolOptions {
   pollTimeoutMs?: number;
   requiredScope?: string;
   fleetId?: string;
+  accountId?: string;
   requireApprovedArguments?: boolean;
 }
 
@@ -400,4 +404,63 @@ export interface ClusterKeyDistributionResponse {
   encryptedKeyPackage?: string | Record<string, unknown>;
   [key: string]: unknown;
 }
+
+// =============================================================================
+// MCP Gateway Encrypted Token Envelope
+// =============================================================================
+
+export interface GatewayTokenEnvelope {
+  version: string;
+  algorithm: string;
+  tokenId: string;
+  gatewayId: string;
+  mcpServerId: string;
+  agentId: string;
+  accountId: string;
+  expiresAt: string;
+  ephemeralPublicKeyPem: string;
+  saltBase64: string;
+  ivBase64: string;
+  authTagBase64: string;
+  ciphertextBase64: string;
+}
+
+export interface GatewayTokenEnvelopePlaintext {
+  v: number;
+  tokenId: string;
+  token: string;
+  agentId: string;
+  accountId: string;
+  gatewayId: string;
+  mcpServerId: string;
+  expiresAt: string;
+  allowedTools: string[];
+}
+
+export interface DecryptGatewayTokenEnvelopeOptions {
+  expectedAgentId: string;
+  expectedAccountId: string;
+  expectedTokenId?: string;
+  expectedGatewayId?: string;
+  expectedMcpServerId?: string;
+  toolName?: string;
+}
+
+export interface ExecuteGatewayMcpToolOptions {
+  gatewayUrl: string;
+  tokenEnvelope: GatewayTokenEnvelope;
+  toolName: string;
+  arguments?: Record<string, unknown>;
+  expectedAgentId?: string;
+  expectedAccountId?: string;
+  expectedTokenId?: string;
+  expectedGatewayId?: string;
+  expectedMcpServerId?: string;
+  privateKey?: unknown;
+  keyEpoch?: number;
+  timeoutMs?: number;
+  fetch?: typeof fetch;
+  headers?: Record<string, string>;
+}
+
 

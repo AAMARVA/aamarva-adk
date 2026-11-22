@@ -15,6 +15,8 @@ from .types import (
     FloorTool,
     FloorToolInvokeResult,
     FloorAccessRequestStatus,
+    GatewayTokenEnvelope,
+    GatewayTokenEnvelopePlaintext,
 )
 from .normalize import normalize_watchtower_activity
 from .errors import AamarvaError, AamarvaAPIError, AamarvaAuthenticationError
@@ -52,7 +54,17 @@ from .crypto import (
     unwrap_cluster_key,
     encrypt_cluster_message,
     decrypt_cluster_message,
+    GATEWAY_ENVELOPE_VERSION,
+    GATEWAY_ENVELOPE_PLAINTEXT_VERSION,
+    GATEWAY_ENVELOPE_ALGORITHM,
+    GATEWAY_HKDF_INFO_PREFIX,
+    load_local_private_key_pem,
+    build_gateway_token_envelope_hkdf_info,
+    create_gateway_token_envelope_aad,
+    derive_gateway_envelope_key,
+    decrypt_gateway_token_envelope,
 )
+from .mcp_executor import execute_gateway_mcp_tool, normalize_gateway_mcp_url
 
 __all__ = [
     "Aamarva",
@@ -69,6 +81,8 @@ __all__ = [
     "FloorTool",
     "FloorToolInvokeResult",
     "FloorAccessRequestStatus",
+    "GatewayTokenEnvelope",
+    "GatewayTokenEnvelopePlaintext",
     "AamarvaError",
     "AamarvaAPIError",
     "AamarvaAuthenticationError",
@@ -105,6 +119,18 @@ __all__ = [
     "unwrap_cluster_key",
     "encrypt_cluster_message",
     "decrypt_cluster_message",
+    "GATEWAY_ENVELOPE_VERSION",
+    "GATEWAY_ENVELOPE_PLAINTEXT_VERSION",
+    "GATEWAY_ENVELOPE_ALGORITHM",
+    "GATEWAY_HKDF_INFO_PREFIX",
+    "load_local_private_key_pem",
+    "build_gateway_token_envelope_hkdf_info",
+    "create_gateway_token_envelope_aad",
+    "derive_gateway_envelope_key",
+    "decrypt_gateway_token_envelope",
+    "execute_gateway_mcp_tool",
+    "normalize_gateway_mcp_url",
 ]
+
 
 

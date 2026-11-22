@@ -1,8 +1,12 @@
 import os
 import re
 import json
+import hmac
 import hashlib
 import base64
+import ctypes
+import ctypes.util
+import datetime
 from abc import ABC, abstractmethod
 from typing import Optional, Union, Dict, Any, Iterable, List
 
@@ -974,4 +978,641 @@ def decrypt_cluster_message(
         if isinstance(err, AamarvaError):
             raise err
         raise AamarvaError(f"Failed to decrypt cluster message: {str(err)}", code="CLUSTER_MESSAGE_DECRYPTION_FAILED")
+
+
+# =============================================================================
+# MCP Gateway Encrypted Token Envelope (P-256 ECDH -> HKDF-SHA256 -> AES-256-GCM)
+# =============================================================================
+
+GATEWAY_ENVELOPE_VERSION = "AAMARVA-GW-ENV-V1"
+GATEWAY_ENVELOPE_PLAINTEXT_VERSION = 1
+GATEWAY_ENVELOPE_ALGORITHM = "P256-HKDF-SHA256-AES-256-GCM"
+GATEWAY_HKDF_INFO_PREFIX = "aamarva-mcp-gateway:token-envelope:v1"
+
+
+class _OpenSSL3GatewayBackend:
+    """
+    OpenSSL 3 libcrypto fallback used only when the optional 'cryptography'
+    package is not installed in the Python environment.
+    Implements strict P-256 ECDH, group/public-key checks, and AES-256-GCM.
+    """
+    def __init__(self):
+        self._lib = None
+
+    def _get_lib(self):
+        if self._lib is not None:
+            return self._lib
+
+        candidates = [
+            "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+            "/usr/lib/aarch64-linux-gnu/libcrypto.so.3",
+            "libcrypto.so.3",
+            ctypes.util.find_library("crypto"),
+        ]
+        lib = None
+        for path in candidates:
+            if not path:
+                continue
+            try:
+                lib = ctypes.CDLL(path)
+                break
+            except OSError:
+                continue
+
+        if lib is None:
+            raise AamarvaError(
+                "Neither 'cryptography' package nor OpenSSL libcrypto is available for Gateway token decryption.",
+                code="CRYPTO_DEPENDENCY_MISSING",
+            )
+
+        c_void_p = ctypes.c_void_p
+        c_char_p = ctypes.c_char_p
+        c_int = ctypes.c_int
+        c_size_t = ctypes.c_size_t
+
+        lib.BIO_new_mem_buf.argtypes = [c_void_p, c_int]
+        lib.BIO_new_mem_buf.restype = c_void_p
+        lib.BIO_free.argtypes = [c_void_p]
+        lib.BIO_free.restype = c_int
+
+        lib.PEM_read_bio_PrivateKey.argtypes = [c_void_p, c_void_p, c_void_p, c_void_p]
+        lib.PEM_read_bio_PrivateKey.restype = c_void_p
+        lib.PEM_read_bio_PUBKEY.argtypes = [c_void_p, c_void_p, c_void_p, c_void_p]
+        lib.PEM_read_bio_PUBKEY.restype = c_void_p
+        lib.EVP_PKEY_free.argtypes = [c_void_p]
+        lib.EVP_PKEY_free.restype = None
+
+        lib.EVP_PKEY_is_a.argtypes = [c_void_p, c_char_p]
+        lib.EVP_PKEY_is_a.restype = c_int
+        lib.EVP_PKEY_get_utf8_string_param.argtypes = [c_void_p, c_char_p, c_char_p, c_size_t, ctypes.POINTER(c_size_t)]
+        lib.EVP_PKEY_get_utf8_string_param.restype = c_int
+
+        lib.EVP_PKEY_CTX_new.argtypes = [c_void_p, c_void_p]
+        lib.EVP_PKEY_CTX_new.restype = c_void_p
+        lib.EVP_PKEY_CTX_free.argtypes = [c_void_p]
+        lib.EVP_PKEY_CTX_free.restype = None
+        lib.EVP_PKEY_public_check.argtypes = [c_void_p]
+        lib.EVP_PKEY_public_check.restype = c_int
+        lib.EVP_PKEY_derive_init.argtypes = [c_void_p]
+        lib.EVP_PKEY_derive_init.restype = c_int
+        lib.EVP_PKEY_derive_set_peer.argtypes = [c_void_p, c_void_p]
+        lib.EVP_PKEY_derive_set_peer.restype = c_int
+        lib.EVP_PKEY_derive.argtypes = [c_void_p, c_void_p, ctypes.POINTER(c_size_t)]
+        lib.EVP_PKEY_derive.restype = c_int
+
+        lib.EVP_CIPHER_CTX_new.argtypes = []
+        lib.EVP_CIPHER_CTX_new.restype = c_void_p
+        lib.EVP_CIPHER_CTX_free.argtypes = [c_void_p]
+        lib.EVP_CIPHER_CTX_free.restype = None
+        lib.EVP_aes_256_gcm.argtypes = []
+        lib.EVP_aes_256_gcm.restype = c_void_p
+        lib.EVP_DecryptInit_ex.argtypes = [c_void_p, c_void_p, c_void_p, c_void_p, c_void_p]
+        lib.EVP_DecryptInit_ex.restype = c_int
+        lib.EVP_CIPHER_CTX_ctrl.argtypes = [c_void_p, c_int, c_int, c_void_p]
+        lib.EVP_CIPHER_CTX_ctrl.restype = c_int
+        lib.EVP_DecryptUpdate.argtypes = [c_void_p, c_void_p, ctypes.POINTER(c_int), c_void_p, c_int]
+        lib.EVP_DecryptUpdate.restype = c_int
+        lib.EVP_DecryptFinal_ex.argtypes = [c_void_p, c_void_p, ctypes.POINTER(c_int)]
+        lib.EVP_DecryptFinal_ex.restype = c_int
+
+        self._lib = lib
+        return lib
+
+    def _check_p256_pkey(self, pkey: int, label: str) -> None:
+        lib = self._get_lib()
+        if lib.EVP_PKEY_is_a(pkey, b"EC") != 1:
+            raise AamarvaError(f"Unsupported {label} key type: expected EC P-256 key.", code="GATEWAY_ENVELOPE_INVALID")
+        buf = ctypes.create_string_buffer(64)
+        out_len = ctypes.c_size_t(0)
+        if lib.EVP_PKEY_get_utf8_string_param(pkey, b"group", buf, 64, ctypes.byref(out_len)) != 1:
+            raise AamarvaError(f"Unable to verify EC curve group for {label}.", code="GATEWAY_ENVELOPE_INVALID")
+        group = buf.value.decode("utf-8", errors="replace")
+        if group != "prime256v1":
+            raise AamarvaError(
+                f"Unsupported EC curve for {label}: {group} (expected prime256v1).",
+                code="GATEWAY_ENVELOPE_INVALID",
+            )
+
+    def _load_private_key(self, pem_bytes: bytes) -> int:
+        lib = self._get_lib()
+        pem_buf = ctypes.create_string_buffer(pem_bytes)
+        bio = lib.BIO_new_mem_buf(pem_buf, len(pem_bytes))
+        if not bio:
+            raise AamarvaError("Failed to allocate OpenSSL BIO for private key.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+        try:
+            pkey = lib.PEM_read_bio_PrivateKey(bio, None, None, None)
+        finally:
+            lib.BIO_free(bio)
+        if not pkey:
+            raise AamarvaError("Invalid recipient P-256 private key PEM.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+        try:
+            self._check_p256_pkey(pkey, "recipient private key")
+            return pkey
+        except Exception:
+            lib.EVP_PKEY_free(pkey)
+            raise
+
+    def _load_public_key(self, pem_bytes: bytes) -> int:
+        lib = self._get_lib()
+        pem_buf = ctypes.create_string_buffer(pem_bytes)
+        bio = lib.BIO_new_mem_buf(pem_buf, len(pem_bytes))
+        if not bio:
+            raise AamarvaError("Failed to allocate OpenSSL BIO for ephemeral public key.", code="GATEWAY_ENVELOPE_INVALID")
+        try:
+            pkey = lib.PEM_read_bio_PUBKEY(bio, None, None, None)
+        finally:
+            lib.BIO_free(bio)
+        if not pkey:
+            raise AamarvaError("Invalid Gateway ephemeral P-256 public key PEM.", code="GATEWAY_ENVELOPE_INVALID")
+        try:
+            self._check_p256_pkey(pkey, "ephemeral public key")
+            check_ctx = lib.EVP_PKEY_CTX_new(pkey, None)
+            if not check_ctx:
+                raise AamarvaError("Failed to create OpenSSL key check context.", code="GATEWAY_ENVELOPE_INVALID")
+            try:
+                if lib.EVP_PKEY_public_check(check_ctx) != 1:
+                    raise AamarvaError("Gateway ephemeral public key failed EC point validation.", code="GATEWAY_ENVELOPE_INVALID")
+            finally:
+                lib.EVP_PKEY_CTX_free(check_ctx)
+            return pkey
+        except Exception:
+            lib.EVP_PKEY_free(pkey)
+            raise
+
+    def ecdh_shared_secret(self, priv_pem: str, peer_pub_pem: str) -> bytes:
+        lib = self._get_lib()
+        priv_pkey = self._load_private_key(priv_pem.encode("utf-8"))
+        try:
+            peer_pkey = self._load_public_key(peer_pub_pem.encode("utf-8"))
+            try:
+                ctx = lib.EVP_PKEY_CTX_new(priv_pkey, None)
+                if not ctx:
+                    raise AamarvaError("Failed to create OpenSSL ECDH context.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+                try:
+                    if lib.EVP_PKEY_derive_init(ctx) != 1:
+                        raise AamarvaError("OpenSSL ECDH derive init failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+                    if lib.EVP_PKEY_derive_set_peer(ctx, peer_pkey) != 1:
+                        raise AamarvaError("OpenSSL ECDH set peer failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+                    secret_len = ctypes.c_size_t(0)
+                    if lib.EVP_PKEY_derive(ctx, None, ctypes.byref(secret_len)) != 1 or secret_len.value == 0:
+                        raise AamarvaError("OpenSSL ECDH secret length query failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+                    secret_buf = (ctypes.c_ubyte * secret_len.value)()
+                    if lib.EVP_PKEY_derive(ctx, secret_buf, ctypes.byref(secret_len)) != 1:
+                        raise AamarvaError("OpenSSL ECDH shared secret derivation failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+                    return bytes(secret_buf[:secret_len.value])
+                finally:
+                    lib.EVP_PKEY_CTX_free(ctx)
+            finally:
+                lib.EVP_PKEY_free(peer_pkey)
+        finally:
+            lib.EVP_PKEY_free(priv_pkey)
+
+    def aes_256_gcm_decrypt(self, key: bytes, iv: bytes, ciphertext: bytes, tag: bytes, aad: bytes) -> bytes:
+        lib = self._get_lib()
+        if len(key) != 32 or len(iv) != 12 or len(tag) != 16:
+            raise AamarvaError("Invalid AES-256-GCM parameters.", code="GATEWAY_ENVELOPE_INVALID")
+
+        ctx = lib.EVP_CIPHER_CTX_new()
+        if not ctx:
+            raise AamarvaError("Failed to allocate OpenSSL cipher context.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+        try:
+            cipher = lib.EVP_aes_256_gcm()
+            if lib.EVP_DecryptInit_ex(ctx, cipher, None, None, None) != 1:
+                raise AamarvaError("OpenSSL AES-256-GCM init failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+            EVP_CTRL_GCM_SET_IVLEN = 0x9
+            EVP_CTRL_GCM_SET_TAG = 0x11
+            if lib.EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, len(iv), None) != 1:
+                raise AamarvaError("OpenSSL AES-256-GCM IV length setup failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+
+            key_buf = (ctypes.c_ubyte * len(key)).from_buffer_copy(key)
+            iv_buf = (ctypes.c_ubyte * len(iv)).from_buffer_copy(iv)
+            if lib.EVP_DecryptInit_ex(ctx, None, None, key_buf, iv_buf) != 1:
+                raise AamarvaError("OpenSSL AES-256-GCM key/IV init failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+
+            out_len = ctypes.c_int(0)
+            if aad:
+                aad_buf = (ctypes.c_ubyte * len(aad)).from_buffer_copy(aad)
+                if lib.EVP_DecryptUpdate(ctx, None, ctypes.byref(out_len), aad_buf, len(aad)) != 1:
+                    raise AamarvaError("OpenSSL AES-256-GCM AAD update failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+
+            ct_buf = (ctypes.c_ubyte * len(ciphertext)).from_buffer_copy(ciphertext)
+            pt_buf = (ctypes.c_ubyte * (len(ciphertext) + 16))()
+            if lib.EVP_DecryptUpdate(ctx, pt_buf, ctypes.byref(out_len), ct_buf, len(ciphertext)) != 1:
+                raise AamarvaError("OpenSSL AES-256-GCM decrypt update failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+            written = out_len.value
+
+            tag_buf = (ctypes.c_ubyte * len(tag)).from_buffer_copy(tag)
+            if lib.EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, len(tag), tag_buf) != 1:
+                raise AamarvaError("OpenSSL AES-256-GCM tag setup failed.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+
+            final_buf = (ctypes.c_ubyte * 16)()
+            final_len = ctypes.c_int(0)
+            if lib.EVP_DecryptFinal_ex(ctx, final_buf, ctypes.byref(final_len)) != 1:
+                raise AamarvaError(
+                    "Gateway token envelope AES-256-GCM authentication tag verification failed.",
+                    code="GATEWAY_ENVELOPE_DECRYPTION_FAILED",
+                )
+            return bytes(pt_buf[:written]) + bytes(final_buf[:final_len.value])
+        finally:
+            lib.EVP_CIPHER_CTX_free(ctx)
+
+
+_openssl_gateway_backend = _OpenSSL3GatewayBackend()
+
+
+def _hkdf_sha256_rfc5869(ikm: bytes, salt: bytes, info: bytes, length: int = 32) -> bytes:
+    if HAS_CRYPTOGRAPHY:
+        return HKDF(
+            algorithm=hashes.SHA256(),
+            length=length,
+            salt=salt,
+            info=info,
+        ).derive(ikm)
+    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+    okm = bytearray()
+    t = b""
+    counter = 1
+    while len(okm) < length:
+        t = hmac.new(prk, t + info + bytes([counter]), hashlib.sha256).digest()
+        okm.extend(t)
+        counter += 1
+    return bytes(okm[:length])
+
+
+def _assert_exact_non_empty_str(val: Any, label: str, code: str = "GATEWAY_ENVELOPE_INVALID") -> str:
+    if not isinstance(val, str) or len(val) == 0 or val != val.strip():
+        raise AamarvaError(
+            f"Gateway token envelope {label} must be a non-empty string without leading/trailing whitespace.",
+            code=code,
+        )
+    return val
+
+
+def _decode_strict_base64(
+    raw: Any,
+    label: str,
+    expected_bytes: Optional[int] = None,
+    min_bytes: Optional[int] = None,
+) -> bytes:
+    if not isinstance(raw, str) or len(raw) == 0:
+        raise AamarvaError(f"Gateway token envelope {label} must be a non-empty Base64 string.", code="GATEWAY_ENVELOPE_INVALID")
+    if not re.match(r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$", raw):
+        raise AamarvaError(f"Gateway token envelope {label} is not valid canonical Base64.", code="GATEWAY_ENVELOPE_INVALID")
+    try:
+        decoded = base64.b64decode(raw, validate=True)
+    except Exception as err:
+        raise AamarvaError(f"Gateway token envelope {label} failed Base64 decoding: {str(err)}", code="GATEWAY_ENVELOPE_INVALID")
+    if base64.b64encode(decoded).decode("ascii") != raw:
+        raise AamarvaError(f"Gateway token envelope {label} failed strict Base64 round-trip validation.", code="GATEWAY_ENVELOPE_INVALID")
+    if expected_bytes is not None and len(decoded) != expected_bytes:
+        raise AamarvaError(
+            f"Gateway token envelope {label} must decode to {expected_bytes} bytes (got {len(decoded)}).",
+            code="GATEWAY_ENVELOPE_INVALID",
+        )
+    if min_bytes is not None and len(decoded) < min_bytes:
+        raise AamarvaError(
+            f"Gateway token envelope {label} must decode to at least {min_bytes} bytes (got {len(decoded)}).",
+            code="GATEWAY_ENVELOPE_INVALID",
+        )
+    return decoded
+
+
+def _parse_strict_iso_timestamp_dt(raw: Any, label: str) -> datetime.datetime:
+    if not isinstance(raw, str) or len(raw) == 0 or raw != raw.strip():
+        raise AamarvaError(
+            f"Gateway token envelope {label} must be a non-empty ISO-8601 timestamp string.",
+            code="GATEWAY_ENVELOPE_INVALID",
+        )
+    if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$", raw):
+        raise AamarvaError(
+            f"Gateway token envelope {label} is not a valid ISO-8601 UTC/offset timestamp.",
+            code="GATEWAY_ENVELOPE_INVALID",
+        )
+    try:
+        iso_str = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        dt = datetime.datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            raise ValueError("Missing timezone offset")
+        return dt.astimezone(datetime.timezone.utc)
+    except Exception as err:
+        raise AamarvaError(
+            f"Gateway token envelope {label} could not be parsed as a valid timestamp: {str(err)}",
+            code="GATEWAY_ENVELOPE_INVALID",
+        )
+
+
+def load_local_private_key_pem(identity_id: str = "default", epoch: Optional[int] = None) -> str:
+    """
+    Load the PEM-encoded local private key from the active KeyStore without
+    requiring the optional 'cryptography' library when a PEM is already stored.
+    """
+    has_explicit_epoch = epoch is not None
+    if has_explicit_epoch:
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+            raise AamarvaError("Invalid identity key epoch: must be a positive integer >= 1.", code="IDENTITY_KEY_INVALID")
+    effective_id = f"{identity_id}_epoch_{epoch}" if has_explicit_epoch else identity_id
+    stored = _active_key_store.load_private_key(effective_id)
+    if isinstance(stored, str) and stored.strip():
+        return stored
+    if has_explicit_epoch and epoch == 1:
+        if not _active_key_store.load_private_key(f"{identity_id}_epoch_2"):
+            active_stored = _active_key_store.load_private_key(identity_id)
+            if isinstance(active_stored, str) and active_stored.strip():
+                return active_stored
+    if HAS_CRYPTOGRAPHY:
+        priv = get_local_identity_key(identity_id, epoch=epoch)
+        return priv.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("utf-8")
+    raise AamarvaError(
+        f'Identity key for "{identity_id}" is unavailable in KeyStore.',
+        code="IDENTITY_KEY_UNAVAILABLE",
+    )
+
+
+def build_gateway_token_envelope_hkdf_info(agent_id: str, token_id: str) -> str:
+    clean_agent = _assert_exact_non_empty_str(agent_id, "agentId")
+    clean_token = _assert_exact_non_empty_str(token_id, "tokenId")
+    return f"{GATEWAY_HKDF_INFO_PREFIX}:{clean_agent}:{clean_token}"
+
+
+def create_gateway_token_envelope_aad(envelope: Dict[str, Any]) -> str:
+    if not isinstance(envelope, dict):
+        raise AamarvaError("Gateway token envelope must be a dictionary.", code="GATEWAY_ENVELOPE_INVALID")
+    account_id = _assert_exact_non_empty_str(envelope.get("accountId"), "accountId")
+    agent_id = _assert_exact_non_empty_str(envelope.get("agentId"), "agentId")
+    algorithm = _assert_exact_non_empty_str(envelope.get("algorithm"), "algorithm")
+    expires_at = _assert_exact_non_empty_str(envelope.get("expiresAt"), "expiresAt")
+    gateway_id = _assert_exact_non_empty_str(envelope.get("gatewayId"), "gatewayId")
+    mcp_server_id = _assert_exact_non_empty_str(envelope.get("mcpServerId"), "mcpServerId")
+    token_id = _assert_exact_non_empty_str(envelope.get("tokenId"), "tokenId")
+    version = _assert_exact_non_empty_str(envelope.get("version"), "version")
+
+    return json.dumps(
+        {
+            "accountId": account_id,
+            "agentId": agent_id,
+            "algorithm": algorithm,
+            "expiresAt": expires_at,
+            "gatewayId": gateway_id,
+            "mcpServerId": mcp_server_id,
+            "tokenId": token_id,
+            "version": version,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def _derive_gateway_ecdh_shared_secret(recipient_private_key: Any, ephemeral_public_key_pem: str) -> bytes:
+    if not isinstance(ephemeral_public_key_pem, str) or "-----BEGIN PUBLIC KEY-----" not in ephemeral_public_key_pem:
+        raise AamarvaError(
+            "Gateway token envelope ephemeralPublicKeyPem must be an SPKI PEM string.",
+            code="GATEWAY_ENVELOPE_INVALID",
+        )
+    if recipient_private_key is None:
+        raise AamarvaError(
+            "Recipient P-256 private key is required to decrypt Gateway token envelope.",
+            code="GATEWAY_ENVELOPE_DECRYPTION_FAILED",
+        )
+
+    if HAS_CRYPTOGRAPHY:
+        try:
+            if isinstance(recipient_private_key, str):
+                priv = serialization.load_pem_private_key(recipient_private_key.encode("utf-8"), password=None)
+            elif isinstance(recipient_private_key, bytes):
+                priv = serialization.load_pem_private_key(recipient_private_key, password=None)
+            else:
+                priv = recipient_private_key
+
+            if not isinstance(priv, ec.EllipticCurvePrivateKey) or not isinstance(priv.curve, ec.SECP256R1):
+                raise AamarvaError("Recipient private key must be an EC P-256 key.", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+
+            eph_pub = serialization.load_pem_public_key(ephemeral_public_key_pem.encode("utf-8"))
+            if not isinstance(eph_pub, ec.EllipticCurvePublicKey) or not isinstance(eph_pub.curve, ec.SECP256R1):
+                raise AamarvaError("Gateway ephemeral public key must be an EC P-256 key.", code="GATEWAY_ENVELOPE_INVALID")
+
+            return priv.exchange(ec.ECDH(), eph_pub)
+        except Exception as err:
+            if isinstance(err, AamarvaError):
+                raise err
+            raise AamarvaError(f"Gateway token envelope ECDH derivation failed: {str(err)}", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+
+    if isinstance(recipient_private_key, bytes):
+        priv_pem = recipient_private_key.decode("utf-8")
+    elif isinstance(recipient_private_key, str):
+        priv_pem = recipient_private_key
+    else:
+        raise AamarvaError(
+            "Recipient private key must be a PEM string when 'cryptography' package is not installed.",
+            code="GATEWAY_ENVELOPE_DECRYPTION_FAILED",
+        )
+    return _openssl_gateway_backend.ecdh_shared_secret(priv_pem, ephemeral_public_key_pem)
+
+
+def derive_gateway_envelope_key(
+    recipient_private_key: Any,
+    ephemeral_public_key_pem: str,
+    salt_base64: str,
+    agent_id: str,
+    token_id: str,
+) -> bytes:
+    salt = _decode_strict_base64(salt_base64, "saltBase64", expected_bytes=32)
+    info = build_gateway_token_envelope_hkdf_info(agent_id, token_id).encode("utf-8")
+    shared_secret = _derive_gateway_ecdh_shared_secret(recipient_private_key, ephemeral_public_key_pem)
+    try:
+        return _hkdf_sha256_rfc5869(shared_secret, salt, info, length=32)
+    except Exception as err:
+        if isinstance(err, AamarvaError):
+            raise err
+        raise AamarvaError(f"Gateway token envelope HKDF derivation failed: {str(err)}", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+
+
+def decrypt_gateway_token_envelope(
+    envelope: Dict[str, Any],
+    recipient_private_key: Any,
+    expected_agent_id: str,
+    expected_account_id: str,
+    expected_token_id: Optional[str] = None,
+    expected_gateway_id: Optional[str] = None,
+    expected_mcp_server_id: Optional[str] = None,
+    tool_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not isinstance(envelope, dict):
+        raise AamarvaError("Gateway token envelope must be a dictionary.", code="GATEWAY_ENVELOPE_INVALID")
+
+    exp_agent = expected_agent_id.strip() if isinstance(expected_agent_id, str) else ""
+    exp_account = expected_account_id.strip() if isinstance(expected_account_id, str) else ""
+    if not exp_agent:
+        raise AamarvaError("expected_agent_id is required to decrypt Gateway token envelope.", code="GATEWAY_CONTEXT_INVALID")
+    if not exp_account:
+        raise AamarvaError("expected_account_id is required to decrypt Gateway token envelope.", code="GATEWAY_CONTEXT_INVALID")
+
+    version = envelope.get("version")
+    if not isinstance(version, str) or version != GATEWAY_ENVELOPE_VERSION:
+        raise AamarvaError(
+            f"Unsupported Gateway token envelope version: {version} (expected {GATEWAY_ENVELOPE_VERSION}).",
+            code="GATEWAY_ENVELOPE_INVALID",
+        )
+    algorithm = envelope.get("algorithm")
+    if not isinstance(algorithm, str) or algorithm != GATEWAY_ENVELOPE_ALGORITHM:
+        raise AamarvaError(
+            f"Unsupported Gateway token envelope algorithm: {algorithm} (expected {GATEWAY_ENVELOPE_ALGORITHM}).",
+            code="GATEWAY_ENVELOPE_INVALID",
+        )
+
+    token_id = _assert_exact_non_empty_str(envelope.get("tokenId"), "tokenId")
+    gateway_id = _assert_exact_non_empty_str(envelope.get("gatewayId"), "gatewayId")
+    mcp_server_id = _assert_exact_non_empty_str(envelope.get("mcpServerId"), "mcpServerId")
+    agent_id = _assert_exact_non_empty_str(envelope.get("agentId"), "agentId")
+    account_id = _assert_exact_non_empty_str(envelope.get("accountId"), "accountId")
+    expires_at_dt = _parse_strict_iso_timestamp_dt(envelope.get("expiresAt"), "expiresAt")
+
+    eph_pem = envelope.get("ephemeralPublicKeyPem")
+    if not isinstance(eph_pem, str) or "-----BEGIN PUBLIC KEY-----" not in eph_pem:
+        raise AamarvaError(
+            "Gateway token envelope ephemeralPublicKeyPem must be an SPKI PEM string.",
+            code="GATEWAY_ENVELOPE_INVALID",
+        )
+    _decode_strict_base64(envelope.get("saltBase64"), "saltBase64", expected_bytes=32)
+    iv = _decode_strict_base64(envelope.get("ivBase64"), "ivBase64", expected_bytes=12)
+    auth_tag = _decode_strict_base64(envelope.get("authTagBase64"), "authTagBase64", expected_bytes=16)
+    ciphertext = _decode_strict_base64(envelope.get("ciphertextBase64"), "ciphertextBase64", min_bytes=1)
+
+    if normalize_agent_id(agent_id) != normalize_agent_id(exp_agent):
+        raise AamarvaError(
+            f'Gateway token envelope agentId "{agent_id}" does not match expected agent "{exp_agent}".',
+            code="GATEWAY_AGENT_MISMATCH",
+        )
+    if account_id != exp_account:
+        raise AamarvaError(
+            f'Gateway token envelope accountId "{account_id}" does not match expected account "{exp_account}".',
+            code="GATEWAY_ACCOUNT_MISMATCH",
+        )
+    if expected_token_id is not None:
+        clean_exp_token_id = expected_token_id.strip() if isinstance(expected_token_id, str) else ""
+        if not clean_exp_token_id or token_id != clean_exp_token_id:
+            raise AamarvaError(
+                f'Gateway token envelope tokenId "{token_id}" does not match expected tokenId "{expected_token_id}".',
+                code="GATEWAY_TOKEN_ID_MISMATCH",
+            )
+    if expected_gateway_id is not None and gateway_id != expected_gateway_id.strip():
+        raise AamarvaError(
+            f'Gateway token envelope gatewayId "{gateway_id}" does not match expected gatewayId "{expected_gateway_id}".',
+            code="GATEWAY_CONTEXT_MISMATCH",
+        )
+    if expected_mcp_server_id is not None and mcp_server_id != expected_mcp_server_id.strip():
+        raise AamarvaError(
+            f'Gateway token envelope mcpServerId "{mcp_server_id}" does not match expected mcpServerId "{expected_mcp_server_id}".',
+            code="GATEWAY_CONTEXT_MISMATCH",
+        )
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    if expires_at_dt <= now_utc:
+        raise AamarvaError("Gateway token envelope has expired.", code="GATEWAY_TOKEN_EXPIRED")
+
+    aes_key = derive_gateway_envelope_key(
+        recipient_private_key,
+        eph_pem,
+        envelope.get("saltBase64", ""),
+        agent_id,
+        token_id,
+    )
+    aad = create_gateway_token_envelope_aad(envelope).encode("utf-8")
+
+    try:
+        if HAS_CRYPTOGRAPHY:
+            aesgcm = AESGCM(aes_key)
+            pt_bytes = aesgcm.decrypt(iv, ciphertext + auth_tag, aad)
+        else:
+            pt_bytes = _openssl_gateway_backend.aes_256_gcm_decrypt(aes_key, iv, ciphertext, auth_tag, aad)
+        plaintext_str = pt_bytes.decode("utf-8")
+    except Exception as err:
+        if isinstance(err, AamarvaError):
+            raise err
+        raise AamarvaError(f"Failed to decrypt Gateway token envelope: {str(err)}", code="GATEWAY_ENVELOPE_DECRYPTION_FAILED")
+
+    try:
+        parsed = json.loads(plaintext_str)
+    except Exception as err:
+        raise AamarvaError(f"Gateway token envelope plaintext is not valid JSON: {str(err)}", code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT")
+
+    if not isinstance(parsed, dict):
+        raise AamarvaError("Gateway token envelope plaintext must be a JSON object.", code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT")
+
+    pt_v = parsed.get("v")
+    if isinstance(pt_v, bool) or not isinstance(pt_v, int) or pt_v != GATEWAY_ENVELOPE_PLAINTEXT_VERSION:
+        raise AamarvaError(f"Gateway token plaintext version mismatch: got {pt_v}.", code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT")
+
+    pt_token_id = _assert_exact_non_empty_str(parsed.get("tokenId"), "plaintext.tokenId", code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT")
+    raw_token = parsed.get("token")
+    pt_token = raw_token if isinstance(raw_token, str) and raw_token.strip() else ""
+    if not pt_token:
+        raise AamarvaError("Gateway token plaintext is missing a non-empty bearer token.", code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT")
+
+    pt_agent_id = _assert_exact_non_empty_str(parsed.get("agentId"), "plaintext.agentId", code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT")
+    pt_account_id = _assert_exact_non_empty_str(parsed.get("accountId"), "plaintext.accountId", code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT")
+    pt_gateway_id = _assert_exact_non_empty_str(parsed.get("gatewayId"), "plaintext.gatewayId", code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT")
+    pt_mcp_server_id = _assert_exact_non_empty_str(parsed.get("mcpServerId"), "plaintext.mcpServerId", code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT")
+    pt_expires_dt = _parse_strict_iso_timestamp_dt(parsed.get("expiresAt"), "plaintext.expiresAt")
+
+    if pt_token_id != token_id:
+        raise AamarvaError("Gateway token plaintext tokenId does not match outer envelope.", code="GATEWAY_ENVELOPE_MISMATCH")
+    if pt_agent_id != agent_id or normalize_agent_id(pt_agent_id) != normalize_agent_id(exp_agent):
+        raise AamarvaError(
+            "Gateway token plaintext agentId does not match outer envelope or expected agent context.",
+            code="GATEWAY_AGENT_MISMATCH",
+        )
+    if pt_account_id != account_id or pt_account_id != exp_account:
+        raise AamarvaError(
+            "Gateway token plaintext accountId does not match outer envelope or expected account context.",
+            code="GATEWAY_ACCOUNT_MISMATCH",
+        )
+    if pt_gateway_id != gateway_id:
+        raise AamarvaError("Gateway token plaintext gatewayId does not match outer envelope.", code="GATEWAY_ENVELOPE_MISMATCH")
+    if pt_mcp_server_id != mcp_server_id:
+        raise AamarvaError("Gateway token plaintext mcpServerId does not match outer envelope.", code="GATEWAY_ENVELOPE_MISMATCH")
+    if parsed.get("expiresAt") != envelope.get("expiresAt"):
+        raise AamarvaError("Gateway token plaintext expiresAt does not match outer envelope.", code="GATEWAY_ENVELOPE_MISMATCH")
+    if pt_expires_dt <= datetime.datetime.now(datetime.timezone.utc):
+        raise AamarvaError("Decrypted Gateway token has expired.", code="GATEWAY_TOKEN_EXPIRED")
+
+    raw_allowed = parsed.get("allowedTools")
+    if not isinstance(raw_allowed, list) or len(raw_allowed) == 0:
+        raise AamarvaError(
+            "Gateway token plaintext allowedTools must be a non-empty array of tool names.",
+            code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT",
+        )
+    allowed_tools: List[str] = []
+    for item in raw_allowed:
+        if not isinstance(item, str) or len(item) == 0 or item != item.strip():
+            raise AamarvaError(
+                "Gateway token plaintext allowedTools contains invalid tool entry.",
+                code="GATEWAY_ENVELOPE_INVALID_PLAINTEXT",
+            )
+        allowed_tools.append(item)
+
+    if tool_name is not None:
+        requested_tool = tool_name.strip() if isinstance(tool_name, str) else ""
+        if not requested_tool or requested_tool not in allowed_tools:
+            raise AamarvaError(
+                f'Tool "{requested_tool or tool_name}" is not permitted by decrypted Gateway token allowedTools.',
+                code="GATEWAY_TOOL_UNAUTHORIZED",
+            )
+
+    return {
+        "v": pt_v,
+        "tokenId": pt_token_id,
+        "token": pt_token,
+        "agentId": pt_agent_id,
+        "accountId": pt_account_id,
+        "gatewayId": pt_gateway_id,
+        "mcpServerId": pt_mcp_server_id,
+        "expiresAt": parsed["expiresAt"],
+        "allowedTools": allowed_tools,
+    }
+
 

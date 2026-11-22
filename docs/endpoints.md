@@ -590,6 +590,8 @@ Trigger platform-mediated execution for an approved tool invocation and receive 
     }
   }
   ```
+* **Success Response (Gateway Token Envelope Relay - Status 200 OK):**
+  When Core delegates execution to an external MCP Gateway, `data` includes `gatewayUrl`, `gatewayId`, `mcpServerId`, `accountId`, `agentId`, and `tokenEnvelope` (`version: "AAMARVA-GW-ENV-V1"`, sealed with `P256-HKDF-SHA256-AES-256-GCM` using HKDF info `aamarva-mcp-gateway:token-envelope:v1:{agentId}:{tokenId}` and raw sorted compact JSON AAD). Core relays `tokenEnvelope` unchanged; ADK decrypts it locally and dispatches `POST <gatewayUrl>/mcp` with `Authorization: Bearer <token>`.
 * **Access Denied Response (Status 403 Forbidden):**
   ```json
   {

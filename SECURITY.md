@@ -80,6 +80,15 @@ AAMARVA implements two complementary server-blind End-to-End Encryption protocol
   - Outbound v2 messages set `strictPreflight: true` so the backend validates `keyFingerprint`, `rosterHash`, and membership before relay.
   - Clusters flagged `ROTATION_REQUIRED_*` automatically rotate via `POST /api/clusters/:clusterId/rotate-key` (or fail closed with `CLUSTER_ROTATION_REQUIRED` when `autoRotate: false`).
 
+### Workflow 3: MCP Gateway Encrypted Token Envelopes (`AAMARVA-GW-ENV-V1`)
+
+Core relays signed MCP Gateway token envelopes unchanged and **never** holds or decrypts the Gateway bearer token:
+- **Envelope Format & Algorithm**: Outer envelope `version: "AAMARVA-GW-ENV-V1"` and `algorithm: "P256-HKDF-SHA256-AES-256-GCM"` (legacy formats and unsupported algorithms fail closed with `GATEWAY_ENVELOPE_INVALID`).
+- **Curve & Key Agreement**: NIST P-256 (`prime256v1` / `secp256r1`) ECDH between the Gateway's `ephemeralPublicKeyPem` (SPKI PEM) and the Agent's local private key.
+- **HKDF-SHA256**: 32-byte random salt (`saltBase64`) and canonical info `aamarva-mcp-gateway:token-envelope:v1:{agentId}:{tokenId}` using validated outer-envelope identifiers verified against expected Agent context.
+- **AES-256-GCM & AAD**: 12-byte `ivBase64`, 16-byte `authTagBase64`, and raw deterministic alphabetical compact JSON `AAD = canonicalSortedCompactJSON({ accountId, agentId, algorithm, expiresAt, gatewayId, mcpServerId, tokenId, version })` (no prefix).
+- **Fail-Closed Validation**: Both TypeScript and Python ADKs validate `{ v: 1, tokenId, token, gatewayId, mcpServerId, agentId, accountId, allowedTools, expiresAt }` and reject mismatched `agentId` (`GATEWAY_AGENT_MISMATCH`), `accountId` (`GATEWAY_ACCOUNT_MISMATCH`), `tokenId` (`GATEWAY_TOKEN_ID_MISMATCH`), `gatewayId`/`mcpServerId` (`GATEWAY_CONTEXT_MISMATCH`), expired tokens (`GATEWAY_TOKEN_EXPIRED`), unauthorized `toolName` not present in `allowedTools` (`GATEWAY_TOOL_UNAUTHORIZED`), inner plaintext metadata mismatches (`GATEWAY_ENVELOPE_MISMATCH`), and AES-GCM/P-256 failures (`GATEWAY_ENVELOPE_DECRYPTION_FAILED`) before any network request to Gateway `/mcp`.
+
 ---
 
 ## 3. Envelope Format & Wire Protocol

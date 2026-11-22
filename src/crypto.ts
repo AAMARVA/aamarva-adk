@@ -7,9 +7,19 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { AamarvaError } from './errors.js';
-import type { ECJWK } from './types.js';
+import type {
+  ECJWK,
+  GatewayTokenEnvelope,
+  GatewayTokenEnvelopePlaintext,
+  DecryptGatewayTokenEnvelopeOptions,
+} from './types.js';
 
-export type { ECJWK };
+export type {
+  ECJWK,
+  GatewayTokenEnvelope,
+  GatewayTokenEnvelopePlaintext,
+  DecryptGatewayTokenEnvelopeOptions,
+};
 
 export interface EncryptedEnvelope {
   ciphertext: string;
@@ -1227,5 +1237,446 @@ export function decryptClusterMessagePayload(
     });
   }
 }
+
+// =============================================================================
+// MCP Gateway Encrypted Token Envelope (P-256 ECDH -> HKDF-SHA256 -> AES-256-GCM)
+// =============================================================================
+
+export const GATEWAY_ENVELOPE_VERSION = 'AAMARVA-GW-ENV-V1';
+export const GATEWAY_ENVELOPE_PLAINTEXT_VERSION = 1;
+export const GATEWAY_ENVELOPE_ALGORITHM = 'P256-HKDF-SHA256-AES-256-GCM';
+export const GATEWAY_HKDF_INFO_PREFIX = 'aamarva-mcp-gateway:token-envelope:v1';
+
+function isPlainRecord(val: unknown): val is Record<string, unknown> {
+  return typeof val === 'object' && val !== null && !Array.isArray(val);
+}
+
+function assertExactNonEmptyString(val: unknown, label: string, code = 'GATEWAY_ENVELOPE_INVALID'): string {
+  if (typeof val !== 'string' || val.length === 0 || val !== val.trim()) {
+    throw new AamarvaError(`Gateway token envelope ${label} must be a non-empty string without leading/trailing whitespace.`, {
+      code,
+    });
+  }
+  return val;
+}
+
+function decodeStrictBase64(raw: unknown, label: string, expectedBytes?: number, minBytes?: number): Buffer {
+  if (typeof raw !== 'string' || raw.length === 0) {
+    throw new AamarvaError(`Gateway token envelope ${label} must be a non-empty Base64 string.`, {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw)) {
+    throw new AamarvaError(`Gateway token envelope ${label} is not valid canonical Base64.`, {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  const buf = Buffer.from(raw, 'base64');
+  if (buf.toString('base64') !== raw) {
+    throw new AamarvaError(`Gateway token envelope ${label} failed strict Base64 round-trip validation.`, {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  if (expectedBytes !== undefined && buf.length !== expectedBytes) {
+    throw new AamarvaError(
+      `Gateway token envelope ${label} must decode to ${expectedBytes} bytes (got ${buf.length}).`,
+      { code: 'GATEWAY_ENVELOPE_INVALID' }
+    );
+  }
+  if (minBytes !== undefined && buf.length < minBytes) {
+    throw new AamarvaError(
+      `Gateway token envelope ${label} must decode to at least ${minBytes} bytes (got ${buf.length}).`,
+      { code: 'GATEWAY_ENVELOPE_INVALID' }
+    );
+  }
+  return buf;
+}
+
+function parseStrictIsoTimestampMs(raw: unknown, label: string): number {
+  if (typeof raw !== 'string' || raw.length === 0 || raw !== raw.trim()) {
+    throw new AamarvaError(`Gateway token envelope ${label} must be a non-empty ISO-8601 timestamp string.`, {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(raw)) {
+    throw new AamarvaError(`Gateway token envelope ${label} is not a valid ISO-8601 UTC/offset timestamp.`, {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  const ms = Date.parse(raw);
+  if (Number.isNaN(ms)) {
+    throw new AamarvaError(`Gateway token envelope ${label} could not be parsed as a valid timestamp.`, {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  return ms;
+}
+
+function importGatewayPrivateKey(privateKeyPemOrKey: any): crypto.KeyObject {
+  if (!privateKeyPemOrKey) {
+    throw new AamarvaError('Recipient P-256 private key is required to decrypt Gateway token envelope.', {
+      code: 'GATEWAY_ENVELOPE_DECRYPTION_FAILED',
+    });
+  }
+  try {
+    const privKey: crypto.KeyObject =
+      typeof privateKeyPemOrKey === 'string'
+        ? crypto.createPrivateKey({ key: privateKeyPemOrKey, format: 'pem' })
+        : (privateKeyPemOrKey.privateKey || privateKeyPemOrKey);
+
+    if (!privKey || typeof privKey.export !== 'function' || privKey.type !== 'private') {
+      throw new Error('Object is not a private key');
+    }
+    if (privKey.asymmetricKeyType !== 'ec') {
+      throw new Error(`Unsupported key type: ${String(privKey.asymmetricKeyType)}`);
+    }
+    const curve = privKey.asymmetricKeyDetails?.namedCurve;
+    if (curve !== 'prime256v1') {
+      throw new Error(`Unsupported EC curve: ${String(curve)} (expected prime256v1)`);
+    }
+    return privKey;
+  } catch (err: any) {
+    if (err instanceof AamarvaError) throw err;
+    throw new AamarvaError(`Invalid recipient P-256 private key: ${err.message}`, {
+      code: 'GATEWAY_ENVELOPE_DECRYPTION_FAILED',
+      cause: err,
+    });
+  }
+}
+
+function importGatewayEphemeralPublicKeyPem(pem: string): crypto.KeyObject {
+  if (typeof pem !== 'string' || !pem.includes('-----BEGIN PUBLIC KEY-----')) {
+    throw new AamarvaError('Gateway token envelope ephemeralPublicKeyPem must be an SPKI PEM string.', {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  try {
+    const pubKey = crypto.createPublicKey({ key: pem, format: 'pem', type: 'spki' });
+    if (pubKey.asymmetricKeyType !== 'ec') {
+      throw new Error(`Unsupported ephemeral key type: ${String(pubKey.asymmetricKeyType)}`);
+    }
+    const curve = pubKey.asymmetricKeyDetails?.namedCurve;
+    if (curve !== 'prime256v1') {
+      throw new Error(`Unsupported ephemeral EC curve: ${String(curve)} (expected prime256v1)`);
+    }
+    return pubKey;
+  } catch (err: any) {
+    if (err instanceof AamarvaError) throw err;
+    throw new AamarvaError(`Invalid Gateway ephemeral P-256 public key: ${err.message}`, {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+      cause: err,
+    });
+  }
+}
+
+export function buildGatewayTokenEnvelopeHkdfInfo(agentId: string, tokenId: string): string {
+  const cleanAgentId = assertExactNonEmptyString(agentId, 'agentId');
+  const cleanTokenId = assertExactNonEmptyString(tokenId, 'tokenId');
+  return `${GATEWAY_HKDF_INFO_PREFIX}:${cleanAgentId}:${cleanTokenId}`;
+}
+
+export function createGatewayTokenEnvelopeAad(envelope: Pick<
+  GatewayTokenEnvelope,
+  'version' | 'algorithm' | 'tokenId' | 'gatewayId' | 'mcpServerId' | 'agentId' | 'accountId' | 'expiresAt'
+>): string {
+  if (!isPlainRecord(envelope)) {
+    throw new AamarvaError('Gateway token envelope must be a plain object.', {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  const accountId = assertExactNonEmptyString(envelope.accountId, 'accountId');
+  const agentId = assertExactNonEmptyString(envelope.agentId, 'agentId');
+  const algorithm = assertExactNonEmptyString(envelope.algorithm, 'algorithm');
+  const expiresAt = assertExactNonEmptyString(envelope.expiresAt, 'expiresAt');
+  const gatewayId = assertExactNonEmptyString(envelope.gatewayId, 'gatewayId');
+  const mcpServerId = assertExactNonEmptyString(envelope.mcpServerId, 'mcpServerId');
+  const tokenId = assertExactNonEmptyString(envelope.tokenId, 'tokenId');
+  const version = assertExactNonEmptyString(envelope.version, 'version');
+
+  return JSON.stringify({
+    accountId,
+    agentId,
+    algorithm,
+    expiresAt,
+    gatewayId,
+    mcpServerId,
+    tokenId,
+    version,
+  });
+}
+
+export function deriveGatewayEnvelopeKey(
+  recipientPrivateKey: any,
+  ephemeralPublicKeyPem: string,
+  saltBase64: string,
+  agentId: string,
+  tokenId: string
+): Buffer {
+  const privKey = importGatewayPrivateKey(recipientPrivateKey);
+  const ephPubKey = importGatewayEphemeralPublicKeyPem(ephemeralPublicKeyPem);
+  const salt = decodeStrictBase64(saltBase64, 'saltBase64', 32);
+  const info = buildGatewayTokenEnvelopeHkdfInfo(agentId, tokenId);
+
+  let sharedSecret: Buffer;
+  try {
+    sharedSecret = crypto.diffieHellman({
+      privateKey: privKey,
+      publicKey: ephPubKey,
+    });
+  } catch (err: any) {
+    throw new AamarvaError(`Gateway token envelope ECDH derivation failed: ${err.message}`, {
+      code: 'GATEWAY_ENVELOPE_DECRYPTION_FAILED',
+      cause: err,
+    });
+  }
+
+  try {
+    const derived = crypto.hkdfSync(
+      'sha256',
+      sharedSecret,
+      salt,
+      Buffer.from(info, 'utf8'),
+      32
+    );
+    return Buffer.from(derived);
+  } catch (err: any) {
+    throw new AamarvaError(`Gateway token envelope HKDF derivation failed: ${err.message}`, {
+      code: 'GATEWAY_ENVELOPE_DECRYPTION_FAILED',
+      cause: err,
+    });
+  }
+}
+
+export function decryptGatewayTokenEnvelope(
+  envelope: GatewayTokenEnvelope,
+  recipientPrivateKey: any,
+  options: DecryptGatewayTokenEnvelopeOptions
+): GatewayTokenEnvelopePlaintext {
+  if (!isPlainRecord(envelope)) {
+    throw new AamarvaError('Gateway token envelope must be a plain object.', {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  if (!isPlainRecord(options)) {
+    throw new AamarvaError('Expected Agent and Account context options are required to decrypt Gateway token envelope.', {
+      code: 'GATEWAY_CONTEXT_INVALID',
+    });
+  }
+
+  const expectedAgentId = typeof options.expectedAgentId === 'string' ? options.expectedAgentId.trim() : '';
+  const expectedAccountId = typeof options.expectedAccountId === 'string' ? options.expectedAccountId.trim() : '';
+  if (!expectedAgentId) {
+    throw new AamarvaError('expectedAgentId is required to decrypt Gateway token envelope.', {
+      code: 'GATEWAY_CONTEXT_INVALID',
+    });
+  }
+  if (!expectedAccountId) {
+    throw new AamarvaError('expectedAccountId is required to decrypt Gateway token envelope.', {
+      code: 'GATEWAY_CONTEXT_INVALID',
+    });
+  }
+
+  if (typeof envelope.version !== 'string' || envelope.version !== GATEWAY_ENVELOPE_VERSION) {
+    throw new AamarvaError(
+      `Unsupported Gateway token envelope version: ${String(envelope.version)} (expected ${GATEWAY_ENVELOPE_VERSION}).`,
+      { code: 'GATEWAY_ENVELOPE_INVALID' }
+    );
+  }
+  if (typeof envelope.algorithm !== 'string' || envelope.algorithm !== GATEWAY_ENVELOPE_ALGORITHM) {
+    throw new AamarvaError(
+      `Unsupported Gateway token envelope algorithm: ${String(envelope.algorithm)} (expected ${GATEWAY_ENVELOPE_ALGORITHM}).`,
+      { code: 'GATEWAY_ENVELOPE_INVALID' }
+    );
+  }
+
+  const tokenId = assertExactNonEmptyString(envelope.tokenId, 'tokenId');
+  const gatewayId = assertExactNonEmptyString(envelope.gatewayId, 'gatewayId');
+  const mcpServerId = assertExactNonEmptyString(envelope.mcpServerId, 'mcpServerId');
+  const agentId = assertExactNonEmptyString(envelope.agentId, 'agentId');
+  const accountId = assertExactNonEmptyString(envelope.accountId, 'accountId');
+  const expiresAtMs = parseStrictIsoTimestampMs(envelope.expiresAt, 'expiresAt');
+
+  if (typeof envelope.ephemeralPublicKeyPem !== 'string' || !envelope.ephemeralPublicKeyPem.includes('-----BEGIN PUBLIC KEY-----')) {
+    throw new AamarvaError('Gateway token envelope ephemeralPublicKeyPem must be an SPKI PEM string.', {
+      code: 'GATEWAY_ENVELOPE_INVALID',
+    });
+  }
+  decodeStrictBase64(envelope.saltBase64, 'saltBase64', 32);
+  const iv = decodeStrictBase64(envelope.ivBase64, 'ivBase64', 12);
+  const authTag = decodeStrictBase64(envelope.authTagBase64, 'authTagBase64', 16);
+  const ciphertext = decodeStrictBase64(envelope.ciphertextBase64, 'ciphertextBase64', undefined, 1);
+
+  if (normalizeAgentId(agentId) !== normalizeAgentId(expectedAgentId)) {
+    throw new AamarvaError(
+      `Gateway token envelope agentId "${agentId}" does not match expected agent "${expectedAgentId}".`,
+      { code: 'GATEWAY_AGENT_MISMATCH' }
+    );
+  }
+  if (accountId !== expectedAccountId) {
+    throw new AamarvaError(
+      `Gateway token envelope accountId "${accountId}" does not match expected account "${expectedAccountId}".`,
+      { code: 'GATEWAY_ACCOUNT_MISMATCH' }
+    );
+  }
+  if (options.expectedTokenId !== undefined) {
+    const cleanExpectedTokenId = typeof options.expectedTokenId === 'string' ? options.expectedTokenId.trim() : '';
+    if (!cleanExpectedTokenId || tokenId !== cleanExpectedTokenId) {
+      throw new AamarvaError(
+        `Gateway token envelope tokenId "${tokenId}" does not match expected tokenId "${options.expectedTokenId}".`,
+        { code: 'GATEWAY_TOKEN_ID_MISMATCH' }
+      );
+    }
+  }
+  if (options.expectedGatewayId !== undefined && gatewayId !== options.expectedGatewayId.trim()) {
+    throw new AamarvaError(
+      `Gateway token envelope gatewayId "${gatewayId}" does not match expected gatewayId "${options.expectedGatewayId}".`,
+      { code: 'GATEWAY_CONTEXT_MISMATCH' }
+    );
+  }
+  if (options.expectedMcpServerId !== undefined && mcpServerId !== options.expectedMcpServerId.trim()) {
+    throw new AamarvaError(
+      `Gateway token envelope mcpServerId "${mcpServerId}" does not match expected mcpServerId "${options.expectedMcpServerId}".`,
+      { code: 'GATEWAY_CONTEXT_MISMATCH' }
+    );
+  }
+
+  const nowMs = Date.now();
+  if (expiresAtMs <= nowMs) {
+    throw new AamarvaError('Gateway token envelope has expired.', {
+      code: 'GATEWAY_TOKEN_EXPIRED',
+    });
+  }
+
+  const aesKey = deriveGatewayEnvelopeKey(
+    recipientPrivateKey,
+    envelope.ephemeralPublicKeyPem,
+    envelope.saltBase64,
+    agentId,
+    tokenId
+  );
+
+  const aad = createGatewayTokenEnvelopeAad(envelope);
+  let plaintextJsonStr: string;
+  try {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, iv);
+    decipher.setAAD(Buffer.from(aad, 'utf8'));
+    decipher.setAuthTag(authTag);
+    plaintextJsonStr = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  } catch (err: any) {
+    throw new AamarvaError(`Failed to decrypt Gateway token envelope: ${err.message}`, {
+      code: 'GATEWAY_ENVELOPE_DECRYPTION_FAILED',
+      cause: err,
+    });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(plaintextJsonStr);
+  } catch (err: any) {
+    throw new AamarvaError(`Gateway token envelope plaintext is not valid JSON: ${err.message}`, {
+      code: 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT',
+      cause: err,
+    });
+  }
+
+  if (!isPlainRecord(parsed)) {
+    throw new AamarvaError('Gateway token envelope plaintext must be a JSON object.', {
+      code: 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT',
+    });
+  }
+
+  if (typeof parsed.v !== 'number' || !Number.isInteger(parsed.v) || parsed.v !== GATEWAY_ENVELOPE_PLAINTEXT_VERSION) {
+    throw new AamarvaError(`Gateway token plaintext version mismatch: got ${String(parsed.v)}.`, {
+      code: 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT',
+    });
+  }
+
+  const ptTokenId = assertExactNonEmptyString(parsed.tokenId, 'plaintext.tokenId', 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT');
+  const ptToken = typeof parsed.token === 'string' && parsed.token.trim().length > 0 ? parsed.token : '';
+  if (!ptToken) {
+    throw new AamarvaError('Gateway token plaintext is missing a non-empty bearer token.', {
+      code: 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT',
+    });
+  }
+  const ptAgentId = assertExactNonEmptyString(parsed.agentId, 'plaintext.agentId', 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT');
+  const ptAccountId = assertExactNonEmptyString(parsed.accountId, 'plaintext.accountId', 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT');
+  const ptGatewayId = assertExactNonEmptyString(parsed.gatewayId, 'plaintext.gatewayId', 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT');
+  const ptMcpServerId = assertExactNonEmptyString(parsed.mcpServerId, 'plaintext.mcpServerId', 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT');
+  const ptExpiresAtMs = parseStrictIsoTimestampMs(parsed.expiresAt, 'plaintext.expiresAt');
+
+  if (ptTokenId !== tokenId) {
+    throw new AamarvaError('Gateway token plaintext tokenId does not match outer envelope.', {
+      code: 'GATEWAY_ENVELOPE_MISMATCH',
+    });
+  }
+  if (ptAgentId !== agentId || normalizeAgentId(ptAgentId) !== normalizeAgentId(expectedAgentId)) {
+    throw new AamarvaError('Gateway token plaintext agentId does not match outer envelope or expected agent context.', {
+      code: 'GATEWAY_AGENT_MISMATCH',
+    });
+  }
+  if (ptAccountId !== accountId || ptAccountId !== expectedAccountId) {
+    throw new AamarvaError('Gateway token plaintext accountId does not match outer envelope or expected account context.', {
+      code: 'GATEWAY_ACCOUNT_MISMATCH',
+    });
+  }
+  if (ptGatewayId !== gatewayId) {
+    throw new AamarvaError('Gateway token plaintext gatewayId does not match outer envelope.', {
+      code: 'GATEWAY_ENVELOPE_MISMATCH',
+    });
+  }
+  if (ptMcpServerId !== mcpServerId) {
+    throw new AamarvaError('Gateway token plaintext mcpServerId does not match outer envelope.', {
+      code: 'GATEWAY_ENVELOPE_MISMATCH',
+    });
+  }
+  if (parsed.expiresAt !== envelope.expiresAt) {
+    throw new AamarvaError('Gateway token plaintext expiresAt does not match outer envelope.', {
+      code: 'GATEWAY_ENVELOPE_MISMATCH',
+    });
+  }
+  if (ptExpiresAtMs <= Date.now()) {
+    throw new AamarvaError('Decrypted Gateway token has expired.', {
+      code: 'GATEWAY_TOKEN_EXPIRED',
+    });
+  }
+
+  if (!Array.isArray(parsed.allowedTools) || parsed.allowedTools.length === 0) {
+    throw new AamarvaError('Gateway token plaintext allowedTools must be a non-empty array of tool names.', {
+      code: 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT',
+    });
+  }
+  const allowedTools: string[] = [];
+  for (const item of parsed.allowedTools) {
+    if (typeof item !== 'string' || item.length === 0 || item !== item.trim()) {
+      throw new AamarvaError('Gateway token plaintext allowedTools contains invalid tool entry.', {
+        code: 'GATEWAY_ENVELOPE_INVALID_PLAINTEXT',
+      });
+    }
+    allowedTools.push(item);
+  }
+
+  if (options.toolName !== undefined) {
+    const requestedTool = typeof options.toolName === 'string' ? options.toolName.trim() : '';
+    if (!requestedTool || !allowedTools.includes(requestedTool)) {
+      throw new AamarvaError(
+        `Tool "${requestedTool || String(options.toolName)}" is not permitted by decrypted Gateway token allowedTools.`,
+        { code: 'GATEWAY_TOOL_UNAUTHORIZED' }
+      );
+    }
+  }
+
+  return {
+    v: parsed.v,
+    tokenId: ptTokenId,
+    token: ptToken,
+    agentId: ptAgentId,
+    accountId: ptAccountId,
+    gatewayId: ptGatewayId,
+    mcpServerId: ptMcpServerId,
+    expiresAt: parsed.expiresAt as string,
+    allowedTools,
+  };
+}
+
 
 

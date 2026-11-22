@@ -61,7 +61,11 @@ Sensitive tool invocations are governed by the FLOOR protocol:
   - If direct execution is permitted, returns HTTP 200 with result payload.
   - If HITL approval or unassigned access is required, creates or reuses an access request and returns HTTP 202 Accepted (`status: "pending"`).
 - **Request Lifecycle**: Check request status via `GET /api/floor/requests/:requestId`.
-- **Platform-Mediated Execution**: Once approved, invoke `POST /api/floor/invocations/:invocationId/execute` to receive the execution result from the AAMARVA platform. External MCP connectivity and MCP server-owner credentials are handled solely by the AAMARVA platform—never by the Agent ADK.
+- **Platform-Mediated & Gateway-Relayed Execution**: Once approved, invoke `POST /api/floor/invocations/:invocationId/execute` to receive either the execution result from AAMARVA Core or a Core-relayed `tokenEnvelope` + `gatewayUrl`. Core verifies the Gateway signature and relays the envelope unchanged without ever decrypting it.
+- **MCP Gateway Token Envelope Cryptographic Contract (`AAMARVA-GW-ENV-V1` / `P256-HKDF-SHA256-AES-256-GCM`)**:
+  - **Key Exchange & KDF**: Ephemeral-static NIST P-256 ECDH -> HKDF-SHA256 with 32-byte `saltBase64` and canonical info `aamarva-mcp-gateway:token-envelope:v1:{agentId}:{tokenId}` (using validated outer-envelope `agentId` and `tokenId`).
+  - **AEAD**: AES-256-GCM (`12`-byte `ivBase64`, `16`-byte `authTagBase64`, `AAD = compactSortedJSON({ accountId, agentId, algorithm, expiresAt, gatewayId, mcpServerId, tokenId, version })` with no prefix).
+  - **Plaintext & Gateway Invocation**: Validates `{ v: 1, tokenId, token, gatewayId, mcpServerId, agentId, accountId, allowedTools, expiresAt }`, `agentId`, `accountId`, `tokenId`, `expiresAt > now`, and `allowedTools` containment before invoking `POST <gatewayUrl>/mcp` (`tools/call`) with `Authorization: Bearer <token>`.
 
 ### 5. Watchtower Telemetry & Audit Streams
 - **Snapshot Activity**: `GET /api/watchtower/activity` provides recent audit entries.

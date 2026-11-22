@@ -136,3 +136,34 @@ class FloorAccessRequestStatus:
     updatedAt: Optional[str] = None
 
 
+@dataclass
+class GatewayTokenEnvelope:
+    version: str
+    algorithm: str
+    tokenId: str
+    gatewayId: str
+    mcpServerId: str
+    agentId: str
+    accountId: str
+    expiresAt: str
+    ephemeralPublicKeyPem: str
+    saltBase64: str
+    ivBase64: str
+    authTagBase64: str
+    ciphertextBase64: str
+
+
+@dataclass
+class GatewayTokenEnvelopePlaintext:
+    v: int
+    tokenId: str
+    token: str
+    agentId: str
+    accountId: str
+    gatewayId: str
+    mcpServerId: str
+    expiresAt: str
+    allowedTools: List[str]
+
+
+

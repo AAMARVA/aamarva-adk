@@ -2,8 +2,14 @@
 import sys
 import json
 import base64
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization
+try:
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    ec = None
+    serialization = None
+    HAS_CRYPTOGRAPHY = False
 
 # Add python directory to sys.path
 import os
@@ -22,6 +28,10 @@ from aamarva.crypto import (
     decrypt_cluster_message,
     sign_cluster_message_v2,
     verify_cluster_message_signature_v2,
+    derive_gateway_envelope_key,
+    decrypt_gateway_token_envelope,
+    build_gateway_token_envelope_hkdf_info,
+    create_gateway_token_envelope_aad,
 )
 from aamarva.errors import AamarvaError
 
@@ -34,6 +44,9 @@ def main():
     cmd = sys.argv[1]
 
     if cmd == "gen-key":
+        if not HAS_CRYPTOGRAPHY:
+            print(json.dumps({"error": "cryptography package required for gen-key"}))
+            sys.exit(1)
         priv = ec.generate_private_key(ec.SECP256R1())
         priv_pem = priv.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -232,6 +245,53 @@ def main():
             print(json.dumps({"success": True, "signatureValid": sig_valid, "plaintext": plaintext}))
         except AamarvaError as err:
             print(json.dumps({"success": False, "error": str(err), "code": err.code}))
+
+    elif cmd == "gateway-derive-key":
+        try:
+            derived_key = derive_gateway_envelope_key(
+                recipient_private_key=input_data["privateKeyPem"],
+                ephemeral_public_key_pem=input_data["ephemeralPublicKeyPem"],
+                salt_base64=input_data["saltBase64"],
+                agent_id=input_data["agentId"],
+                token_id=input_data["tokenId"],
+            )
+            hkdf_info = build_gateway_token_envelope_hkdf_info(
+                input_data["agentId"],
+                input_data["tokenId"],
+            )
+            print(json.dumps({
+                "success": True,
+                "keyHex": derived_key.hex(),
+                "hkdfInfo": hkdf_info,
+            }))
+        except AamarvaError as err:
+            print(json.dumps({"success": False, "error": str(err), "code": err.code}))
+        except Exception as err:
+            print(json.dumps({"success": False, "error": str(err), "code": "UNKNOWN_ERROR"}))
+
+    elif cmd == "gateway-decrypt":
+        try:
+            aad_str = create_gateway_token_envelope_aad(input_data["envelope"])
+            plaintext = decrypt_gateway_token_envelope(
+                envelope=input_data["envelope"],
+                recipient_private_key=input_data["privateKeyPem"],
+                expected_agent_id=input_data["expectedAgentId"],
+                expected_account_id=input_data["expectedAccountId"],
+                expected_token_id=input_data.get("expectedTokenId"),
+                expected_gateway_id=input_data.get("expectedGatewayId"),
+                expected_mcp_server_id=input_data.get("expectedMcpServerId"),
+                tool_name=input_data.get("toolName"),
+            )
+            print(json.dumps({
+                "success": True,
+                "plaintext": plaintext,
+                "aadString": aad_str,
+                "aadHex": aad_str.encode("utf-8").hex(),
+            }))
+        except AamarvaError as err:
+            print(json.dumps({"success": False, "error": str(err), "code": err.code}))
+        except Exception as err:
+            print(json.dumps({"success": False, "error": str(err), "code": "UNKNOWN_ERROR"}))
 
     else:
         print(json.dumps({"error": f"Unknown command {cmd}"}))

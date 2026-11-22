@@ -40,6 +40,10 @@ import {
   GetClusterKeyDistributionOptions,
   AgentE2eeKeyResponse,
   ClusterKeyDistributionResponse,
+  GatewayTokenEnvelope,
+  GatewayTokenEnvelopePlaintext,
+  DecryptGatewayTokenEnvelopeOptions,
+  ExecuteGatewayMcpToolOptions,
 } from './types.js';
 import {
   normalizeAgent,
@@ -67,7 +71,12 @@ import {
   decryptClusterMessagePayload,
   signClusterMessageV2,
   verifyClusterMessageSignatureV2,
+  decryptGatewayTokenEnvelope as decryptGatewayEnvelopeCrypto,
 } from './crypto.js';
+import {
+  executeGatewayMcpTool as executeGatewayMcpToolImpl,
+  type GatewayMcpCallResult,
+} from './mcp-executor.js';
 import { AamarvaValidationError, AamarvaError, AamarvaForbiddenError } from './errors.js';
 
 interface CachedClusterKeyEntry {
@@ -80,6 +89,7 @@ interface CachedClusterKeyEntry {
 
 export class Aamarva {
   public readonly http: HttpClient;
+  private configuredAccountId?: string;
   private registeredAgentId?: string;
   private registeredKeyFingerprint?: string;
   private isRegisteringKey = false;
@@ -88,7 +98,16 @@ export class Aamarva {
 
   constructor(config: AamarvaConfig = {}) {
     this.http = new HttpClient(config);
+    this.configuredAccountId = config.accountId?.trim() || undefined;
     this.http.setOnAuthSuccess(() => this.registerPublicKey());
+  }
+
+  public setAccountId(accountId?: string): void {
+    this.configuredAccountId = accountId?.trim() || undefined;
+  }
+
+  public getAccountId(): string | undefined {
+    return this.configuredAccountId;
   }
 
   /**
@@ -2774,9 +2793,40 @@ export class Aamarva {
       }
     }
 
-    // Require platform-mediated execution result
+    // Support Core-relayed encrypted MCP Gateway token envelope or platform-mediated result
     const hasResult = ('result' in data && data.result !== undefined) || ('output' in data && data.output !== undefined);
     if (!hasResult) {
+      if (isPlainObject(data.tokenEnvelope) && typeof data.gatewayUrl === 'string' && data.gatewayUrl.trim()) {
+        const resolvedAccount =
+          options.accountId?.trim() ||
+          this.configuredAccountId ||
+          (typeof data.accountId === 'string' ? data.accountId.trim() : '');
+        const resolvedAgent = expectedAgentId || (typeof data.agentId === 'string' ? data.agentId.trim() : '');
+        const resolvedToolName =
+          (toolObj && typeof toolObj.name === 'string' && toolObj.name.trim()) ||
+          (tool.name && tool.name.trim()) ||
+          cleanToolId;
+
+        const gwRes = await this.executeGatewayMcpTool({
+          gatewayUrl: data.gatewayUrl,
+          tokenEnvelope: data.tokenEnvelope as unknown as GatewayTokenEnvelope,
+          toolName: resolvedToolName,
+          arguments: submittedArgs,
+          expectedAgentId: resolvedAgent,
+          expectedAccountId: resolvedAccount,
+          expectedGatewayId: typeof data.gatewayId === 'string' ? data.gatewayId.trim() : undefined,
+          expectedMcpServerId: typeof data.mcpServerId === 'string' ? data.mcpServerId.trim() : undefined,
+        });
+
+        return {
+          status: rawStatus === 'executed' || rawStatus === 'completed' ? rawStatus : 'executed',
+          invocationId,
+          toolId: cleanToolId,
+          result: gwRes.result,
+          ...(typeof data.message === 'string' ? { message: data.message } : {}),
+        };
+      }
+
       throw new AamarvaError('FLOOR execution failed: platform response omitted execution result.', {
         code: 'FLOOR_EXECUTION_FAILED',
       });
@@ -2790,6 +2840,74 @@ export class Aamarva {
       result: executionResult,
       ...(typeof data.message === 'string' ? { message: data.message } : {}),
     };
+  }
+
+  /**
+   * Decrypt a Core-relayed MCP Gateway encrypted token envelope locally using
+   * the Agent's P-256 private key and verify Agent/Account/Gateway context.
+   */
+  public decryptGatewayTokenEnvelope(
+    envelope: GatewayTokenEnvelope,
+    options: Partial<DecryptGatewayTokenEnvelopeOptions> & { privateKey?: unknown; keyEpoch?: number } = {}
+  ): GatewayTokenEnvelopePlaintext {
+    const clientAgentId = (this.http.getTargetAgentId() || this.http.getAgentId() || this.agentId || '').trim();
+    const expectedAgentId = (options.expectedAgentId || clientAgentId).trim();
+    if (!expectedAgentId) {
+      throw new AamarvaValidationError('expectedAgentId is required to decrypt Gateway token envelope.', {
+        code: 'GATEWAY_CONTEXT_INVALID',
+      });
+    }
+    if (clientAgentId && normalizeAgentId(expectedAgentId) !== normalizeAgentId(clientAgentId)) {
+      throw new AamarvaError(
+        `Requested expectedAgentId "${expectedAgentId}" does not match active client agent "${clientAgentId}".`,
+        { code: 'GATEWAY_AGENT_MISMATCH' }
+      );
+    }
+
+    const expectedAccountId = (options.expectedAccountId || this.configuredAccountId || '').trim();
+    if (!expectedAccountId) {
+      throw new AamarvaValidationError('expectedAccountId is required to decrypt Gateway token envelope.', {
+        code: 'GATEWAY_CONTEXT_INVALID',
+      });
+    }
+
+    const privateKey =
+      options.privateKey ?? getLocalIdentityKeyPair(expectedAgentId, options.keyEpoch).privateKey;
+
+    return decryptGatewayEnvelopeCrypto(envelope, privateKey, {
+      expectedAgentId,
+      expectedAccountId,
+      expectedTokenId: options.expectedTokenId,
+      expectedGatewayId: options.expectedGatewayId,
+      expectedMcpServerId: options.expectedMcpServerId,
+      toolName: options.toolName,
+    });
+  }
+
+  /**
+   * Decrypt a Core-relayed MCP Gateway token envelope and invoke the Gateway /mcp
+   * JSON-RPC endpoint using the decrypted bearer token.
+   */
+  public async executeGatewayMcpTool(
+    options: ExecuteGatewayMcpToolOptions
+  ): Promise<GatewayMcpCallResult> {
+    const clientAgentId = (this.http.getTargetAgentId() || this.http.getAgentId() || this.agentId || '').trim();
+    const expectedAgentId = (options.expectedAgentId || clientAgentId).trim();
+    if (clientAgentId && expectedAgentId && normalizeAgentId(expectedAgentId) !== normalizeAgentId(clientAgentId)) {
+      throw new AamarvaError(
+        `Requested expectedAgentId "${expectedAgentId}" does not match active client agent "${clientAgentId}".`,
+        { code: 'GATEWAY_AGENT_MISMATCH' }
+      );
+    }
+
+    const expectedAccountId = (options.expectedAccountId || this.configuredAccountId || '').trim();
+
+    return executeGatewayMcpToolImpl({
+      ...options,
+      expectedAgentId,
+      expectedAccountId,
+      fetch: options.fetch || this.http.getFetch(),
+    });
   }
 
   /**

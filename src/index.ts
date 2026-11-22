@@ -76,5 +76,19 @@ export {
   unwrapClusterKey,
   encryptClusterMessagePayload,
   decryptClusterMessagePayload,
+  GATEWAY_ENVELOPE_VERSION,
+  GATEWAY_ENVELOPE_PLAINTEXT_VERSION,
+  GATEWAY_ENVELOPE_ALGORITHM,
+  GATEWAY_HKDF_INFO_PREFIX,
+  buildGatewayTokenEnvelopeHkdfInfo,
+  createGatewayTokenEnvelopeAad,
+  deriveGatewayEnvelopeKey,
+  decryptGatewayTokenEnvelope,
 } from './crypto.js';
+export {
+  executeGatewayMcpTool,
+  normalizeGatewayMcpUrl,
+  type GatewayMcpCallResult,
+} from './mcp-executor.js';
 export * from './types.js';
+

@@ -81,7 +81,15 @@ FLOOR provides zero-trust governance and Human-in-the-Loop (HITL) authorization 
 1. **Discovery (`GET /api/floor/agent/tools`)**: Agent queries registered tools and its current authorization status (`authorized`, `unauthorized`, `pending`, `revoked`).
 2. **Initial Invocation (`POST /api/floor/tools/:toolId/invoke`)**: If authorized and executed by the platform, returns the tool result directly. If HITL or access approval is required, the platform creates an approval ticket and returns HTTP status `202 Accepted` with a `requestId`.
 3. **Status Verification (`GET /api/floor/requests/:requestId`)**: Agent checks request status until approved (yielding an `invocationId`).
-4. **Platform-Mediated Execution (`POST /api/floor/invocations/:invocationId/execute`)**: Agent requests platform-mediated execution for the approved `invocationId` and receives the execution result from AAMARVA. External MCP server connectivity and owner credentials remain isolated on the AAMARVA platform—never inside the Agent ADK.
+4. **Platform-Mediated Execution (`POST /api/floor/invocations/:invocationId/execute`)**: Agent requests platform-mediated execution for the approved `invocationId`. Core either returns the platform-mediated execution result or relays an end-to-end encrypted MCP Gateway `tokenEnvelope` and `gatewayUrl` (signed by the Gateway and verified by Core; Core never decrypts the bearer token).
+
+### MCP Gateway Encrypted Token Envelope Flow
+
+When an approved tool delegates to an external MCP Gateway:
+1. Agent registers its NIST P-256 (`prime256v1`) public key with Core via `PUT /api/agents/me/e2ee`.
+2. Core requests Gateway token issuance and relays the encrypted `tokenEnvelope` (`version: "AAMARVA-GW-ENV-V1"`, `algorithm: "P256-HKDF-SHA256-AES-256-GCM"`) unchanged.
+3. ADK validates all outer envelope fields (`version`, `algorithm`, `tokenId`, `gatewayId`, `mcpServerId`, `agentId`, `accountId`, `expiresAt`, `ephemeralPublicKeyPem`, 32-byte `saltBase64`, 12-byte `ivBase64`, 16-byte `authTagBase64`, non-empty `ciphertextBase64`), derives the AES-256-GCM key locally using ECDH P-256 + HKDF-SHA256 (`info = "aamarva-mcp-gateway:token-envelope:v1:{agentId}:{tokenId}"`), and authenticates raw compact deterministic alphabetical JSON AAD (`{"accountId":...,"agentId":...,"algorithm":...,"expiresAt":...,"gatewayId":...,"mcpServerId":...,"tokenId":...,"version":...}` with no prefix).
+4. ADK validates decrypted plaintext `{ v: 1, tokenId, token, gatewayId, mcpServerId, agentId, accountId, allowedTools, expiresAt }`, enforces `expectedAgentId`, `expectedAccountId`, `expectedTokenId`, `expectedGatewayId`, `expectedMcpServerId`, strict `expiresAt > now`, outer-vs-plaintext equality, and `allowedTools` containment before dispatching `POST <gatewayUrl>/mcp` JSON-RPC 2.0 `tools/call` with `Authorization: Bearer <token>`.
 
 ---
 
